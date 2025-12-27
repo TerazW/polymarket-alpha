@@ -4,8 +4,10 @@ from sqlalchemy import text
 import sys
 import os
 
-# 添加项目根目录到 path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 添加项目根目录到 Python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from utils.db import get_session
 
@@ -27,21 +29,19 @@ def load_markets():
     try:
         query = text("""
             SELECT 
-                token_id,
-                status,
-                ui,
-                cer,
-                cs,
-                current_price,
-                date
-            FROM daily_metrics
-            WHERE date = (SELECT MAX(date) FROM daily_metrics)
-            ORDER BY 
-                CASE 
-                    WHEN status LIKE '%Informed%' THEN 1
-                    WHEN status LIKE '%Fragmented%' THEN 2
-                    ELSE 3
-                END
+                dm.token_id,
+                m.title as market_name,
+                dm.status,
+                dm.ui,
+                dm.cer,
+                dm.cs,
+                dm.current_price,
+                m.volume_24h,
+                dm.date
+            FROM daily_metrics dm
+            JOIN markets m ON dm.token_id = m.token_id
+            WHERE dm.date = (SELECT MAX(date) FROM daily_metrics)
+            ORDER BY m.volume_24h DESC
         """)
         result = session.execute(query)
         df = pd.DataFrame(result.fetchall(), columns=result.keys())
@@ -60,9 +60,9 @@ try:
     # 状态统计
     col1, col2, col3, col4 = st.columns(4)
     
-    informed_count = len(df[df['status'].str.contains('Informed')])
-    fragmented_count = len(df[df['status'].str.contains('Fragmented')])
-    noisy_count = len(df[df['status'].str.contains('Noisy')])
+    informed_count = len(df[df['status'].str.contains('Informed', na=False)])
+    fragmented_count = len(df[df['status'].str.contains('Fragmented', na=False)])
+    noisy_count = len(df[df['status'].str.contains('Noisy', na=False)])
     
     col1.metric("🟢 Informed", informed_count)
     col2.metric("🟡 Fragmented", fragmented_count)
@@ -83,22 +83,43 @@ try:
     
     # 应用筛选
     if status_filter:
-        mask = df['status'].isin(status_filter)
+        # 移除 emoji 进行匹配
+        filter_keywords = [s.split(' ')[1] for s in status_filter]
+        mask = df['status'].str.contains('|'.join(filter_keywords), na=False)
         df_filtered = df[mask]
     else:
         df_filtered = df
     
     # 显示表格
     st.dataframe(
-        df_filtered[['token_id', 'status', 'ui', 'cs', 'current_price']],
+        df_filtered[['market_name', 'status', 'ui', 'cs', 'current_price']],
         use_container_width=True,
         column_config={
-            "token_id": "Market",
-            "status": "Status",
-            "ui": st.column_config.NumberColumn("UI", format="%.4f"),
-            "cs": st.column_config.NumberColumn("CS", format="%.4f"),
-            "current_price": st.column_config.NumberColumn("Price", format="%.2f%%")
-        }
+            "market_name": st.column_config.TextColumn(
+                "Market",
+                width="large"
+            ),
+            "status": st.column_config.TextColumn(
+                "Status",
+                width="medium"
+            ),
+            "ui": st.column_config.NumberColumn(
+                "UI", 
+                format="%.4f",
+                help="Uncertainty Index"
+            ),
+            "cs": st.column_config.NumberColumn(
+                "CS", 
+                format="%.4f",
+                help="Conviction Score"
+            ),
+            "current_price": st.column_config.NumberColumn(
+                "Price", 
+                format="%.2f%%",
+                help="Current market price"
+            )
+        },
+        hide_index=True
     )
     
     # 状态说明
@@ -113,4 +134,6 @@ try:
     
 except Exception as e:
     st.error(f"Error loading data: {e}")
+    import traceback
+    st.code(traceback.format_exc())
     st.info("Make sure you've run `python jobs/sync.py` first.")

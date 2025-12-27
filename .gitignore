@@ -20,7 +20,7 @@ data/*.db
 .vscode/
 
 # Streamlit
-.streamlit/
+.streamlit/secrets.toml
 
 # OS
 .DS_Store

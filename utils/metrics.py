@@ -1,24 +1,33 @@
-import pandas as pd
-import numpy as np
+"""
+完整版指标计算（使用 Data API 的逐笔成交）
+"""
 from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from collections import defaultdict
 
 def calculate_histogram(trades: List[Dict], tick_size: float = 0.01) -> Dict[float, float]:
     """
     将成交数据转换为价格直方图
+    
+    注意：Data API 的 price 是 0-1，不需要转换
     """
-    histogram = {}
+    histogram = defaultdict(float)
     
     for trade in trades:
-        price = float(trade.get('price', 0))
-        size = float(trade.get('size', 0))
-        
-        # 分箱
-        bin_price = round(price / tick_size) * tick_size
-        bin_price = round(bin_price, 4)
-        
-        histogram[bin_price] = histogram.get(bin_price, 0) + size
+        try:
+            price = float(trade.get('price', 0))
+            size = float(trade.get('size', 0))
+            
+            # 分箱（price 已经是 0-1）
+            bin_price = round(price / tick_size) * tick_size
+            bin_price = round(bin_price, 4)
+            
+            histogram[bin_price] += size
+            
+        except (ValueError, TypeError):
+            continue
     
-    return histogram
+    return dict(histogram)
 
 def calculate_ui(histogram: Dict[float, float]) -> Optional[float]:
     """
@@ -28,14 +37,13 @@ def calculate_ui(histogram: Dict[float, float]) -> Optional[float]:
     if not histogram:
         return None
     
-    # 按成交量排序
     sorted_bins = sorted(histogram.items(), key=lambda x: x[1], reverse=True)
-    
     total_volume = sum(histogram.values())
+    
     if total_volume == 0:
         return None
     
-    # 找 70% 成交量区间
+    # 70% 成交量区间
     target_volume = total_volume * 0.70
     cumulative = 0
     consensus_band_prices = []
@@ -54,7 +62,7 @@ def calculate_ui(histogram: Dict[float, float]) -> Optional[float]:
     band_width = va_high - va_low
     mid_probability = (va_high + va_low) / 2
     
-    # 边界情况处理
+    # 边界情况
     if mid_probability < 0.10 or mid_probability > 0.90:
         return None
     
@@ -62,26 +70,63 @@ def calculate_ui(histogram: Dict[float, float]) -> Optional[float]:
     
     return ui
 
+def calculate_cs(trades: List[Dict]) -> Optional[float]:
+    """
+    计算 Conviction Score
+    基于 buy/sell 方向性
+    """
+    if not trades:
+        return None
+    
+    buy_volume = 0
+    sell_volume = 0
+    
+    for trade in trades:
+        try:
+            size = float(trade.get('size', 0))
+            side = trade.get('side', '')
+            
+            if side == 'BUY':
+                buy_volume += size
+            elif side == 'SELL':
+                sell_volume += size
+                
+        except (ValueError, TypeError):
+            continue
+    
+    total_volume = buy_volume + sell_volume
+    
+    if total_volume == 0:
+        return None
+    
+    # 单边性强度
+    volume_delta = abs(buy_volume - sell_volume)
+    cs = volume_delta / total_volume
+    
+    return cs
+
 def calculate_cer(
     band_width_now: float,
-    band_width_7d_ago: float,
+    band_width_7d_ago: Optional[float],
     current_price: float,
     days_remaining: int
 ) -> Optional[float]:
     """
-    计算 Convergence Health (CER)
+    计算 Convergence Health
     CER = Actual Convergence Rate / Expected Convergence Rate
     """
-    # 边界情况
     if days_remaining < 3:
         return None
-    if current_price > 95 or current_price < 5:
+    if current_price > 0.95 or current_price < 0.05:
+        return None
+    if band_width_7d_ago is None:
         return None
     
-    # Expected Convergence Rate
-    ecr = (100 - current_price) / days_remaining
+    # Expected rate
+    distance_to_certainty = min(current_price, 1 - current_price)
+    ecr = distance_to_certainty / days_remaining
     
-    # Actual Convergence Rate
+    # Actual rate
     acr = (band_width_7d_ago - band_width_now) / 7
     
     # CER
@@ -89,71 +134,62 @@ def calculate_cer(
     
     return cer
 
-def calculate_cs_simple(histogram: Dict[float, float], current_price: float) -> Optional[float]:
-    """
-    计算 Conviction Score (简化版)
-    CS = |Above - Below| / Total
-    """
-    if not histogram:
-        return None
-    
-    above = sum(v for p, v in histogram.items() if p > current_price)
-    below = sum(v for p, v in histogram.items() if p < current_price)
-    total = above + below
-    
-    if total == 0:
-        return None
-    
-    cs = abs(above - below) / total
-    
-    return cs
-
-def determine_status(ui: Optional[float], cer: Optional[float], cs: Optional[float]) -> str:
-    """
-    判定市场状态
-    优先级：🔴 > 🟢 > 🟡
-    """
-    # 如果任何指标为 None，返回 Unknown
+def determine_status(
+    ui: Optional[float],
+    cer: Optional[float],
+    cs: Optional[float]
+) -> str:
+    """判定市场状态"""
     if ui is None and cer is None and cs is None:
         return "⚪ Unknown"
     
-    # 🔴 Noisy（最高优先级）
+    # 🔴 Noisy
     if (ui is not None and ui >= 0.50) or \
        (cer is not None and cer < 0.4) or \
        (cs is not None and cs < 0.15):
         return "🔴 Noisy"
     
-    # 🟢 Informed（必须全部满足）
+    # 🟢 Informed
     if (ui is not None and ui < 0.30) and \
        (cer is not None and cer >= 0.8) and \
        (cs is not None and cs >= 0.35):
         return "🟢 Informed"
     
-    # 🟡 Fragmented（默认）
+    # 🟡 Fragmented
     return "🟡 Fragmented"
 
-# 测试
-if __name__ == "__main__":
-    # 测试数据
-    test_histogram = {
-        0.45: 1000,
-        0.46: 1500,
-        0.47: 2000,
-        0.48: 2500,
-        0.49: 3000,
-        0.50: 3500,
-        0.51: 3000,
-        0.52: 2500,
-        0.53: 2000,
-        0.54: 1500,
-        0.55: 1000
-    }
+def filter_trades_by_time(trades: List[Dict], hours: int = 24) -> List[Dict]:
+    """
+    筛选指定时间内的成交
     
-    ui = calculate_ui(test_histogram)
-    print(f"UI: {ui:.4f}" if ui else "UI: None")
+    注意：timestamp 是秒（不是毫秒）
+    """
+    cutoff = datetime.now() - timedelta(hours=hours)
+    cutoff_ts = int(cutoff.timestamp())  # 秒时间戳
     
-    cs = calculate_cs_simple(test_histogram, 0.50)
-    print(f"CS: {cs:.4f}" if cs else "CS: None")
+    return [t for t in trades if t.get('timestamp', 0) >= cutoff_ts]
+
+def get_band_width(histogram: dict) -> Optional[float]:
+    """从直方图计算 band width"""
+    if not histogram:
+        return None
     
-    status = determine_status(ui, 0.75, cs)
-    print(f"Status: {status}")
+    sorted_bins = sorted(histogram.items(), key=lambda x: x[1], reverse=True)
+    total_volume = sum(histogram.values())
+    
+    if total_volume == 0:
+        return None
+    
+    target = total_volume * 0.70
+    cumulative = 0
+    prices = []
+    
+    for price, volume in sorted_bins:
+        cumulative += volume
+        prices.append(price)
+        if cumulative >= target:
+            break
+    
+    if prices:
+        return max(prices) - min(prices)
+    return None

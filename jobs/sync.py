@@ -1,155 +1,227 @@
 import os
 import sys
-from datetime import datetime, timedelta
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+from datetime import datetime
 from sqlalchemy import text
 
-# 添加项目根目录到 path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.db import DATABASE_URL
+print("🔍 sync.py DATABASE_URL:", DATABASE_URL)
+print("=" * 50)
 
 from utils.polymarket_api import PolymarketAPI
-from utils.metrics import *
+from utils.metrics import (
+    calculate_histogram,
+    calculate_ui,
+    calculate_cs,
+    calculate_cer,
+    determine_status,
+    filter_trades_by_time,
+    get_band_width
+)
 from utils.db import get_session, init_db
 
-def sync_markets(api: PolymarketAPI, top_n: int = 50):
-    """
-    同步市场数据
-    1. 获取市场列表
-    2. 对每个市场：拉取成交、计算指标、存储
-    """
+
+def sync_markets(api: PolymarketAPI, top_n: int = 10):
+    """同步市场数据（使用 Gamma API）"""
     session = get_session()
     
     try:
-        # 1. 获取市场列表
-        print(f"Fetching top {top_n} markets...")
-        markets = api.get_markets(limit=200)
+        print(f"\n{'='*60}")
+        print(f"Market Sensemaking - Data Sync")
+        print(f"{'='*60}\n")
         
-        # 按 24h 成交量排序（如果有的话）
-        # 这里简化处理，实际需要从 API 获取 volume
-        markets = markets[:top_n]
+        # Step 1: 获取开放市场
+        print(f"📊 Step 1: Fetching open markets from Gamma API...")
+        markets = api.get_markets(limit=200, min_volume_24h=100)
         
-        print(f"Processing {len(markets)} markets...")
+        if not markets:
+            print("❌ No markets fetched")
+            return
         
-        for idx, market in enumerate(markets, 1):
+        extracted = api.extract_market_data(markets)
+        
+        if not extracted:
+            print("❌ No markets extracted")
+            return
+        
+        # 按成交量排序，取前 N
+        extracted.sort(key=lambda x: x['volume_24h'], reverse=True)
+        extracted = extracted[:top_n]
+        
+        print(f"✅ Processing top {len(extracted)} markets\n")
+        
+        # Step 2: 处理每个市场
+        print(f"🔄 Step 2: Analyzing markets...\n")
+        
+        processed_count = 0
+        
+        for idx, market in enumerate(extracted, 1):
             try:
-                # 提取信息（根据实际 API 返回调整）
-                token_id = market.get('tokens', [{}])[0].get('token_id') if market.get('tokens') else None
-                if not token_id:
+                condition_id = market['condition_id']
+                token_id = market['token_id']
+                question = market['question']
+                current_price = market['price']
+                volume_24h = market['volume_24h']
+                liquidity = market['liquidity']
+                
+                print(f"[{idx}/{len(extracted)}] {question[:60]}...")
+                
+                # 计算剩余天数
+                if market['end_date']:
+                    try:
+                        end_date = datetime.fromisoformat(
+                            market['end_date'].replace('Z', '+00:00')
+                        )
+                        days_remaining = max(1, (end_date.date() - datetime.now().date()).days)
+                    except:
+                        days_remaining = 30
+                else:
+                    days_remaining = 30
+                
+                # 获取成交数据
+                print(f"  📥 Fetching trades...")
+                market_trades = api.get_trades_for_market(condition_id, limit=5000)
+                
+                if not market_trades:
+                    print(f"  ⚠️  No trades, skipping...\n")
                     continue
                 
-                market_id = market.get('condition_id', '')
-                title = market.get('question', 'Unknown')
+                trades_24h = filter_trades_by_time(market_trades, hours=24)
                 
-                print(f"\n[{idx}/{len(markets)}] {title[:50]}...")
+                print(f"  📈 Trades: {len(market_trades)} total, {len(trades_24h)} in 24h")
                 
-                # 2. 获取成交数据
-                trades_7d = api.get_trades(token_id, limit=5000)
-                if not trades_7d:
-                    print("  ⚠️  No trades data")
+                # 计算指标
+                histogram_all = calculate_histogram(market_trades)
+                histogram_24h = calculate_histogram(trades_24h)
+                
+                if not histogram_all:
+                    print(f"  ⚠️  No histogram, skipping...\n")
                     continue
                 
-                # 3. 计算直方图
-                histogram_7d = calculate_histogram(trades_7d)
-                histogram_24h = calculate_histogram(
-                    [t for t in trades_7d if is_within_24h(t)]
-                )
+                ui = calculate_ui(histogram_all)
+                cs = calculate_cs(trades_24h) if trades_24h else None
                 
-                # 4. 计算指标
-                ui = calculate_ui(histogram_7d)
+                band_width_now = get_band_width(histogram_all)
+                band_width_7d_ago = get_band_width_7d_ago(session, token_id)
                 
-                # CER 需要历史数据，这里简化处理
-                # 实际应该从数据库读取 7 天前的数据
-                cer = None  # 暂时设为 None
+                cer = calculate_cer(
+                    band_width_now,
+                    band_width_7d_ago,
+                    current_price,
+                    days_remaining
+                ) if band_width_now and band_width_7d_ago else None
                 
-                current_price = get_current_price(trades_7d)
-                cs = calculate_cs_simple(histogram_24h, current_price)
-                
-                # 5. 判定状态
                 status = determine_status(ui, cer, cs)
+
+                ui_str = f"{ui:.3f}" if ui is not None else "N/A"
+                cs_str = f"{cs:.3f}" if cs is not None else "N/A"
+                cer_str = f"{cer:.3f}" if cer is not None else "N/A"
                 
-                print(f"  UI: {ui:.4f if ui else 'N/A'}")
-                print(f"  CS: {cs:.4f if cs else 'N/A'}")
-                print(f"  Status: {status}")
+                print(f"  💰 Price: {current_price*100:.1f}% | Vol: ${volume_24h:,.0f}")
+                print(f"  📊 UI: {ui_str} | CS: {cs_str} | CER: {cer_str}")
+                print(f"  {status}\n")
                 
-                # 6. 存储到数据库
-                save_daily_metrics(
-                    session=session,
-                    token_id=token_id,
-                    ui=ui,
-                    cer=cer,
-                    cs=cs,
-                    status=status,
-                    current_price=current_price
+                # 保存
+                save_metrics(
+                    session, token_id, condition_id, question,
+                    current_price * 100, volume_24h,
+                    ui, cer, cs, status, days_remaining, band_width_now
                 )
+                
+                processed_count += 1
                 
             except Exception as e:
-                print(f"  ❌ Error processing market: {e}")
+                print(f"  ❌ Error: {e}\n")
+                import traceback
+                traceback.print_exc()
                 continue
         
         session.commit()
-        print(f"\n✅ Sync completed: {len(markets)} markets")
+        
+        print(f"\n{'='*60}")
+        print(f"✅ Sync completed: {processed_count} markets saved!")
+        print(f"{'='*60}\n")
         
     except Exception as e:
-        print(f"❌ Sync failed: {e}")
+        print(f"\n❌ Sync failed: {e}")
+        import traceback
+        traceback.print_exc()
         session.rollback()
     finally:
         session.close()
 
-def is_within_24h(trade: dict) -> bool:
-    """判断成交是否在 24 小时内"""
+def get_band_width_7d_ago(session, token_id):
+    """获取 7 天前的 band width"""
     try:
-        timestamp = trade.get('timestamp') or trade.get('created_at')
-        if not timestamp:
-            return False
+        query = text("""
+            SELECT va_high, va_low
+            FROM daily_metrics 
+            WHERE token_id = :token_id 
+            AND date = DATE('now', '-7 days')
+        """)
+        result = session.execute(query, {'token_id': token_id}).fetchone()
         
-        # 解析时间（根据实际格式调整）
-        trade_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-        return datetime.now() - trade_time < timedelta(hours=24)
+        if result and result[0] and result[1]:
+            return float(result[0]) - float(result[1])
+        return None
     except:
-        return False
+        return None
 
-def get_current_price(trades: list) -> float:
-    """获取最新价格"""
-    if not trades:
-        return 0.5
-    
-    # 假设最新的在前面
-    return float(trades[0].get('price', 0.5))
-
-def save_daily_metrics(session, token_id, ui, cer, cs, status, current_price):
-    """保存每日指标"""
+def save_metrics(session, token_id, condition_id, question, 
+                 current_price, volume_24h, ui, cer, cs, status, 
+                 days_remaining, band_width):
+    """保存指标到数据库"""
     today = datetime.now().date()
     
-    # 插入或更新
-    query = text("""
-        INSERT INTO daily_metrics 
-        (token_id, date, ui, cer, cs, status, current_price)
-        VALUES 
-        (:token_id, :date, :ui, :cer, :cs, :status, :current_price)
-        ON CONFLICT(token_id, date) DO UPDATE SET
-            ui = :ui,
-            cer = :cer,
-            cs = :cs,
-            status = :status,
-            current_price = :current_price
-    """)
-    
-    session.execute(query, {
-        'token_id': token_id,
-        'date': today,
-        'ui': ui,
-        'cer': cer,
-        'cs': cs,
-        'status': status,
-        'current_price': current_price
-    })
+    try:
+        session.execute(text("""
+            INSERT OR REPLACE INTO markets 
+            (token_id, market_id, title, current_price, volume_24h, updated_at)
+            VALUES (:tid, :mid, :title, :price, :vol, :now)
+        """), {
+            'tid': token_id,
+            'mid': condition_id,
+            'title': question,
+            'price': current_price / 100,
+            'vol': volume_24h,
+            'now': datetime.now()
+        })
+        
+        if band_width:
+            va_high = current_price + (band_width * 50)
+            va_low = current_price - (band_width * 50)
+        else:
+            va_high = None
+            va_low = None
+        
+        session.execute(text("""
+            INSERT OR REPLACE INTO daily_metrics 
+            (token_id, date, ui, cer, cs, status, current_price, days_to_expiry, va_high, va_low)
+            VALUES (:tid, :date, :ui, :cer, :cs, :status, :price, :days, :vah, :val)
+        """), {
+            'tid': token_id,
+            'date': today,
+            'ui': ui,
+            'cer': cer,
+            'cs': cs,
+            'status': status,
+            'price': current_price,
+            'days': days_remaining,
+            'vah': va_high,
+            'val': va_low
+        })
+        
+    except Exception as e:
+        print(f"  ⚠️  DB error: {e}")
+        raise
 
-# 主函数
 if __name__ == "__main__":
-    # 确保数据库已初始化
+    print("Initializing...")
     init_db()
     
-    # 创建 API 实例
     api = PolymarketAPI()
+    sync_markets(api, top_n=10)
     
-    # 同步数据（先测试 5 个市场）
-    sync_markets(api, top_n=5)
+    print("\n💡 Run 'streamlit run app/Home.py' to see results!\n")
