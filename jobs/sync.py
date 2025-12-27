@@ -172,14 +172,21 @@ def get_band_width_7d_ago(session, token_id):
 def save_metrics(session, token_id, condition_id, question, 
                  current_price, volume_24h, ui, cer, cs, status, 
                  days_remaining, band_width):
-    """保存指标到数据库"""
+    """保存指标到数据库（PostgreSQL 兼容版本）"""
     today = datetime.now().date()
     
     try:
+        # 使用 PostgreSQL 的 ON CONFLICT 语法
         session.execute(text("""
-            INSERT OR REPLACE INTO markets 
+            INSERT INTO markets 
             (token_id, market_id, title, current_price, volume_24h, updated_at)
             VALUES (:tid, :mid, :title, :price, :vol, :now)
+            ON CONFLICT (token_id) DO UPDATE SET
+                market_id = EXCLUDED.market_id,
+                title = EXCLUDED.title,
+                current_price = EXCLUDED.current_price,
+                volume_24h = EXCLUDED.volume_24h,
+                updated_at = EXCLUDED.updated_at
         """), {
             'tid': token_id,
             'mid': condition_id,
@@ -197,9 +204,18 @@ def save_metrics(session, token_id, condition_id, question,
             va_low = None
         
         session.execute(text("""
-            INSERT OR REPLACE INTO daily_metrics 
+            INSERT INTO daily_metrics 
             (token_id, date, ui, cer, cs, status, current_price, days_to_expiry, va_high, va_low)
             VALUES (:tid, :date, :ui, :cer, :cs, :status, :price, :days, :vah, :val)
+            ON CONFLICT (token_id, date) DO UPDATE SET
+                ui = EXCLUDED.ui,
+                cer = EXCLUDED.cer,
+                cs = EXCLUDED.cs,
+                status = EXCLUDED.status,
+                current_price = EXCLUDED.current_price,
+                days_to_expiry = EXCLUDED.days_to_expiry,
+                va_high = EXCLUDED.va_high,
+                va_low = EXCLUDED.va_low
         """), {
             'tid': token_id,
             'date': today,
