@@ -131,6 +131,7 @@ def sync_markets(api: PolymarketAPI, top_n: int = 10):
                 )
                 
                 processed_count += 1
+                session.commit()
                 
             except Exception as e:
                 print(f"  ❌ Error: {e}\n")
@@ -138,7 +139,6 @@ def sync_markets(api: PolymarketAPI, top_n: int = 10):
                 traceback.print_exc()
                 continue
         
-        session.commit()
         
         print(f"\n{'='*60}")
         print(f"✅ Sync completed: {processed_count} markets saved!")
