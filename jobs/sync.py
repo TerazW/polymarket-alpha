@@ -5,6 +5,8 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 from datetime import datetime
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+import traceback
 
 from utils.db import DATABASE_URL
 print("🔍 sync.py DATABASE_URL:", DATABASE_URL)
@@ -124,19 +126,18 @@ def sync_markets(api: PolymarketAPI, top_n: int = 10):
                 print(f"  {status}\n")
                 
                 # 保存
-                save_metrics(
+                # 保存（save_metrics 内部会 commit/rollback）
+                success = save_metrics(
                     session, token_id, condition_id, question,
                     current_price * 100, volume_24h,
                     ui, cer, cs, status, days_remaining, band_width_now
                 )
                 
-                session.commit()  # ✅ 每个市场成功后立即提交
-                processed_count += 1
+                if success:
+                    processed_count += 1
                 
             except Exception as e:
-                session.rollback()  # ✅ 失败后回滚，让下一个市场能继续
-                print(f"  ❌ Error: {e}\n")
-                import traceback
+                print(f"  ❌ Error processing market: {e}\n")
                 traceback.print_exc()
                 continue
         
@@ -159,7 +160,7 @@ def get_band_width_7d_ago(session, token_id):
             SELECT va_high, va_low
             FROM daily_metrics 
             WHERE token_id = :token_id 
-            AND date = DATE('now', '-7 days')
+            AND date = (CURRENT_DATE - INTERVAL '7 days')::date
         """)
         result = session.execute(query, {'token_id': token_id}).fetchone()
         
@@ -229,9 +230,13 @@ def save_metrics(session, token_id, condition_id, question,
             'val': va_low
         })
         
-    except Exception as e:
+        session.commit()
+        return True
+    except SQLAlchemyError as e:
+        session.rollback()
         print(f"  ⚠️  DB error: {e}")
-        raise
+        traceback.print_exc()
+        return False
 
 if __name__ == "__main__":
     print("Initializing...")
