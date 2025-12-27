@@ -130,15 +130,15 @@ def sync_markets(api: PolymarketAPI, top_n: int = 10):
                     ui, cer, cs, status, days_remaining, band_width_now
                 )
                 
+                session.commit()  # ✅ 每个市场成功后立即提交
                 processed_count += 1
-                session.commit()
                 
             except Exception as e:
+                session.rollback()  # ✅ 失败后回滚，让下一个市场能继续
                 print(f"  ❌ Error: {e}\n")
                 import traceback
                 traceback.print_exc()
                 continue
-        
         
         print(f"\n{'='*60}")
         print(f"✅ Sync completed: {processed_count} markets saved!")
