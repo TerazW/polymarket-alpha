@@ -26,14 +26,13 @@ from utils.metrics import (
 from utils.db import get_session, init_db
 
 
-def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = True, retry_failed: bool = True):
+def sync_markets(api: PolymarketAPI, top_n: int = 100, retry_failed: bool = True):
     """
-    同步市场数据
+    同步市场数据（使用 Gamma API）
     
     Args:
         api: PolymarketAPI 实例
         top_n: 要同步的市场数量
-        use_events_api: 是否使用 Events API（推荐 True，可获取所有市场）
         retry_failed: 是否重试失败的市场
     """
     session = get_session()
@@ -50,28 +49,20 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
     try:
         print(f"\n{'='*60}")
         print(f"Market Sensemaking - Data Sync (Top {top_n})")
-        print(f"Method: {'Events API (All Markets)' if use_events_api else 'Markets API (Limited)'}")
         print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*60}\n")
         
-        # Step 1: 获取市场
-        print(f"📊 Step 1: Fetching markets...")
+        # Step 1: 获取开放市场
+        print(f"📊 Step 1: Fetching open markets from Gamma API...")
+        # 获取更多市场以确保有足够的过滤后结果
+        fetch_limit = max(top_n * 2, 200)
+        markets = api.get_markets(limit=fetch_limit, min_volume_24h=100)
         
-        if use_events_api:
-            # 使用 Events API（推荐，可获取所有市场）
-            all_markets = api.get_all_markets_from_events(
-                min_volume_24h=100,
-                max_events=None  # 获取所有 events
-            )
-        else:
-            # 使用传统 Markets API（最多 500 个）
-            all_markets = api.get_markets(limit=top_n * 2, min_volume_24h=100)
-        
-        if not all_markets:
+        if not markets:
             print("❌ No markets fetched")
             return stats
         
-        extracted = api.extract_market_data(all_markets)
+        extracted = api.extract_market_data(markets)
         
         if not extracted:
             print("❌ No markets extracted")
@@ -83,7 +74,7 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
         
         stats['total'] = len(extracted)
         
-        print(f"\n✅ Processing top {len(extracted)} markets by volume\n")
+        print(f"✅ Processing top {len(extracted)} markets by volume\n")
         
         # Step 2: 处理每个市场
         print(f"🔄 Step 2: Analyzing markets...\n")
@@ -200,6 +191,18 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
                 })
                 failed_markets.append((idx, market, str(e)))
                 continue
+        
+        # 重试失败的市场（可选）
+        if retry_failed and failed_markets:
+            print(f"\n{'='*60}")
+            print(f"🔄 Retrying {len(failed_markets)} failed markets...")
+            print(f"{'='*60}\n")
+            
+            for idx, market, reason in failed_markets[:10]:  # 最多重试10个
+                print(f"Retry: {market['question'][:60]}...")
+                print(f"  Previous failure: {reason}")
+                # 这里可以添加重试逻辑
+                time.sleep(1)
         
         # 打印统计
         print(f"\n{'='*60}")
@@ -318,12 +321,10 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Sync Polymarket data')
-    parser.add_argument('--markets', type=int, default=500, 
-                       help='Number of markets to sync (default: 500)')
+    parser.add_argument('--markets', type=int, default=100, 
+                       help='Number of markets to sync (default: 100)')
     parser.add_argument('--no-retry', action='store_true',
                        help='Disable retry for failed markets')
-    parser.add_argument('--use-markets-api', action='store_true',
-                       help='Use Markets API instead of Events API (limited to 500)')
     
     args = parser.parse_args()
     
@@ -331,12 +332,7 @@ if __name__ == "__main__":
     init_db()
     
     api = PolymarketAPI()
-    stats = sync_markets(
-        api, 
-        top_n=args.markets, 
-        use_events_api=not args.use_markets_api,
-        retry_failed=not args.no_retry
-    )
+    stats = sync_markets(api, top_n=args.markets, retry_failed=not args.no_retry)
     
     print(f"\n💡 Run 'streamlit run app/Home.py' to see results!\n")
     

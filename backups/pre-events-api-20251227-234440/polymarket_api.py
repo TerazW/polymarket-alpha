@@ -1,6 +1,5 @@
 import requests
 import json
-import time
 from typing import List, Dict, Optional
 
 # Polymarket APIs
@@ -16,20 +15,18 @@ class PolymarketAPI:
     
     def get_markets(self, limit: int = 100, min_volume_24h: float = 100) -> List[Dict]:
         """
-        获取市场列表（传统方法，仅用于后向兼容）
-        
-        注意：此方法最多返回 500 个市场，且 offset 不起作用
-        建议使用 get_all_markets_from_events() 获取完整市场列表
+        获取市场列表（Gamma API）
         
         Args:
-            limit: 返回数量（最大 500）
+            limit: 返回数量
             min_volume_24h: 最小 24h 成交量
         """
         try:
+            # 使用 closed=false 获取开放市场
             response = requests.get(
                 f"{self.gamma_api}/markets",
                 params={
-                    'limit': min(limit, 500),
+                    'limit': min(limit * 3, 500),
                     'closed': 'false'
                 },
                 timeout=30
@@ -46,7 +43,7 @@ class PolymarketAPI:
                 if float(m.get('volume24hr', 0)) >= min_volume_24h
             ]
             
-            print(f"   Found {len(filtered)} markets with volume > ${min_volume_24h}")
+            print(f"   Found {len(filtered)} markets with volume > ${min_volume_24h} (from {len(data)} open markets)")
             
             # 按成交量排序
             filtered.sort(key=lambda x: float(x.get('volume24hr', 0)), reverse=True)
@@ -56,105 +53,6 @@ class PolymarketAPI:
         except Exception as e:
             print(f"❌ Error fetching markets: {e}")
             return []
-    
-    def get_all_markets_from_events(
-        self, 
-        min_volume_24h: float = 100,
-        max_events: int = None
-    ) -> List[Dict]:
-        """
-        通过 Events API 获取所有市场（推荐方法）
-        
-        优势：
-        - 可以获取所有市场（2920+）
-        - 支持完整分页
-        - 自动去重
-        
-        Args:
-            min_volume_24h: 最小 24h 成交量
-            max_events: 最多处理多少个 events（None = 全部）
-        
-        Returns:
-            List[Dict]: 市场列表
-        """
-        all_markets = {}  # 用字典去重 {conditionId: market}
-        offset = 0
-        limit = 500  # 每页 500 个 events
-        events_processed = 0
-        
-        print(f"\n📡 Fetching all markets via Events API...")
-        print(f"   Min volume: ${min_volume_24h}")
-        
-        while True:
-            try:
-                response = requests.get(
-                    f"{self.gamma_api}/events",
-                    params={
-                        'limit': limit,
-                        'offset': offset,
-                        'closed': 'false',
-                        'order': 'id',
-                        'ascending': 'false'
-                    },
-                    timeout=30
-                )
-                response.raise_for_status()
-                events = response.json()
-                
-                if not events:
-                    print(f"   No more events found at offset {offset}")
-                    break
-                
-                # 从每个 event 提取 markets
-                markets_in_batch = 0
-                for event in events:
-                    if 'markets' in event and isinstance(event['markets'], list):
-                        for market in event['markets']:
-                            condition_id = market.get('conditionId')
-                            if condition_id and condition_id not in all_markets:
-                                all_markets[condition_id] = market
-                                markets_in_batch += 1
-                
-                events_processed += len(events)
-                
-                print(f"   Batch {offset//limit + 1}: {len(events)} events, "
-                      f"{markets_in_batch} new markets, "
-                      f"total unique: {len(all_markets)}")
-                
-                # 检查是否达到最大 events 限制
-                if max_events and events_processed >= max_events:
-                    print(f"   Reached max_events limit: {max_events}")
-                    break
-                
-                # 检查是否是最后一页
-                if len(events) < limit:
-                    print(f"   Last page reached (got {len(events)} < {limit})")
-                    break
-                
-                offset += limit
-                time.sleep(0.2)  # 避免 rate limit (125 req/10s)
-                
-            except Exception as e:
-                print(f"❌ Error at offset {offset}: {e}")
-                break
-        
-        # 转换回列表
-        markets_list = list(all_markets.values())
-        
-        print(f"\n✅ Total unique markets fetched: {len(markets_list)}")
-        
-        # 过滤交易量
-        filtered = [
-            m for m in markets_list
-            if float(m.get('volume24hr', 0)) >= min_volume_24h
-        ]
-        
-        print(f"   After volume filter (>${min_volume_24h}): {len(filtered)}")
-        
-        # 按成交量排序
-        filtered.sort(key=lambda x: float(x.get('volume24hr', 0)), reverse=True)
-        
-        return filtered
     
     def get_trades(
         self, 
@@ -224,7 +122,7 @@ class PolymarketAPI:
                 if not condition_id or not clob_token_ids_raw:
                     continue
                 
-                # 处理 clobTokenIds 可能是字符串或数组
+                # 🔧 修复：处理 clobTokenIds 可能是字符串或数组
                 if isinstance(clob_token_ids_raw, str):
                     try:
                         clob_token_ids = json.loads(clob_token_ids_raw)
@@ -274,33 +172,27 @@ class PolymarketAPI:
         
         return extracted
 
-
 # 测试
 if __name__ == "__main__":
     print("🧪 Testing Polymarket APIs...\n")
     
     api = PolymarketAPI()
     
-    print("="*70)
-    print("Test 1: Traditional get_markets (limited to 500)")
-    print("="*70)
-    markets_old = api.get_markets(limit=10, min_volume_24h=100)
-    print(f"✅ Got {len(markets_old)} markets\n")
+    print("Testing GET /markets (open markets, volume > $100)...")
+    markets_list = api.get_markets(limit=10, min_volume_24h=100)
     
-    print("="*70)
-    print("Test 2: New get_all_markets_from_events (unlimited)")
-    print("="*70)
-    markets_new = api.get_all_markets_from_events(
-        min_volume_24h=100,
-        max_events=1000  # 测试用，限制前 1000 个 events
-    )
-    print(f"\n✅ Got {len(markets_new)} markets\n")
-    
-    if markets_new:
-        print("Top 5 markets by volume:")
-        for i, m in enumerate(markets_new[:5], 1):
-            print(f"{i}. {m['question'][:60]}...")
-            print(f"   Price: {m['price']:.2%} | Volume: ${m['volume_24h']:,.0f}")
-            print()
+    if markets_list:
+        print(f"✅ Success!\n")
+        
+        extracted = api.extract_market_data(markets_list)
+        print(f"✅ Extracted {len(extracted)} markets\n")
+        
+        if extracted:
+            print("Top 3 markets:")
+            for i, m in enumerate(extracted[:3], 1):
+                print(f"{i}. {m['question'][:60]}...")
+                print(f"   Price: {m['price']:.2%}")
+                print(f"   Volume: ${m['volume_24h']:,.0f}")
+                print()
     
     print("✅ All tests completed!")
