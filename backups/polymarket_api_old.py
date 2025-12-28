@@ -66,7 +66,7 @@ class PolymarketAPI:
         通过 Events API 获取所有市场（推荐方法）
         
         优势：
-        - 可以获取所有市场（34,000+）
+        - 可以获取所有市场（2920+）
         - 支持完整分页
         - 自动去重
         
@@ -75,7 +75,7 @@ class PolymarketAPI:
             max_events: 最多处理多少个 events（None = 全部）
         
         Returns:
-            List[Dict]: 已提取标准字段的市场列表
+            List[Dict]: 市场列表
         """
         all_markets = {}  # 用字典去重 {conditionId: market}
         offset = 0
@@ -153,12 +153,8 @@ class PolymarketAPI:
         
         # 按成交量排序
         filtered.sort(key=lambda x: float(x.get('volume24hr', 0)), reverse=True)
-        
-        # 提取标准字段格式
-        print(f"   Extracting standard fields...")
+
         extracted = self.extract_market_data(filtered)
-        
-        print(f"   Successfully extracted: {len(extracted)} markets")
         
         return extracted
     
@@ -219,94 +215,64 @@ class PolymarketAPI:
             return None
     
     def extract_market_data(self, markets: List[Dict]) -> List[Dict]:
-        """
-        从 Gamma API 数据中提取关键字段（生产级健壮版本）
-        
-        处理各种数据格式和缺失字段的情况
-        """
+        """从 Gamma API 数据中提取关键字段"""
         extracted = []
-        errors = 0
         
-        for idx, market in enumerate(markets):
+        for market in markets:
             try:
-                # 1. 提取 condition_id（必须字段）
                 condition_id = market.get('conditionId', '')
-                if not condition_id:
-                    errors += 1
+                clob_token_ids_raw = market.get('clobTokenIds', [])
+                
+                if not condition_id or not clob_token_ids_raw:
                     continue
                 
-                # 2. 提取 token_id（宽容处理）
-                clob_token_ids_raw = market.get('clobTokenIds', '')
-                token_id = None
-                
-                if isinstance(clob_token_ids_raw, str) and clob_token_ids_raw:
+                # 处理 clobTokenIds 可能是字符串或数组
+                if isinstance(clob_token_ids_raw, str):
                     try:
                         clob_token_ids = json.loads(clob_token_ids_raw)
-                        if isinstance(clob_token_ids, list) and clob_token_ids:
-                            token_id = clob_token_ids[0]
-                    except json.JSONDecodeError:
-                        pass
-                elif isinstance(clob_token_ids_raw, list) and clob_token_ids_raw:
-                    token_id = clob_token_ids_raw[0]
+                    except:
+                        clob_token_ids = []
+                else:
+                    clob_token_ids = clob_token_ids_raw
                 
-                # 如果没有 token_id，使用 condition_id
+                token_id = clob_token_ids[0] if clob_token_ids else ''
                 if not token_id:
-                    token_id = condition_id
+                    continue
                 
-                # 3. 提取价格（宽容处理）
+                # 价格处理
                 outcome_prices_raw = market.get('outcomePrices', '["0.5", "0.5"]')
-                price = 0.5  # 默认值
                 
-                try:
-                    if isinstance(outcome_prices_raw, str):
+                if isinstance(outcome_prices_raw, str):
+                    try:
                         outcome_prices = json.loads(outcome_prices_raw)
-                    else:
-                        outcome_prices = outcome_prices_raw
-                    
-                    if isinstance(outcome_prices, list) and outcome_prices:
-                        price = float(outcome_prices[0])
-                except (json.JSONDecodeError, ValueError, IndexError, TypeError):
-                    pass  # 使用默认值
+                    except:
+                        outcome_prices = ["0.5", "0.5"]
+                else:
+                    outcome_prices = outcome_prices_raw
                 
-                # 4. 提取其他字段
-                volume_24h = 0.0
                 try:
-                    volume_24h = float(market.get('volume24hr', 0))
-                except (ValueError, TypeError):
-                    pass
+                    price = float(outcome_prices[0]) if outcome_prices else 0.5
+                except (ValueError, IndexError, TypeError):
+                    price = 0.5
                 
-                liquidity = 0.0
-                try:
-                    liquidity = float(market.get('liquidityNum', 0))
-                except (ValueError, TypeError):
-                    pass
-                
-                # 5. 构建数据对象
                 data = {
                     'condition_id': condition_id,
                     'token_id': token_id,
                     'question': market.get('question', 'Unknown'),
                     'description': market.get('description', ''),
                     'price': price,
-                    'volume_24h': volume_24h,
-                    'liquidity': liquidity,
+                    'volume_24h': float(market.get('volume24hr', 0)),
+                    'liquidity': float(market.get('liquidityNum', 0)),
                     'end_date': market.get('endDateIso', None),
                     'active': market.get('active', True),
                     'closed': market.get('closed', False),
-                    'category': market.get('category', 'Other')
+                    'category': 'Other'
                 }
                 
                 extracted.append(data)
                 
             except Exception as e:
-                errors += 1
-                # 只在前几个错误时打印，避免刷屏
-                if errors <= 5:
-                    print(f"  ⚠️  Error extracting market {idx}: {e}")
                 continue
-        
-        if errors > 5:
-            print(f"  ⚠️  Total extraction errors: {errors} (showing first 5)")
         
         return extracted
 

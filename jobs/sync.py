@@ -59,38 +59,34 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
         
         if use_events_api:
             # 使用 Events API（推荐，可获取所有市场）
+            # get_all_markets_from_events 内部已经调用了 extract_market_data
             all_markets = api.get_all_markets_from_events(
                 min_volume_24h=100,
                 max_events=None  # 获取所有 events
             )
         else:
             # 使用传统 Markets API（最多 500 个）
-            all_markets = api.get_markets(limit=top_n * 2, min_volume_24h=100)
+            markets_raw = api.get_markets(limit=top_n * 2, min_volume_24h=100)
+            all_markets = api.extract_market_data(markets_raw)
         
         if not all_markets:
             print("❌ No markets fetched")
             return stats
         
-        extracted = api.extract_market_data(all_markets)
-        
-        if not extracted:
-            print("❌ No markets extracted")
-            return stats
-        
         # 按成交量排序，取前 N
-        extracted.sort(key=lambda x: x['volume_24h'], reverse=True)
-        extracted = extracted[:top_n]
+        all_markets.sort(key=lambda x: x['volume_24h'], reverse=True)
+        all_markets = all_markets[:top_n]
         
-        stats['total'] = len(extracted)
+        stats['total'] = len(all_markets)
         
-        print(f"\n✅ Processing top {len(extracted)} markets by volume\n")
+        print(f"\n✅ Processing top {len(all_markets)} markets by volume\n")
         
         # Step 2: 处理每个市场
         print(f"🔄 Step 2: Analyzing markets...\n")
         
         failed_markets = []
         
-        for idx, market in enumerate(extracted, 1):
+        for idx, market in enumerate(all_markets, 1):
             try:
                 condition_id = market['condition_id']
                 token_id = market['token_id']
