@@ -7,7 +7,6 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 import traceback
-import time
 
 from utils.db import DATABASE_URL
 print("🔍 sync.py DATABASE_URL:", DATABASE_URL)
@@ -26,60 +25,39 @@ from utils.metrics import (
 from utils.db import get_session, init_db
 
 
-def sync_markets(api: PolymarketAPI, top_n: int = 100, retry_failed: bool = True):
-    """
-    同步市场数据（使用 Gamma API）
-    
-    Args:
-        api: PolymarketAPI 实例
-        top_n: 要同步的市场数量
-        retry_failed: 是否重试失败的市场
-    """
+def sync_markets(api: PolymarketAPI, top_n: int = 10):
+    """同步市场数据（使用 Gamma API）"""
     session = get_session()
-    
-    # 追踪统计
-    stats = {
-        'total': 0,
-        'success': 0,
-        'failed': 0,
-        'skipped': 0,
-        'errors': []
-    }
     
     try:
         print(f"\n{'='*60}")
-        print(f"Market Sensemaking - Data Sync (Top {top_n})")
-        print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Market Sensemaking - Data Sync")
         print(f"{'='*60}\n")
         
         # Step 1: 获取开放市场
         print(f"📊 Step 1: Fetching open markets from Gamma API...")
-        # 获取更多市场以确保有足够的过滤后结果
-        fetch_limit = max(top_n * 2, 200)
-        markets = api.get_markets(limit=fetch_limit, min_volume_24h=100)
+        markets = api.get_markets(limit=200, min_volume_24h=100)
         
         if not markets:
             print("❌ No markets fetched")
-            return stats
+            return
         
         extracted = api.extract_market_data(markets)
         
         if not extracted:
             print("❌ No markets extracted")
-            return stats
+            return
         
         # 按成交量排序，取前 N
         extracted.sort(key=lambda x: x['volume_24h'], reverse=True)
         extracted = extracted[:top_n]
         
-        stats['total'] = len(extracted)
-        
-        print(f"✅ Processing top {len(extracted)} markets by volume\n")
+        print(f"✅ Processing top {len(extracted)} markets\n")
         
         # Step 2: 处理每个市场
         print(f"🔄 Step 2: Analyzing markets...\n")
         
-        failed_markets = []
+        processed_count = 0
         
         for idx, market in enumerate(extracted, 1):
             try:
@@ -88,10 +66,9 @@ def sync_markets(api: PolymarketAPI, top_n: int = 100, retry_failed: bool = True
                 question = market['question']
                 current_price = market['price']
                 volume_24h = market['volume_24h']
+                liquidity = market['liquidity']
                 
-                # 进度显示
-                progress = f"[{idx}/{stats['total']}]"
-                print(f"{progress} {question[:60]}...")
+                print(f"[{idx}/{len(extracted)}] {question[:60]}...")
                 
                 # 计算剩余天数
                 if market['end_date']:
@@ -105,25 +82,12 @@ def sync_markets(api: PolymarketAPI, top_n: int = 100, retry_failed: bool = True
                 else:
                     days_remaining = 30
                 
-                # 获取成交数据（添加重试机制）
+                # 获取成交数据
                 print(f"  📥 Fetching trades...")
-                market_trades = None
-                for attempt in range(3):
-                    try:
-                        market_trades = api.get_trades_for_market(condition_id, limit=5000)
-                        if market_trades:
-                            break
-                    except Exception as e:
-                        if attempt < 2:
-                            print(f"  ⚠️  Retry {attempt + 1}/3...")
-                            time.sleep(2)
-                        else:
-                            raise e
+                market_trades = api.get_trades_for_market(condition_id, limit=5000)
                 
                 if not market_trades:
                     print(f"  ⚠️  No trades, skipping...\n")
-                    stats['skipped'] += 1
-                    failed_markets.append((idx, market, "No trades"))
                     continue
                 
                 trades_24h = filter_trades_by_time(market_trades, hours=24)
@@ -136,8 +100,6 @@ def sync_markets(api: PolymarketAPI, top_n: int = 100, retry_failed: bool = True
                 
                 if not histogram_all:
                     print(f"  ⚠️  No histogram, skipping...\n")
-                    stats['skipped'] += 1
-                    failed_markets.append((idx, market, "No histogram"))
                     continue
                 
                 ui = calculate_ui(histogram_all)
@@ -164,6 +126,7 @@ def sync_markets(api: PolymarketAPI, top_n: int = 100, retry_failed: bool = True
                 print(f"  {status}\n")
                 
                 # 保存
+                # 保存（save_metrics 内部会 commit/rollback）
                 success = save_metrics(
                     session, token_id, condition_id, question,
                     current_price * 100, volume_24h,
@@ -171,65 +134,22 @@ def sync_markets(api: PolymarketAPI, top_n: int = 100, retry_failed: bool = True
                 )
                 
                 if success:
-                    stats['success'] += 1
-                else:
-                    stats['failed'] += 1
-                    failed_markets.append((idx, market, "Save failed"))
-                
-                # 避免 API rate limit
-                if idx % 10 == 0:
-                    print(f"  ⏸️  Pausing 2s to avoid rate limit...\n")
-                    time.sleep(2)
+                    processed_count += 1
                 
             except Exception as e:
-                error_msg = f"Error processing market: {str(e)}"
-                print(f"  ❌ {error_msg}\n")
-                stats['failed'] += 1
-                stats['errors'].append({
-                    'market': market.get('question', 'Unknown')[:60],
-                    'error': str(e)
-                })
-                failed_markets.append((idx, market, str(e)))
+                print(f"  ❌ Error processing market: {e}\n")
+                traceback.print_exc()
                 continue
         
-        # 重试失败的市场（可选）
-        if retry_failed and failed_markets:
-            print(f"\n{'='*60}")
-            print(f"🔄 Retrying {len(failed_markets)} failed markets...")
-            print(f"{'='*60}\n")
-            
-            for idx, market, reason in failed_markets[:10]:  # 最多重试10个
-                print(f"Retry: {market['question'][:60]}...")
-                print(f"  Previous failure: {reason}")
-                # 这里可以添加重试逻辑
-                time.sleep(1)
-        
-        # 打印统计
         print(f"\n{'='*60}")
-        print(f"📊 Sync Statistics:")
-        print(f"{'='*60}")
-        print(f"Total markets: {stats['total']}")
-        print(f"✅ Success: {stats['success']}")
-        print(f"❌ Failed: {stats['failed']}")
-        print(f"⏭️  Skipped: {stats['skipped']}")
-        print(f"Success Rate: {stats['success']/stats['total']*100:.1f}%")
+        print(f"✅ Sync completed: {processed_count} markets saved!")
         print(f"{'='*60}\n")
-        
-        # 显示错误详情（如果有）
-        if stats['errors']:
-            print(f"\n⚠️  Error Details:")
-            for i, err in enumerate(stats['errors'][:5], 1):
-                print(f"{i}. {err['market']}")
-                print(f"   {err['error']}\n")
-        
-        return stats
         
     except Exception as e:
         print(f"\n❌ Sync failed: {e}")
         import traceback
         traceback.print_exc()
         session.rollback()
-        return stats
     finally:
         session.close()
 
@@ -315,27 +235,14 @@ def save_metrics(session, token_id, condition_id, question,
     except SQLAlchemyError as e:
         session.rollback()
         print(f"  ⚠️  DB error: {e}")
+        traceback.print_exc()
         return False
 
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Sync Polymarket data')
-    parser.add_argument('--markets', type=int, default=100, 
-                       help='Number of markets to sync (default: 100)')
-    parser.add_argument('--no-retry', action='store_true',
-                       help='Disable retry for failed markets')
-    
-    args = parser.parse_args()
-    
-    print("Initializing database...")
+    print("Initializing...")
     init_db()
     
     api = PolymarketAPI()
-    stats = sync_markets(api, top_n=args.markets, retry_failed=not args.no_retry)
+    sync_markets(api, top_n=10)
     
-    print(f"\n💡 Run 'streamlit run app/Home.py' to see results!\n")
-    
-    # 退出码
-    exit_code = 0 if stats['success'] == stats['total'] else 1
-    sys.exit(exit_code)
+    print("\n💡 Run 'streamlit run app/Home.py' to see results!\n")
