@@ -93,6 +93,7 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
                 question = market['question']
                 current_price = market['price']
                 volume_24h = market['volume_24h']
+                category = market.get('category', 'Other')  # ✅ 提取 category
                 
                 # 进度显示
                 progress = f"[{idx}/{stats['total']}]"
@@ -111,7 +112,7 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
                     days_remaining = 30
                 
                 # 获取成交数据（添加重试机制）
-                print(f"  📥 Fetching trades...")
+                print(f"  🔥 Fetching trades...")
                 market_trades = None
                 for attempt in range(3):
                     try:
@@ -166,13 +167,15 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
                 
                 print(f"  💰 Price: {current_price*100:.1f}% | Vol: ${volume_24h:,.0f}")
                 print(f"  📊 UI: {ui_str} | CS: {cs_str} | CER: {cer_str}")
+                print(f"  🏷️  Category: {category}")
                 print(f"  {status}\n")
                 
-                # 保存
+                # 保存（✅ 添加 category 参数）
                 success = save_metrics(
                     session, token_id, condition_id, question,
                     current_price * 100, volume_24h,
-                    ui, cer, cs, status, days_remaining, band_width_now
+                    ui, cer, cs, status, days_remaining, band_width_now,
+                    category  # ✅ 新增参数
                 )
                 
                 if success:
@@ -204,7 +207,7 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
         print(f"Total markets: {stats['total']}")
         print(f"✅ Success: {stats['success']}")
         print(f"❌ Failed: {stats['failed']}")
-        print(f"⏭️  Skipped: {stats['skipped']}")
+        print(f"⭕️  Skipped: {stats['skipped']}")
         print(f"Success Rate: {stats['success']/stats['total']*100:.1f}%")
         print(f"{'='*60}\n")
         
@@ -245,7 +248,7 @@ def get_band_width_7d_ago(session, token_id):
 
 def save_metrics(session, token_id, condition_id, question, 
                  current_price, volume_24h, ui, cer, cs, status, 
-                 days_remaining, band_width):
+                 days_remaining, band_width, category='Other'):  # ✅ 添加 category 参数
     """保存指标到数据库（PostgreSQL 兼容版本）"""
     today = datetime.now().date()
     
@@ -253,13 +256,14 @@ def save_metrics(session, token_id, condition_id, question,
         # 使用 PostgreSQL 的 ON CONFLICT 语法
         session.execute(text("""
             INSERT INTO markets 
-            (token_id, market_id, title, current_price, volume_24h, updated_at)
-            VALUES (:tid, :mid, :title, :price, :vol, :now)
+            (token_id, market_id, title, current_price, volume_24h, category, updated_at)
+            VALUES (:tid, :mid, :title, :price, :vol, :cat, :now)
             ON CONFLICT (token_id) DO UPDATE SET
                 market_id = EXCLUDED.market_id,
                 title = EXCLUDED.title,
                 current_price = EXCLUDED.current_price,
                 volume_24h = EXCLUDED.volume_24h,
+                category = EXCLUDED.category,
                 updated_at = EXCLUDED.updated_at
         """), {
             'tid': token_id,
@@ -267,6 +271,7 @@ def save_metrics(session, token_id, condition_id, question,
             'title': question,
             'price': current_price / 100,
             'vol': volume_24h,
+            'cat': category,  # ✅ 保存 category
             'now': datetime.now()
         })
         
