@@ -57,17 +57,12 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
         # Step 1: 获取市场
         print(f"📊 Step 1: Fetching markets...")
         
-        if use_events_api:
-            # 使用 Events API（推荐，可获取所有市场）
-            # get_all_markets_from_events 内部已经调用了 extract_market_data
-            all_markets = api.get_all_markets_from_events(
-                min_volume_24h=100,
-                max_events=None  # 获取所有 events
-            )
-        else:
-            # 使用传统 Markets API（最多 500 个）
-            markets_raw = api.get_markets(limit=top_n * 2, min_volume_24h=100)
-            all_markets = api.extract_market_data(markets_raw)
+        # ✅ 使用官方分类方法（tag_slug）
+        all_markets = api.get_markets_by_categories(
+            min_volume_24h=100,
+            max_markets_per_category=None,  # 不限制每个分类（获取所有）
+            total_limit=top_n if top_n else None  # 不限制总数（获取所有符合条件的）
+        )
         
         if not all_markets:
             print("❌ No markets fetched")
@@ -319,7 +314,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Sync Polymarket data')
-    parser.add_argument('--markets', type=int, default=500, 
+    parser.add_argument('--markets', type=int, default=5000, 
                        help='Number of markets to sync (default: 500)')
     parser.add_argument('--no-retry', action='store_true',
                        help='Disable retry for failed markets')
