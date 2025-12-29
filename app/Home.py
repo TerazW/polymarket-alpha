@@ -30,11 +30,19 @@ def load_markets():
         query = text("""
             SELECT 
                 dm.token_id,
+                m.market_id,
                 m.title as market_name,
+                m.category,
                 dm.status,
                 dm.ui,
                 dm.cer,
                 dm.cs,
+                dm.ecr,
+                dm.acr,
+                dm.va_high,
+                dm.va_low,
+                dm.band_width,
+                dm.pomd,
                 dm.current_price,
                 m.volume_24h,
                 dm.date,
@@ -87,7 +95,9 @@ try:
             "Sort by",
             options=["Volume (High to Low)", "Volume (Low to High)", 
                     "Price (High to Low)", "Price (Low to High)",
-                    "UI (High to Low)", "UI (Low to High)"],
+                    "UI (High to Low)", "UI (Low to High)",
+                    "CER (High to Low)", "CER (Low to High)",
+                    "Band Width (High to Low)", "Band Width (Low to High)"],
             index=0
         )
     
@@ -118,6 +128,12 @@ try:
     elif "UI" in sort_by:
         ascending = "Low to High" in sort_by
         df_filtered = df_filtered.sort_values('ui', ascending=ascending, na_position='last')
+    elif "CER" in sort_by:
+        ascending = "Low to High" in sort_by
+        df_filtered = df_filtered.sort_values('cer', ascending=ascending, na_position='last')
+    elif "Band Width" in sort_by:
+        ascending = "Low to High" in sort_by
+        df_filtered = df_filtered.sort_values('band_width', ascending=ascending, na_position='last')
     
     # 显示结果数量
     st.markdown(f"**Showing {len(df_filtered)} of {len(df)} markets**")
@@ -161,12 +177,16 @@ try:
     
     # 显示表格
     st.dataframe(
-        df_page[['market_name', 'status', 'ui', 'cs', 'current_price', 'volume_24h']],
+        df_page[['market_name', 'category', 'status', 'ui', 'cs', 'cer', 'band_width', 'current_price', 'volume_24h']],
         use_container_width=True,
         column_config={
             "market_name": st.column_config.TextColumn(
                 "Market",
                 width="large"
+            ),
+            "category": st.column_config.TextColumn(
+                "Category",
+                width="small"
             ),
             "status": st.column_config.TextColumn(
                 "Status",
@@ -175,12 +195,21 @@ try:
             "ui": st.column_config.NumberColumn(
                 "UI", 
                 format="%.3f",
-                help="Uncertainty Index"
+                help="Uncertainty Index - lower = more certain"
             ),
-            "cs": st.column_config.NumberColumn(
-                "CS", 
+            "cs": st.column_config.TextColumn(
+                "CS",
+                help="🔒 Locked (requires aggressor data)"
+            ),
+            "cer": st.column_config.NumberColumn(
+                "CER", 
                 format="%.3f",
-                help="Conviction Score"
+                help="Convergence Efficiency Ratio"
+            ),
+            "band_width": st.column_config.NumberColumn(
+                "BW", 
+                format="%.3f",
+                help="Band Width (VAH - VAL)"
             ),
             "current_price": st.column_config.NumberColumn(
                 "Price", 
@@ -196,22 +225,62 @@ try:
         hide_index=True
     )
     
+    # === 市场详情选择 ===
+    st.markdown("---")
+    st.subheader("📊 View Market Details")
+    
+    # 创建市场选择下拉菜单
+    market_options = df_filtered[['token_id', 'market_name']].drop_duplicates()
+    market_dict = dict(zip(market_options['market_name'], market_options['token_id']))
+    
+    selected_market = st.selectbox(
+        "Select a market to view details",
+        options=["-- Select a market --"] + list(market_dict.keys()),
+        index=0
+    )
+    
+    if selected_market != "-- Select a market --":
+        # 保存选中的 token_id 到 session_state，然后跳转
+        st.session_state.selected_token_id = market_dict[selected_market]
+        st.switch_page("pages/Market_Detail.py")
+    
     # 状态说明
-    with st.expander("ℹ️ What do these statuses mean?"):
+    with st.expander("ℹ️ What do these metrics mean?"):
         st.markdown("""
-        **🟢 Informed:** Market has formed stable consensus. Information is well-digested.
+        ### Status Definitions
+        
+        **🟢 Informed:** Market has formed stable consensus.
         - Low UI (< 0.30): Narrow consensus band
         - High CER (≥ 0.80): Healthy convergence
-        - High CS (≥ 0.35): Strong directional conviction
         
-        **🟡 Fragmented:** Market understanding is divided. Requires careful analysis.
+        **🟡 Fragmented:** Market understanding is divided.
         - Moderate metrics that don't meet Informed criteria
-        - Mixed signals from participants
         
-        **🔴 Noisy:** Market lacks stable cognitive structure. Not worth attention now.
+        **🔴 Noisy:** Market lacks stable cognitive structure.
         - High UI (≥ 0.50): Wide disagreement
         - Low CER (< 0.40): Poor convergence
-        - Low CS (< 0.15): Weak conviction
+        
+        ---
+        
+        ### Metrics Guide
+        
+        | Metric | Name | Description |
+        |--------|------|-------------|
+        | **UI** | Uncertainty Index | `band_width / mid_probability` - Lower = more certain |
+        | **CER** | Convergence Efficiency | `ACR / ECR` - How efficiently the market is converging |
+        | **BW** | Band Width | `VAH - VAL` - Width of 70% consensus band |
+        | **CS** | Conviction Score | 🔒 Locked (requires aggressor data) |
+        
+        ---
+        
+        ### ECR / ACR / CER Explained
+        
+        - **ECR** (Expected Convergence Rate): `distance_to_certainty / days_remaining`
+        - **ACR** (Actual Convergence Rate): `(band_width_7d_ago - band_width_now) / 7`
+        - **CER** (Convergence Efficiency): `ACR / ECR`
+          - CER > 1.0: Converging faster than expected ✅
+          - CER ≈ 0.8-1.0: Normal convergence
+          - CER < 0.5: Convergence blocked ⚠️
         """)
     
     # 数据统计
@@ -243,4 +312,4 @@ except Exception as e:
     st.error(f"Error loading data: {e}")
     import traceback
     st.code(traceback.format_exc())
-    st.info("Make sure you've run `python jobs/sync.py --markets 100` first.")
+    st.info("Make sure you've run `python jobs/sync.py --migrate --markets 100` first.")
