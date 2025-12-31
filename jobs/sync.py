@@ -1,13 +1,15 @@
 """
-Market Sensemaking - 数据同步脚本（完整版）
-路线 A：Data API 版本（无 aggressor）
+Market Sensemaking - 数据同步脚本（完整版 v2）
+整合 Data API + WebSocket aggressor 数据
 
-同步指标：
-✅ Consensus Band (VAH/VAL)
-✅ Band Width
-✅ POMD
-✅ UI / ECR / ACR / CER
-🔒 CS / AR / Volume Delta = None (需要 aggressor 数据)
+数据来源：
+- Data API: 获取 trades（用于 volume profile）
+- WebSocket: 获取 aggressor 数据（用于 AR / Delta / CS）
+- ws_trades_hourly 表: 存储聚合的 aggressor 统计
+
+运行方式：
+    python jobs/sync.py --markets 100
+    python jobs/sync.py --markets 500 --migrate
 """
 import os
 import sys
@@ -15,7 +17,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 import traceback
@@ -36,21 +38,72 @@ from utils.metrics import (
     calculate_ecr,
     calculate_acr,
     calculate_cer,
+    calculate_ar,
+    calculate_volume_delta,
+    calculate_cs,
     determine_status,
     filter_trades_by_time,
 )
 from utils.db import get_session, init_db
 
 
-def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = True, retry_failed: bool = True):
+def get_aggressor_stats_from_db(session, token_id: str, hours: int = 24) -> dict:
     """
-    同步市场数据（完整版）
+    从 ws_trades_hourly 表获取 aggressor 统计
     
     Args:
-        api: PolymarketAPI 实例
-        top_n: 要同步的市场数量
-        use_events_api: 是否使用 Events API
-        retry_failed: 是否重试失败的市场
+        session: 数据库会话
+        token_id: token ID
+        hours: 过去多少小时
+    
+    Returns:
+        {'aggressive_buy': float, 'aggressive_sell': float, 'total_volume': float, 'has_data': bool}
+    """
+    try:
+        # PostgreSQL 语法
+        query = text("""
+            SELECT 
+                COALESCE(SUM(aggressive_buy), 0) as agg_buy,
+                COALESCE(SUM(aggressive_sell), 0) as agg_sell,
+                COALESCE(SUM(total_volume), 0) as total,
+                COALESCE(SUM(trade_count), 0) as count
+            FROM ws_trades_hourly
+            WHERE token_id = :tid
+            AND hour >= (NOW() - INTERVAL '24 hours')
+        """)
+        
+        result = session.execute(query, {'tid': token_id}).fetchone()
+        
+        if result and result[3] > 0:
+            return {
+                'aggressive_buy': float(result[0]),
+                'aggressive_sell': float(result[1]),
+                'total_volume': float(result[2]),
+                'trade_count': int(result[3]),
+                'has_data': True
+            }
+        
+    except Exception as e:
+        # 表可能不存在（WebSocket collector 还没运行）
+        pass
+    
+    return {
+        'aggressive_buy': 0,
+        'aggressive_sell': 0,
+        'total_volume': 0,
+        'trade_count': 0,
+        'has_data': False
+    }
+
+
+def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True):
+    """
+    同步市场数据（完整版 v2）
+    
+    数据流：
+    1. Data API → 获取 trades → 计算 Profile / UI / CER
+    2. ws_trades_hourly → 获取 aggressor 数据 → 计算 AR / Delta / CS
+    3. 合并 → 写入 daily_metrics
     """
     session = get_session()
     
@@ -59,13 +112,14 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
         'success': 0,
         'failed': 0,
         'skipped': 0,
+        'with_aggressor': 0,
         'errors': []
     }
     
     try:
         print(f"\n{'='*60}")
-        print(f"Market Sensemaking - Data Sync (Top {top_n})")
-        print(f"Route A: Data API (Complete Metrics)")
+        print(f"Market Sensemaking - Data Sync v2")
+        print(f"Data API + WebSocket Aggressor")
         print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*60}\n")
         
@@ -114,8 +168,8 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
                     except:
                         pass
                 
-                # 获取成交数据
-                print(f"  📥 Fetching trades...")
+                # === 获取 Data API trades ===
+                print(f"  📥 Fetching trades (Data API)...")
                 market_trades = None
                 for attempt in range(3):
                     try:
@@ -134,15 +188,10 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
                     stats['skipped'] += 1
                     continue
                 
-                # Sanity check: 验证交易数据纯度
-                unique_conditions = set(t.get('conditionId', condition_id) for t in market_trades)
-                if len(unique_conditions) > 1:
-                    print(f"  ⚠️  Warning: Mixed market trades!")
-                
                 trades_24h = filter_trades_by_time(market_trades, hours=24)
                 print(f"  📈 Trades: {len(market_trades)} total, {len(trades_24h)} in 24h")
                 
-                # === 计算所有指标 ===
+                # === 计算 Profile 指标 ===
                 histogram = calculate_histogram(market_trades)
                 
                 if not histogram:
@@ -150,45 +199,58 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
                     stats['skipped'] += 1
                     continue
                 
-                # 1. Profile 相关
                 VAH, VAL, mid_prob = calculate_consensus_band(histogram)
                 band_width = get_band_width(histogram)
                 pomd = calculate_pomd(histogram)
-                rejected_probs = calculate_rejected_probabilities(histogram)
                 
-                # 2. 不确定性相关
+                # === 不确定性指标 ===
                 ui = calculate_ui(histogram)
                 ecr = calculate_ecr(current_price, days_remaining)
                 
-                # 获取 7 天前的 band_width（用于计算 ACR 和 CER）
                 band_width_7d_ago = get_band_width_7d_ago(session, token_id)
-                
                 acr = calculate_acr(band_width, band_width_7d_ago)
                 cer = calculate_cer(band_width, band_width_7d_ago, current_price, days_remaining)
                 
-                # 3. 信念强度（锁定）
-                cs = None   # 🔒 LOCKED
-                ar = None   # 🔒 LOCKED
-                volume_delta = None  # 🔒 LOCKED
+                # === 获取 WebSocket aggressor 数据 ===
+                agg_stats = get_aggressor_stats_from_db(session, token_id, hours=24)
                 
-                # 4. 状态判定
+                if agg_stats['has_data']:
+                    # 有 WebSocket 数据 → 计算 AR / Delta / CS
+                    ar = calculate_ar(
+                        agg_stats['aggressive_buy'],
+                        agg_stats['aggressive_sell'],
+                        agg_stats['total_volume']
+                    )
+                    volume_delta = calculate_volume_delta(
+                        agg_stats['aggressive_buy'],
+                        agg_stats['aggressive_sell']
+                    )
+                    cs = calculate_cs(
+                        agg_stats['aggressive_buy'],
+                        agg_stats['aggressive_sell'],
+                        agg_stats['total_volume']
+                    )
+                    stats['with_aggressor'] += 1
+                    agg_str = f"✅ CS: {cs:.3f}" if cs else "✅ CS: N/A"
+                else:
+                    # 没有 WebSocket 数据
+                    ar = None
+                    volume_delta = None
+                    cs = None
+                    agg_str = "🔒 CS: No WS data"
+                
+                # === 状态判定 ===
                 status = determine_status(ui, cer, cs)
                 
                 # === 显示结果 ===
                 ui_str = f"{ui:.3f}" if ui is not None else "N/A"
                 cer_str = f"{cer:.3f}" if cer is not None else "N/A"
-                ecr_str = f"{ecr:.5f}" if ecr is not None else "N/A"
-                acr_str = f"{acr:.5f}" if acr is not None else "N/A"
                 bw_str = f"{band_width:.3f}" if band_width is not None else "N/A"
-                vah_str = f"{VAH:.2f}" if VAH is not None else "N/A"
-                val_str = f"{VAL:.2f}" if VAL is not None else "N/A"
-                pomd_str = f"{pomd:.2f}" if pomd is not None else "N/A"
                 
                 print(f"  💰 Price: {current_price*100:.1f}% | Vol: ${volume_24h:,.0f}")
-                print(f"  📊 VAH: {vah_str} | VAL: {val_str} | BW: {bw_str} | POMD: {pomd_str}")
-                print(f"  📈 UI: {ui_str} | ECR: {ecr_str} | ACR: {acr_str} | CER: {cer_str}")
-                print(f"  🔒 CS/AR: Locked (requires aggressor)")
-                print(f"  🏷️  Category: {category} | {status}\n")
+                print(f"  📊 BW: {bw_str} | UI: {ui_str} | CER: {cer_str}")
+                print(f"  🎯 {agg_str}")
+                print(f"  🏷️  {category} | {status}\n")
                 
                 # === 保存到数据库 ===
                 success = save_metrics(
@@ -200,21 +262,17 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
                     volume_24h=volume_24h,
                     category=category,
                     days_remaining=days_remaining,
-                    # Profile
                     va_high=VAH,
                     va_low=VAL,
                     band_width=band_width,
                     pomd=pomd,
-                    # Uncertainty
                     ui=ui,
                     ecr=ecr,
                     acr=acr,
                     cer=cer,
-                    # Conviction (locked)
                     cs=cs,
                     ar=ar,
                     volume_delta=volume_delta,
-                    # Status
                     status=status
                 )
                 
@@ -241,11 +299,22 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
         print(f"\n{'='*60}")
         print(f"📊 Sync Statistics")
         print(f"{'='*60}")
-        print(f"Total: {stats['total']} | ✅ Success: {stats['success']} | ❌ Failed: {stats['failed']} | ⏭️ Skipped: {stats['skipped']}")
+        print(f"Total: {stats['total']}")
+        print(f"✅ Success: {stats['success']}")
+        print(f"❌ Failed: {stats['failed']}")
+        print(f"⏭️  Skipped: {stats['skipped']}")
+        print(f"🎯 With Aggressor Data: {stats['with_aggressor']}")
+        
         if stats['total'] > 0:
-            print(f"Success Rate: {stats['success']/stats['total']*100:.1f}%")
-        print(f"\n📝 Available: VAH/VAL, BW, POMD, UI, ECR, ACR, CER")
-        print(f"🔒 Locked: CS, AR, Volume Delta (require aggressor)")
+            print(f"\nSuccess Rate: {stats['success']/stats['total']*100:.1f}%")
+            if stats['with_aggressor'] > 0:
+                print(f"Aggressor Coverage: {stats['with_aggressor']/stats['success']*100:.1f}%")
+        
+        print(f"\n📝 Metrics: VAH/VAL, BW, POMD, UI, ECR, ACR, CER")
+        if stats['with_aggressor'] > 0:
+            print(f"✅ UNLOCKED: AR, Volume Delta, CS")
+        else:
+            print(f"ℹ️  Run ws_collector.py to collect aggressor data")
         print(f"{'='*60}\n")
         
         return stats
@@ -262,7 +331,6 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, use_events_api: bool = Tr
 def get_band_width_7d_ago(session, token_id) -> float:
     """获取 7 天前的 band width"""
     try:
-        # 尝试从 daily_metrics 获取 7 天前的数据
         query = text("""
             SELECT band_width, va_high, va_low
             FROM daily_metrics 
@@ -272,10 +340,8 @@ def get_band_width_7d_ago(session, token_id) -> float:
         result = session.execute(query, {'token_id': token_id}).fetchone()
         
         if result:
-            # 优先使用 band_width 字段
             if result[0] is not None:
                 return float(result[0])
-            # 否则用 va_high - va_low 计算
             if result[1] is not None and result[2] is not None:
                 return float(result[1]) - float(result[2])
         
@@ -290,9 +356,7 @@ def save_metrics(session, token_id, condition_id, question,
                  ui, ecr, acr, cer,
                  cs, ar, volume_delta,
                  status):
-    """
-    保存所有指标到数据库
-    """
+    """保存所有指标到数据库"""
     today = datetime.now().date()
     
     try:
@@ -319,7 +383,6 @@ def save_metrics(session, token_id, condition_id, question,
         })
         
         # 更新 daily_metrics 表
-        # 注意：你可能需要先 ALTER TABLE 添加新字段
         session.execute(text("""
             INSERT INTO daily_metrics 
             (token_id, date, 
@@ -363,7 +426,7 @@ def save_metrics(session, token_id, condition_id, question,
             'ar': ar,
             'vdelta': volume_delta,
             'status': status,
-            'price': current_price * 100,  # 存为百分比
+            'price': current_price * 100,
             'days': days_remaining
         })
         
@@ -377,10 +440,7 @@ def save_metrics(session, token_id, condition_id, question,
 
 
 def migrate_database(session):
-    """
-    迁移数据库：添加新字段
-    运行一次即可
-    """
+    """迁移数据库：添加新字段"""
     print("🔄 Migrating database schema...")
     
     new_columns = [
@@ -401,6 +461,26 @@ def migrate_database(session):
         except Exception as e:
             print(f"  ⚠️  {table}.{column}: {e}")
     
+    # 创建 ws_trades_hourly 表
+    try:
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS ws_trades_hourly (
+                id SERIAL PRIMARY KEY,
+                token_id VARCHAR(100),
+                hour TIMESTAMP,
+                aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                volume_delta DECIMAL(20,8) DEFAULT 0,
+                total_volume DECIMAL(20,8) DEFAULT 0,
+                trade_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(token_id, hour)
+            )
+        """))
+        print("  ✅ Created ws_trades_hourly table")
+    except Exception as e:
+        print(f"  ⚠️  ws_trades_hourly: {e}")
+    
     session.commit()
     print("✅ Migration complete\n")
 
@@ -408,7 +488,7 @@ def migrate_database(session):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Sync Polymarket data (Complete Version)')
+    parser = argparse.ArgumentParser(description='Sync Polymarket data (v2 with aggressor)')
     parser.add_argument('--markets', type=int, default=5000, 
                        help='Number of markets to sync (default: 5000)')
     parser.add_argument('--migrate', action='store_true',
@@ -421,7 +501,6 @@ if __name__ == "__main__":
     print("Initializing database...")
     init_db()
     
-    # 可选：运行迁移
     if args.migrate:
         session = get_session()
         migrate_database(session)
@@ -434,7 +513,9 @@ if __name__ == "__main__":
         retry_failed=not args.no_retry
     )
     
-    print(f"💡 Run 'streamlit run app/Home.py' to see results!\n")
+    print(f"💡 Next steps:")
+    print(f"   1. Run 'python jobs/ws_collector.py' to collect aggressor data")
+    print(f"   2. Run 'streamlit run app/Home.py' to see results!")
     
     exit_code = 0 if stats['failed'] == 0 else 1
     sys.exit(exit_code)

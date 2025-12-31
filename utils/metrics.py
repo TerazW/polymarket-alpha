@@ -1,6 +1,6 @@
 """
-Market Sensemaking 指标计算 - 完整版
-路线 A：Data API 版本（无 aggressor）
+Market Sensemaking 指标计算 - 完整版 v2
+路线 B：WebSocket + Data API 版本（带 aggressor）
 
 === 可用指标 ===
 
@@ -16,10 +16,10 @@ Market Sensemaking 指标计算 - 完整版
    ✅ ACR - Actual Convergence Rate
    ✅ CER - Convergence Efficiency Ratio
 
-=== 锁定指标（需要 aggressor 数据）===
-   🔒 AR - Aggressive Ratio
-   🔒 Volume Delta
-   🔒 CS - Conviction Score
+3. 信念强度类 - ✅ UNLOCKED (WebSocket 提供 aggressor 数据)
+   ✅ AR - Aggressive Ratio
+   ✅ Volume Delta
+   ✅ CS - Conviction Score
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -42,8 +42,6 @@ def calculate_histogram(trades: List[Dict], tick_size: float = 0.01) -> Dict[flo
     
     Returns:
         {price_level: total_volume} 字典
-    
-    注意：Data API 的 price 是 0-1，不需要转换
     """
     histogram = defaultdict(float)
     
@@ -73,27 +71,18 @@ def calculate_consensus_band(
     
     定义：覆盖 X% 成交量权重的概率区间
     
-    Args:
-        histogram: Volume-at-Price profile
-        coverage: 覆盖百分比（默认 70%）
-    
     Returns:
         (VAH, VAL, mid_probability)
-        - VAH (Value Area High): 共识带上界
-        - VAL (Value Area Low): 共识带下界  
-        - mid_probability: 共识带中点 (VAH + VAL) / 2
     """
     if not histogram:
         return None, None, None
     
-    # 按成交量排序（从大到小）
     sorted_bins = sorted(histogram.items(), key=lambda x: x[1], reverse=True)
     total_volume = sum(histogram.values())
     
     if total_volume == 0:
         return None, None, None
     
-    # 累积到目标覆盖率
     target_volume = total_volume * coverage
     cumulative = 0
     consensus_prices = []
@@ -115,21 +104,7 @@ def calculate_consensus_band(
 
 
 def get_band_width(histogram: Dict[float, float], coverage: float = 0.70) -> Optional[float]:
-    """
-    计算 Band Width (带宽)
-    
-    定义：band_width = VAH - VAL
-    用途：不确定性强弱
-    - BW 大 → 认知分散
-    - BW 小 → 共识集中
-    
-    Args:
-        histogram: Volume-at-Price profile
-        coverage: 覆盖百分比（默认 70%）
-    
-    Returns:
-        Band Width (0-1 范围)
-    """
+    """计算 Band Width (带宽)"""
     VAH, VAL, _ = calculate_consensus_band(histogram, coverage)
     
     if VAH is None or VAL is None:
@@ -139,18 +114,7 @@ def get_band_width(histogram: Dict[float, float], coverage: float = 0.70) -> Opt
 
 
 def calculate_pomd(histogram: Dict[float, float]) -> Optional[float]:
-    """
-    计算 POMD (Point of Max Disagreement)
-    
-    定义：最大分歧点 - 成交量最大的价格点
-    意义：市场争议最激烈的概率点
-    
-    Args:
-        histogram: Volume-at-Price profile
-    
-    Returns:
-        POMD 价格点 (0-1 范围)
-    """
+    """计算 POMD (Point of Max Disagreement)"""
     if not histogram:
         return None
     
@@ -162,45 +126,24 @@ def calculate_rejected_probabilities(
     histogram: Dict[float, float],
     threshold_percentile: float = 0.10
 ) -> List[float]:
-    """
-    计算 Rejected Probabilities (被否定概率区)
-    
-    定义：成交量极低的价格区间（类似 Market Profile 的 single prints）
-    意义：被市场快速否定/停留极短的区间
-    
-    Args:
-        histogram: Volume-at-Price profile
-        threshold_percentile: 低于此百分位的视为 rejected（默认 10%）
-    
-    Returns:
-        被否定的价格点列表
-    """
+    """计算 Rejected Probabilities (被否定概率区)"""
     if not histogram or len(histogram) < 3:
         return []
     
     volumes = list(histogram.values())
     
     try:
-        # 计算阈值（第 10 百分位）
         sorted_volumes = sorted(volumes)
         threshold_idx = max(0, int(len(sorted_volumes) * threshold_percentile) - 1)
         threshold = sorted_volumes[threshold_idx]
-        
-        # 找出低于阈值的价格点
         rejected = [price for price, volume in histogram.items() if volume <= threshold]
-        
         return sorted(rejected)
     except Exception:
         return []
 
 
 def get_volume_profile_summary(histogram: Dict[float, float]) -> Dict:
-    """
-    获取 Volume Profile 的完整摘要
-    
-    Returns:
-        包含所有 Profile 相关指标的字典
-    """
+    """获取 Volume Profile 的完整摘要"""
     VAH, VAL, mid_prob = calculate_consensus_band(histogram)
     band_width = get_band_width(histogram)
     pomd = calculate_pomd(histogram)
@@ -227,19 +170,6 @@ def calculate_ui(histogram: Dict[float, float]) -> Optional[float]:
     计算 UI (Uncertainty Index)
     
     定义：UI = band_width / mid_probability
-    
-    意义：同样带宽，在不同价格位置的不确定性不同
-    - 50% 附近的 10% 带宽 → UI = 0.2，中等不确定性
-    - 90% 附近的 10% 带宽 → UI = 0.11，但实际是极度不确定（接近确定却分裂）
-    
-    注意：这个公式在高概率区域会低估不确定性，
-    但在中等概率区域是合理的度量
-    
-    Args:
-        histogram: Volume-at-Price profile
-    
-    Returns:
-        UI 值（越高越不确定）
     """
     VAH, VAL, mid_probability = calculate_consensus_band(histogram)
     
@@ -248,16 +178,13 @@ def calculate_ui(histogram: Dict[float, float]) -> Optional[float]:
     
     band_width = VAH - VAL
     
-    # 边界情况：价格极端位置不计算（避免除以接近0的数）
     if mid_probability < 0.10 or mid_probability > 0.90:
         return None
     
     if mid_probability == 0:
         return None
     
-    ui = band_width / mid_probability
-    
-    return ui
+    return band_width / mid_probability
 
 
 def calculate_ecr(
@@ -268,28 +195,15 @@ def calculate_ecr(
     计算 ECR (Expected Convergence Rate)
     
     定义：ECR = distance_to_certainty / days_remaining
-    意义：理论上"还剩多少要收敛"，即期望的每日收敛速度
-    
-    Args:
-        current_price: 当前价格 (0-1 范围)
-        days_remaining: 剩余天数
-    
-    Returns:
-        ECR 值（每天期望收敛的概率距离）
     """
     if days_remaining < 1:
         return None
     
-    # 价格极端位置不计算
     if current_price > 0.95 or current_price < 0.05:
         return None
     
-    # 到确定性的距离（取较近的一端）
     distance_to_certainty = min(current_price, 1 - current_price)
-    
-    ecr = distance_to_certainty / days_remaining
-    
-    return ecr
+    return distance_to_certainty / days_remaining
 
 
 def calculate_acr(
@@ -301,19 +215,6 @@ def calculate_acr(
     计算 ACR (Actual Convergence Rate)
     
     定义：ACR = (band_width_7d_ago - band_width_now) / days
-    意义：实际不确定性收窄速度
-    
-    - ACR > 0：共识在收敛（好）
-    - ACR < 0：共识在发散（可能有新信息冲击）
-    - ACR ≈ 0：停滞
-    
-    Args:
-        band_width_now: 当前带宽
-        band_width_7d_ago: 7天前的带宽
-        days: 时间间隔（默认 7 天）
-    
-    Returns:
-        ACR 值（每天实际收敛的带宽）
     """
     if band_width_now is None or band_width_7d_ago is None:
         return None
@@ -321,9 +222,7 @@ def calculate_acr(
     if days <= 0:
         return None
     
-    acr = (band_width_7d_ago - band_width_now) / days
-    
-    return acr
+    return (band_width_7d_ago - band_width_now) / days
 
 
 def calculate_cer(
@@ -336,36 +235,16 @@ def calculate_cer(
     计算 CER (Convergence Efficiency Ratio)
     
     定义：CER = ACR / ECR
-    意义：市场收敛是否"健康/迟钝/阻塞"
-    
-    - CER > 1.0：收敛快于预期（非常健康，市场快速形成共识）
-    - CER ≈ 0.8-1.0：正常收敛
-    - CER < 0.5：收敛迟钝（可能有持续分歧）
-    - CER < 0：发散（新信息导致不确定性增加）
-    
-    Args:
-        band_width_now: 当前带宽
-        band_width_7d_ago: 7天前的带宽
-        current_price: 当前价格 (0-1 范围)
-        days_remaining: 剩余天数
-    
-    Returns:
-        CER 值
     """
-    # 计算 ECR
     ecr = calculate_ecr(current_price, days_remaining)
     if ecr is None or ecr <= 0:
         return None
     
-    # 计算 ACR
     acr = calculate_acr(band_width_now, band_width_7d_ago)
     if acr is None:
         return None
     
-    # CER
-    cer = acr / ecr
-    
-    return cer
+    return acr / ecr
 
 
 def get_uncertainty_metrics(
@@ -374,12 +253,7 @@ def get_uncertainty_metrics(
     days_remaining: int,
     band_width_7d_ago: Optional[float] = None
 ) -> Dict:
-    """
-    获取所有不确定性指标的摘要
-    
-    Returns:
-        包含 UI, ECR, ACR, CER 的字典
-    """
+    """获取所有不确定性指标的摘要"""
     band_width_now = get_band_width(histogram)
     
     return {
@@ -393,103 +267,196 @@ def get_uncertainty_metrics(
 
 
 # ============================================================================
-# 3. 信念强度类 - 🔒 LOCKED (需要 aggressor 数据)
+# 3. 信念强度类 - ✅ UNLOCKED (WebSocket 提供 aggressor 数据)
 # ============================================================================
 
-def calculate_ar(trades: List[Dict]) -> Optional[float]:
+def calculate_ar(
+    aggressive_buy: float,
+    aggressive_sell: float,
+    total_volume: float
+) -> Optional[float]:
     """
-    🔒 LOCKED: 需要 aggressor (TAKER/MAKER) 数据
+    ✅ UNLOCKED: 使用 WebSocket aggressor 数据
     
     AR (Aggressive Ratio) = aggressive_volume / total_volume
     
-    意义：主动交易占比
-    - AR 高 → 市场参与者主动出击，信念强
-    - AR 低 → 被动挂单成交为主
+    在预测市场中，所有 trades 都是由 taker 触发的：
+    - aggressive_buy = taker 主动买入的 volume
+    - aggressive_sell = taker 主动卖出的 volume
+    
+    AR 的意义：
+    - 接近 1（默认）表示所有成交都来自主动方
+    - 在计算 CS 时更关注 delta 而非 AR
+    
+    Args:
+        aggressive_buy: 主动买入量
+        aggressive_sell: 主动卖出量
+        total_volume: 总成交量
+    
+    Returns:
+        AR 值（0-1）
     """
-    return None  # Data API 没有 aggressor 信息
+    if total_volume <= 0:
+        return None
+    
+    # 在预测市场，所有交易都是 taker 触发的
+    # 所以 AR 理论上 = 1
+    # 但我们可以用 |buy - sell| / total 来表示"方向性强度"
+    return 1.0
 
 
-def calculate_volume_delta(trades: List[Dict]) -> Optional[float]:
+def calculate_volume_delta(
+    aggressive_buy: float,
+    aggressive_sell: float
+) -> Optional[float]:
     """
-    🔒 LOCKED: 需要 aggressor (TAKER/MAKER) 数据
+    ✅ UNLOCKED: 使用 WebSocket aggressor 数据
     
     Volume Delta = aggressive_buy - aggressive_sell
     
-    意义：主动买卖的不平衡
-    - Delta > 0 → 主动买入占优
-    - Delta < 0 → 主动卖出占优
+    意义：
+    - Delta > 0 → 主动买入占优（看涨）
+    - Delta < 0 → 主动卖出占优（看跌）
+    - |Delta| 大 → 强单边力量
+    
+    Args:
+        aggressive_buy: 主动买入量
+        aggressive_sell: 主动卖出量
+    
+    Returns:
+        Volume Delta
     """
-    return None  # Data API 没有 aggressor 信息
+    return aggressive_buy - aggressive_sell
 
 
-def calculate_cs(trades: List[Dict]) -> Optional[float]:
+def calculate_cs(
+    aggressive_buy: float,
+    aggressive_sell: float,
+    total_volume: float
+) -> Optional[float]:
     """
-    🔒 LOCKED: 需要 aggressor (TAKER/MAKER) 数据
+    ✅ UNLOCKED: 使用 WebSocket aggressor 数据
     
-    CS (Conviction Score) = (AR * |delta|) / total_volume
+    CS (Conviction Score) = |delta| / total_volume
     
-    意义：共识是否"主动形成"
-    - 高 CS = 强 AR + 大 delta = 主动形成的强信念
-    - 低 CS = 弱 AR 或小 delta = 被动形成的弱共识
+    简化说明：
+    - 原公式：CS = (AR × |delta|) / total_volume
+    - 在预测市场 AR ≈ 1，所以简化为 |delta| / total_volume
     
-    注意：旧版本用 BUY/SELL side 计算是不准确的，
-    真正的 CS 需要知道谁是 taker (主动方)
+    意义：
+    - CS 高 (> 0.5) → 强单边主动成交，强信念
+    - CS 中 (0.2-0.5) → 有方向偏好，中等信念
+    - CS 低 (< 0.2) → 买卖均衡，弱信念
+    
+    Args:
+        aggressive_buy: 主动买入量
+        aggressive_sell: 主动卖出量
+        total_volume: 总成交量
+    
+    Returns:
+        CS 值（0-1）
     """
-    return None  # Data API 没有 aggressor 信息
+    if total_volume <= 0:
+        return None
+    
+    delta = abs(aggressive_buy - aggressive_sell)
+    cs = delta / total_volume
+    
+    # 限制在 [0, 1]
+    return min(cs, 1.0)
+
+
+def get_conviction_metrics(
+    aggressive_buy: float,
+    aggressive_sell: float,
+    total_volume: float
+) -> Dict:
+    """
+    获取所有信念强度指标
+    
+    Args:
+        aggressive_buy: 主动买入量（来自 WebSocket）
+        aggressive_sell: 主动卖出量（来自 WebSocket）
+        total_volume: 总成交量
+    
+    Returns:
+        包含 AR, Volume Delta, CS 的字典
+    """
+    delta = calculate_volume_delta(aggressive_buy, aggressive_sell)
+    
+    # 方向
+    if delta is not None:
+        if delta > 0:
+            direction = "BULLISH"
+        elif delta < 0:
+            direction = "BEARISH"
+        else:
+            direction = "NEUTRAL"
+    else:
+        direction = "UNKNOWN"
+    
+    return {
+        'AR': calculate_ar(aggressive_buy, aggressive_sell, total_volume),
+        'volume_delta': delta,
+        'CS': calculate_cs(aggressive_buy, aggressive_sell, total_volume),
+        'aggressive_buy': aggressive_buy,
+        'aggressive_sell': aggressive_sell,
+        'total_volume': total_volume,
+        'direction': direction
+    }
 
 
 # ============================================================================
-# 4. 状态判定
+# 4. 状态判定 - 更新版（使用 CS）
 # ============================================================================
 
 def determine_status(
     ui: Optional[float],
     cer: Optional[float],
-    cs: Optional[float] = None  # 路线 A 下始终为 None
+    cs: Optional[float] = None
 ) -> str:
     """
-    判定市场状态
-    
-    路线 A (无 aggressor)：只用 UI + CER 判断
+    判定市场状态 - 完整版（使用 CS）
     
     分类逻辑：
-    - 🟢 Informed: 低不确定性 (UI < 0.30) + 健康收敛 (CER >= 0.8)
-    - 🔴 Noisy: 高不确定性 (UI >= 0.50) 或 收敛阻塞 (CER < 0.4)
+    - 🟢 Informed: 低不确定性 + 健康收敛 + 强信念
+      - UI < 0.30 AND CER >= 0.8 AND (CS >= 0.35 OR CS is None)
+    
+    - 🔴 Noisy: 高不确定性 或 收敛阻塞 或 极弱信念
+      - UI >= 0.50 OR CER < 0.4 OR CS < 0.15
+    
     - 🟡 Fragmented: 其余情况
+    
     - ⚪ Unknown: 数据不足
-    
-    Args:
-        ui: Uncertainty Index
-        cer: Convergence Efficiency Ratio
-        cs: Conviction Score (路线 A 下为 None)
-    
-    Returns:
-        状态字符串
     """
     # 数据不足
     if ui is None and cer is None:
         return "⚪ Unknown"
     
-    # 🔴 Noisy（任一指标很差）
-    if (ui is not None and ui >= 0.50) or \
-       (cer is not None and cer < 0.4):
+    # 🔴 Noisy
+    if (ui is not None and ui >= 0.50):
+        return "🔴 Noisy"
+    if (cer is not None and cer < 0.4):
+        return "🔴 Noisy"
+    if (cs is not None and cs < 0.15):
         return "🔴 Noisy"
     
-    # 🟢 Informed（两个指标都良好）
-    if (ui is not None and ui < 0.30) and \
-       (cer is not None and cer >= 0.8):
+    # 🟢 Informed
+    ui_good = (ui is not None and ui < 0.30)
+    cer_good = (cer is not None and cer >= 0.8)
+    cs_good = (cs is None or cs >= 0.35)  # CS 不可用时不阻挡
+    
+    if ui_good and cer_good and cs_good:
         return "🟢 Informed"
     
-    # 🟡 Fragmented（其余情况）
+    # 🟡 Fragmented
     return "🟡 Fragmented"
 
 
 def get_status_explanation(status: str) -> str:
-    """
-    获取状态的中文解释
-    """
+    """获取状态的中文解释"""
     explanations = {
-        "🟢 Informed": "市场已形成稳定共识",
+        "🟢 Informed": "市场已形成稳定共识，信念强",
         "🟡 Fragmented": "市场理解分裂，存在分歧",
         "🔴 Noisy": "市场缺乏稳定认知结构",
         "⚪ Unknown": "数据不足，无法判定"
@@ -502,18 +469,7 @@ def get_status_explanation(status: str) -> str:
 # ============================================================================
 
 def filter_trades_by_time(trades: List[Dict], hours: int = 24) -> List[Dict]:
-    """
-    筛选指定时间内的成交
-    
-    Args:
-        trades: 交易列表
-        hours: 时间窗口（小时）
-    
-    Returns:
-        过滤后的交易列表
-    
-    注意：Data API 的 timestamp 是秒（不是毫秒）
-    """
+    """筛选指定时间内的成交"""
     cutoff = datetime.now() - timedelta(hours=hours)
     cutoff_ts = int(cutoff.timestamp())
     
@@ -525,22 +481,29 @@ def calculate_all_metrics(
     trades_24h: List[Dict],
     current_price: float,
     days_remaining: int,
-    band_width_7d_ago: Optional[float] = None
+    band_width_7d_ago: Optional[float] = None,
+    # WebSocket aggressor 数据（可选）
+    aggressive_buy: Optional[float] = None,
+    aggressive_sell: Optional[float] = None,
+    ws_total_volume: Optional[float] = None
 ) -> Dict:
     """
     一站式计算所有指标
     
     Args:
-        trades_all: 所有交易（用于 profile）
-        trades_24h: 24h 交易（用于近期活动分析）
+        trades_all: 所有交易（用于 profile，来自 Data API）
+        trades_24h: 24h 交易
         current_price: 当前价格 (0-1)
         days_remaining: 剩余天数
         band_width_7d_ago: 7天前的 band width
+        aggressive_buy: 主动买入量（来自 WebSocket）
+        aggressive_sell: 主动卖出量（来自 WebSocket）
+        ws_total_volume: WebSocket 统计的总成交量
     
     Returns:
         包含所有指标的字典
     """
-    # 计算 histogram
+    # 计算 histogram（使用 Data API trades）
     histogram = calculate_histogram(trades_all)
     
     # Profile 相关
@@ -555,10 +518,17 @@ def calculate_all_metrics(
     acr = calculate_acr(band_width, band_width_7d_ago)
     cer = calculate_cer(band_width, band_width_7d_ago, current_price, days_remaining)
     
-    # 信念强度（锁定）
-    ar = calculate_ar(trades_24h)
-    volume_delta = calculate_volume_delta(trades_24h)
-    cs = calculate_cs(trades_24h)
+    # 信念强度（来自 WebSocket）
+    if aggressive_buy is not None and aggressive_sell is not None:
+        total_vol = ws_total_volume if ws_total_volume else (aggressive_buy + aggressive_sell)
+        ar = calculate_ar(aggressive_buy, aggressive_sell, total_vol)
+        volume_delta = calculate_volume_delta(aggressive_buy, aggressive_sell)
+        cs = calculate_cs(aggressive_buy, aggressive_sell, total_vol)
+    else:
+        # 没有 WebSocket 数据
+        ar = None
+        volume_delta = None
+        cs = None
     
     # 状态判定
     status = determine_status(ui, cer, cs)
@@ -578,10 +548,10 @@ def calculate_all_metrics(
         'ACR': acr,
         'CER': cer,
         
-        # 信念强度（锁定）
-        'AR': ar,  # None
-        'volume_delta': volume_delta,  # None
-        'CS': cs,  # None
+        # 信念强度
+        'AR': ar,
+        'volume_delta': volume_delta,
+        'CS': cs,
         
         # 状态
         'status': status,
@@ -590,7 +560,8 @@ def calculate_all_metrics(
         # 元数据
         'total_trades': len(trades_all),
         'trades_24h_count': len(trades_24h),
-        'band_width_7d_ago': band_width_7d_ago
+        'band_width_7d_ago': band_width_7d_ago,
+        'has_aggressor_data': aggressive_buy is not None
     }
 
 
@@ -599,7 +570,7 @@ def calculate_all_metrics(
 # ============================================================================
 
 if __name__ == "__main__":
-    print("🧪 Testing Metrics (Complete Version)\n")
+    print("🧪 Testing Metrics (Complete Version v2 - With Aggressor)\n")
     print("=" * 60)
     
     # 模拟交易数据
@@ -607,13 +578,17 @@ if __name__ == "__main__":
         {'price': 0.62, 'size': 50, 'timestamp': int(datetime.now().timestamp())},
         {'price': 0.63, 'size': 80, 'timestamp': int(datetime.now().timestamp())},
         {'price': 0.64, 'size': 120, 'timestamp': int(datetime.now().timestamp())},
-        {'price': 0.65, 'size': 200, 'timestamp': int(datetime.now().timestamp())},  # 最大成交
+        {'price': 0.65, 'size': 200, 'timestamp': int(datetime.now().timestamp())},
         {'price': 0.66, 'size': 150, 'timestamp': int(datetime.now().timestamp())},
         {'price': 0.67, 'size': 90, 'timestamp': int(datetime.now().timestamp())},
         {'price': 0.68, 'size': 60, 'timestamp': int(datetime.now().timestamp())},
-        {'price': 0.70, 'size': 20, 'timestamp': int(datetime.now().timestamp())},  # 低成交
-        {'price': 0.55, 'size': 15, 'timestamp': int(datetime.now().timestamp())},  # 低成交
+        {'price': 0.70, 'size': 20, 'timestamp': int(datetime.now().timestamp())},
+        {'price': 0.55, 'size': 15, 'timestamp': int(datetime.now().timestamp())},
     ]
+    
+    # 模拟 WebSocket aggressor 数据
+    agg_buy = 500.0   # 主动买入
+    agg_sell = 250.0  # 主动卖出
     
     # 计算所有指标
     metrics = calculate_all_metrics(
@@ -621,30 +596,31 @@ if __name__ == "__main__":
         trades_24h=test_trades,
         current_price=0.65,
         days_remaining=30,
-        band_width_7d_ago=0.12  # 假设7天前带宽是 12%
+        band_width_7d_ago=0.12,
+        aggressive_buy=agg_buy,
+        aggressive_sell=agg_sell
     )
     
     print("\n📊 1. Profile 相关指标")
     print("-" * 40)
-    print(f"  VAH (共识带上界):     {metrics['VAH']:.4f}" if metrics['VAH'] else "  VAH: N/A")
-    print(f"  VAL (共识带下界):     {metrics['VAL']:.4f}" if metrics['VAL'] else "  VAL: N/A")
-    print(f"  Mid Probability:      {metrics['mid_probability']:.4f}" if metrics['mid_probability'] else "  Mid Prob: N/A")
-    print(f"  Band Width (带宽):    {metrics['band_width']:.4f}" if metrics['band_width'] else "  Band Width: N/A")
-    print(f"  POMD (最大分歧点):    {metrics['POMD']:.4f}" if metrics['POMD'] else "  POMD: N/A")
-    print(f"  Rejected Probs:       {metrics['rejected_probabilities']}")
+    print(f"  VAH:     {metrics['VAH']:.4f}" if metrics['VAH'] else "  VAH: N/A")
+    print(f"  VAL:     {metrics['VAL']:.4f}" if metrics['VAL'] else "  VAL: N/A")
+    print(f"  BW:      {metrics['band_width']:.4f}" if metrics['band_width'] else "  BW: N/A")
+    print(f"  POMD:    {metrics['POMD']:.4f}" if metrics['POMD'] else "  POMD: N/A")
     
     print("\n📈 2. 不确定性指标")
     print("-" * 40)
-    print(f"  UI (不确定性指数):    {metrics['UI']:.4f}" if metrics['UI'] else "  UI: N/A")
-    print(f"  ECR (期望收敛率):     {metrics['ECR']:.6f}" if metrics['ECR'] else "  ECR: N/A")
-    print(f"  ACR (实际收敛率):     {metrics['ACR']:.6f}" if metrics['ACR'] else "  ACR: N/A")
-    print(f"  CER (收敛效率比):     {metrics['CER']:.4f}" if metrics['CER'] else "  CER: N/A")
+    print(f"  UI:      {metrics['UI']:.4f}" if metrics['UI'] else "  UI: N/A")
+    print(f"  ECR:     {metrics['ECR']:.6f}" if metrics['ECR'] else "  ECR: N/A")
+    print(f"  ACR:     {metrics['ACR']:.6f}" if metrics['ACR'] else "  ACR: N/A")
+    print(f"  CER:     {metrics['CER']:.4f}" if metrics['CER'] else "  CER: N/A")
     
-    print("\n🔒 3. 信念强度指标 (Locked)")
+    print("\n✅ 3. 信念强度指标 (UNLOCKED!)")
     print("-" * 40)
-    print(f"  AR:                   {metrics['AR']} (需要 aggressor 数据)")
-    print(f"  Volume Delta:         {metrics['volume_delta']} (需要 aggressor 数据)")
-    print(f"  CS:                   {metrics['CS']} (需要 aggressor 数据)")
+    print(f"  AR:           {metrics['AR']:.4f}" if metrics['AR'] else "  AR: N/A")
+    print(f"  Volume Delta: {metrics['volume_delta']:.2f}" if metrics['volume_delta'] is not None else "  Delta: N/A")
+    print(f"  CS:           {metrics['CS']:.4f}" if metrics['CS'] else "  CS: N/A")
+    print(f"  Has Data:     {metrics['has_aggressor_data']}")
     
     print("\n📍 4. 状态判定")
     print("-" * 40)
