@@ -1,11 +1,11 @@
 """
-Market Sensemaking 指标计算 - 完整版 v5
+Market Sensemaking 指标计算 - 完整版 v5.3
 
-=== 修复内容 ===
-1. timestamp 统一（自动适配 ms/s）
-2. CS v2 = Directional AR × Participation（避免小样本虚高）
-3. Direction 判断用 AR 阈值（语义更清晰）
-4. 状态判定逻辑优化
+=== v5.3 更新 ===
+1. edge_zone flag: 极端概率市场标记而非返回 None
+2. Noisy 判定加 volume 门槛: 防止误伤冷市场
+3. V0 配置化: 支持环境变量设置
+4. impulse_tag: EMERGING/ABSORPTION/EXHAUSTION 独立标签
 
 === 可用指标 ===
 
@@ -25,7 +25,12 @@ Market Sensemaking 指标计算 - 完整版 v5
 3. 信念强度类
    ✅ AR (Directional) = |delta| / total（方向性强度）
    ✅ Volume Delta = buy - sell（方向）
-   ✅ CS v2 = AR × log(1 + volume)（信念强度 × 参与规模）
+   ✅ CS v2 = AR × log(1 + volume/V0)（信念强度 × 参与规模）
+
+4. 状态分类
+   ✅ status: Informed / Fragmented / Noisy（结构状态）
+   ✅ impulse_tag: EMERGING / ABSORPTION / EXHAUSTION（提示标签）
+   ✅ edge_zone: True/False（是否接近确定）
 
 === 数据来源分工 ===
 - Data API: trades → Histogram → VAH/VAL/POC/UI/CER
@@ -33,21 +38,23 @@ Market Sensemaking 指标计算 - 完整版 v5
 """
 
 import math
+import os
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 
 
 # ============================================================================
-# 配置常量
+# 配置常量（支持环境变量覆盖）
 # ============================================================================
 
 # Direction 判断阈值
 AR_BULLISH_THRESHOLD = 0.10   # AR > 0.10 且 delta > 0 → BULLISH
 AR_BEARISH_THRESHOLD = 0.10   # AR > 0.10 且 delta < 0 → BEARISH
 
-# CS v2 归一化基准
-CS_VOLUME_BASELINE = 1000.0   # V0: 归一化基准，使阈值跨市场稳定
+# CS v2 归一化基准（可通过环境变量配置）
+# V0 建议用历史数据 P50-P70 标定
+CS_VOLUME_BASELINE = float(os.getenv('CS_VOLUME_BASELINE', '1000.0'))
 
 # POMD 最小阈值
 POMD_MIN_THRESHOLD_RATIO = 0.02  # 至少占总量 2% 才算有效争议点
@@ -59,6 +66,23 @@ UI_NOISY_THRESHOLD = 0.50
 CER_INFORMED_THRESHOLD = 0.80
 CER_NOISY_THRESHOLD = 0.40
 CS_NOISY_THRESHOLD = 0.3   # CS 很低 = 没有方向性参与
+
+# Noisy 判定的 volume 门槛（防止误伤冷市场）
+NOISY_MIN_VOLUME = float(os.getenv('NOISY_MIN_VOLUME', '100.0'))
+
+# Edge Zone 阈值（接近确定的市场）
+EDGE_ZONE_LOW = 0.10   # mid_prob < 10%
+EDGE_ZONE_HIGH = 0.90  # mid_prob > 90%
+
+# Impulse Tag 阈值
+IMPULSE_EMERGING_UI = 0.35
+IMPULSE_EMERGING_CS = 0.45
+IMPULSE_EMERGING_CER = 0.5
+IMPULSE_ABSORPTION_CS_MIN = 0.25
+IMPULSE_ABSORPTION_CS_MAX = 0.45
+IMPULSE_ABSORPTION_PRICE_EPSILON = 0.02  # POMD 与 price 差距
+IMPULSE_EXHAUSTION_CS = 0.7
+IMPULSE_EXHAUSTION_UI = 0.2
 
 
 # ============================================================================
@@ -393,7 +417,7 @@ def get_volume_profile_summary(
 # 2. 不确定性类
 # ============================================================================
 
-def calculate_ui(histogram: Dict[float, float]) -> Optional[float]:
+def calculate_ui(histogram: Dict[float, float]) -> Tuple[Optional[float], bool]:
     """
     UI (Uncertainty Index) = band_width / mid_probability
     
@@ -401,26 +425,41 @@ def calculate_ui(histogram: Dict[float, float]) -> Optional[float]:
     - 同样 10% 带宽，在 50% 附近 → 不确定性中等
     - 同样 10% 带宽，在 90% 附近 → 极度不确定（接近确定却分裂）
     
+    Returns:
+        (ui_value, edge_zone)
+        - ui_value: UI 值，极端概率时为 None
+        - edge_zone: True 如果 mid_prob < 10% 或 > 90%（接近确定）
+    
     解读：
     - UI < 0.30: 低不确定性
     - UI 0.30-0.50: 中等
     - UI >= 0.50: 高不确定性
+    - edge_zone=True: 市场接近确定，UI 意义有限
     """
     VAH, VAL, mid_probability = calculate_consensus_band(histogram)
     
     if VAH is None or VAL is None or mid_probability is None:
-        return None
+        return None, False
     
     band_width = VAH - VAL
     
-    # 边界情况：极端价格时 UI 意义不大
-    if mid_probability < 0.10 or mid_probability > 0.90:
-        return None
+    # 边界情况：极端价格时标记 edge_zone
+    if mid_probability < EDGE_ZONE_LOW or mid_probability > EDGE_ZONE_HIGH:
+        return None, True  # UI=None 但 edge_zone=True
     
     if mid_probability == 0:
-        return None
+        return None, False
     
-    return band_width / mid_probability
+    return band_width / mid_probability, False
+
+
+def calculate_ui_simple(histogram: Dict[float, float]) -> Optional[float]:
+    """
+    简化版 UI（兼容旧代码）
+    只返回 UI 值，不返回 edge_zone
+    """
+    ui, _ = calculate_ui(histogram)
+    return ui
 
 
 def calculate_ecr(current_price: float, days_remaining: int) -> Optional[float]:
@@ -646,7 +685,9 @@ def get_conviction_metrics(
 def determine_status(
     ui: Optional[float],
     cer: Optional[float],
-    cs: Optional[float] = None
+    cs: Optional[float] = None,
+    total_volume: Optional[float] = None,
+    edge_zone: bool = False
 ) -> str:
     """
     判定市场状态
@@ -659,18 +700,25 @@ def determine_status(
     🔴 Noisy: 市场缺乏稳定认知结构
        - UI >= 0.50 (带宽太宽)
        - 或 CER < 0.40 (收敛阻塞)
-       - 或 CS < 0.3 且有数据 (完全没方向性参与)
+       - 或 CS < 0.3 且 volume > 门槛 (有足够成交但没方向)
     
     🟡 Fragmented: 市场理解分裂，存在分歧
        - 其余情况
     
     ⚪ Unknown: 数据不足
     
+    🔵 Late-stage: edge_zone=True（接近确定）
+    
     设计原则：
     - Informed = 已稳定，不是"正在形成共识"
     - CS 高 = 有人在主动推动，可能是事件驱动或共识形成中
     - 因此 Informed 不要求 CS 高
+    - Noisy 判定需要足够成交量，避免误伤冷市场
     """
+    # Edge Zone 优先判定（接近确定的市场）
+    if edge_zone:
+        return "🔵 Late-stage"
+    
     if ui is None and cer is None:
         return "⚪ Unknown"
     
@@ -679,9 +727,13 @@ def determine_status(
         return "🔴 Noisy"
     if cer is not None and cer < CER_NOISY_THRESHOLD:
         return "🔴 Noisy"
-    # CS 很低 = 完全没有方向性参与（但要有数据才判断）
+    
+    # CS 很低 = 没有方向性参与
+    # 但必须有足够成交量才判定为 Noisy（防止误伤冷市场）
     if cs is not None and cs < CS_NOISY_THRESHOLD:
-        return "🔴 Noisy"
+        volume_sufficient = (total_volume is None) or (total_volume >= NOISY_MIN_VOLUME)
+        if volume_sufficient:
+            return "🔴 Noisy"
     
     # Informed 条件（UI + CER 都满足，不看 CS）
     ui_good = (ui is not None and ui < UI_INFORMED_THRESHOLD)
@@ -699,9 +751,71 @@ def get_status_explanation(status: str) -> str:
         "🟢 Informed": "市场已形成稳定共识，信念强",
         "🟡 Fragmented": "市场理解分裂，存在分歧",
         "🔴 Noisy": "市场缺乏稳定认知结构",
+        "🔵 Late-stage": "市场接近确定，已进入末期",
         "⚪ Unknown": "数据不足，无法判定"
     }
     return explanations.get(status, "未知状态")
+
+
+def determine_impulse_tag(
+    ui: Optional[float],
+    cer: Optional[float],
+    cs: Optional[float],
+    pomd: Optional[float],
+    current_price: Optional[float]
+) -> Optional[str]:
+    """
+    判定 Impulse Tag（独立于 status 的提示标签）
+    
+    ⚡ EMERGING: 共识正在形成
+       - UI 高（分歧大）+ CS 高（方向明确）+ CER 不差
+       - 这是最强的"早期共识"信号
+    
+    🔄 ABSORPTION: 关键位置拉锯
+       - POMD ≈ current_price（双方在当前价位对抗）
+       - CS 中等（有对抗但方向未定）
+       - Regime 转换的前夜
+    
+    💨 EXHAUSTION: 末期动能
+       - CS 很高 + UI 很低
+       - 看起来"所有人都同意"但结构已给不出新信息
+       - 风险警告信号
+    
+    Returns:
+        str or None: "EMERGING" / "ABSORPTION" / "EXHAUSTION" / None
+    """
+    # EMERGING: 共识正在形成（最强 edge）
+    if (ui is not None and ui >= IMPULSE_EMERGING_UI and
+        cs is not None and cs >= IMPULSE_EMERGING_CS and
+        cer is not None and cer >= IMPULSE_EMERGING_CER):
+        return "⚡ EMERGING"
+    
+    # ABSORPTION: 关键位置拉锯
+    if (pomd is not None and current_price is not None and
+        cs is not None and 
+        IMPULSE_ABSORPTION_CS_MIN <= cs <= IMPULSE_ABSORPTION_CS_MAX):
+        if abs(pomd - current_price) < IMPULSE_ABSORPTION_PRICE_EPSILON:
+            return "🔄 ABSORPTION"
+    
+    # EXHAUSTION: 末期动能（风险警告）
+    if (cs is not None and cs >= IMPULSE_EXHAUSTION_CS and
+        ui is not None and ui < IMPULSE_EXHAUSTION_UI):
+        return "💨 EXHAUSTION"
+    
+    return None
+
+
+def get_impulse_explanation(impulse_tag: Optional[str]) -> str:
+    """获取 impulse tag 解释"""
+    if impulse_tag is None:
+        return ""
+    
+    explanations = {
+        "⚡ EMERGING": "共识正在形成 - 订单流开始单边，早期参与机会",
+        "🔄 ABSORPTION": "关键位置拉锯 - 双方在当前价位对抗，突破即信号",
+        "💨 EXHAUSTION": "末期动能警告 - 看似共识但结构已饱和，风险高"
+    }
+    return explanations.get(impulse_tag, "")
 
 
 # ============================================================================
@@ -824,8 +938,8 @@ def calculate_all_metrics(
         )
         pomd = calculate_pomd(aggressor_histogram, total_volume=ws_vol)
     
-    # 不确定性相关
-    ui = calculate_ui(histogram)
+    # 不确定性相关（使用新的返回格式）
+    ui, edge_zone = calculate_ui(histogram)
     ecr = calculate_ecr(current_price, days_remaining)
     acr = calculate_acr(band_width, band_width_7d_ago)
     cer = calculate_cer(band_width, band_width_7d_ago, current_price, days_remaining)
@@ -835,6 +949,7 @@ def calculate_all_metrics(
     volume_delta = None
     cs = None
     direction = "UNKNOWN"
+    total_vol = None
     
     if aggressive_buy is not None and aggressive_sell is not None:
         total_vol = ws_total_volume if ws_total_volume else (aggressive_buy + aggressive_sell)
@@ -843,8 +958,11 @@ def calculate_all_metrics(
         cs = calculate_cs(aggressive_buy, aggressive_sell, total_vol)
         direction = get_direction(aggressive_buy, aggressive_sell, total_vol)
     
-    # 状态判定
-    status = determine_status(ui, cer, cs)
+    # 状态判定（包含 volume 门槛和 edge_zone）
+    status = determine_status(ui, cer, cs, total_vol, edge_zone)
+    
+    # Impulse Tag（独立提示标签）
+    impulse_tag = determine_impulse_tag(ui, cer, cs, pomd, current_price)
     
     return {
         # Profile
@@ -863,6 +981,7 @@ def calculate_all_metrics(
         'ECR': ecr,
         'ACR': acr,
         'CER': cer,
+        'edge_zone': edge_zone,
         
         # 信念强度
         'AR': ar,
@@ -873,6 +992,8 @@ def calculate_all_metrics(
         # 状态
         'status': status,
         'status_explanation': get_status_explanation(status),
+        'impulse_tag': impulse_tag,
+        'impulse_explanation': get_impulse_explanation(impulse_tag),
         
         # 元数据
         'total_trades': len(trades_all),
@@ -889,7 +1010,7 @@ def calculate_all_metrics(
 # ============================================================================
 
 if __name__ == "__main__":
-    print("🧪 Testing Metrics v5\n")
+    print("🧪 Testing Metrics v5.3\n")
     print("=" * 60)
     
     # === 测试 1: timestamp 统一 ===
@@ -1007,11 +1128,11 @@ if __name__ == "__main__":
     print(f"   POMD (最大争议): {pomd}")
     print(f"   ✅ POC ≠ POMD: 最大成交点不是最大争议点")
     
-    # === 测试 6: 状态判定 (Informed 不要求 CS 高) ===
-    print("\n📍 Test 6: Status Determination (Informed doesn't require high CS)")
+    # === 测试 6: 状态判定 (v5.3: 包含 volume 门槛和 edge_zone) ===
+    print("\n📍 Test 6: Status Determination (v5.3)")
     
     # Informed: UI 低 + CER 高，不管 CS
-    status1 = determine_status(ui=0.2, cer=0.9, cs=0.5)  # CS 中等也能 Informed
+    status1 = determine_status(ui=0.2, cer=0.9, cs=0.5)
     print(f"   UI=0.2, CER=0.9, CS=0.5 → {status1}")
     
     # Informed: 没有 CS 数据也能判定
@@ -1022,13 +1143,54 @@ if __name__ == "__main__":
     status3 = determine_status(ui=0.6, cer=0.9, cs=1.0)
     print(f"   UI=0.6, CER=0.9, CS=1.0 → {status3}")
     
-    # Noisy (very low CS = no participation)
-    status4 = determine_status(ui=0.3, cer=0.5, cs=0.1)
-    print(f"   UI=0.3, CER=0.5, CS=0.1 → {status4}")
+    # Noisy (low CS + sufficient volume)
+    status4 = determine_status(ui=0.3, cer=0.5, cs=0.1, total_volume=500)
+    print(f"   UI=0.3, CER=0.5, CS=0.1, vol=500 → {status4}")
+    
+    # NOT Noisy (low CS but cold market - volume too low)
+    status4b = determine_status(ui=0.3, cer=0.5, cs=0.1, total_volume=50)
+    print(f"   UI=0.3, CER=0.5, CS=0.1, vol=50 → {status4b} (cold market protected)")
+    
+    # Late-stage (edge_zone)
+    status5 = determine_status(ui=None, cer=0.9, cs=0.5, edge_zone=True)
+    print(f"   edge_zone=True → {status5}")
     
     # Fragmented
-    status5 = determine_status(ui=0.35, cer=0.6, cs=0.8)
-    print(f"   UI=0.35, CER=0.6, CS=0.8 → {status5}")
+    status6 = determine_status(ui=0.35, cer=0.6, cs=0.8)
+    print(f"   UI=0.35, CER=0.6, CS=0.8 → {status6}")
+    
+    # === 测试 7: Impulse Tag ===
+    print("\n📍 Test 7: Impulse Tag (v5.3)")
+    
+    # EMERGING: 高 UI + 高 CS + OK CER
+    impulse1 = determine_impulse_tag(ui=0.4, cer=0.6, cs=0.5, pomd=None, current_price=0.65)
+    print(f"   UI=0.4, CS=0.5, CER=0.6 → {impulse1}")
+    
+    # ABSORPTION: POMD ≈ price + 中等 CS
+    impulse2 = determine_impulse_tag(ui=0.35, cer=0.5, cs=0.35, pomd=0.65, current_price=0.66)
+    print(f"   POMD≈price, CS=0.35 → {impulse2}")
+    
+    # EXHAUSTION: 高 CS + 低 UI
+    impulse3 = determine_impulse_tag(ui=0.15, cer=0.9, cs=0.8, pomd=None, current_price=0.85)
+    print(f"   UI=0.15, CS=0.8 → {impulse3}")
+    
+    # None: 不满足任何条件
+    impulse4 = determine_impulse_tag(ui=0.3, cer=0.5, cs=0.4, pomd=None, current_price=0.65)
+    print(f"   UI=0.3, CS=0.4 → {impulse4}")
+    
+    # === 测试 8: UI with edge_zone ===
+    print("\n📍 Test 8: UI with edge_zone flag")
+    
+    # 正常市场
+    test_normal = [{'price': 0.5, 'size': 100}, {'price': 0.55, 'size': 100}]
+    ui_norm, edge_norm = calculate_ui(calculate_histogram(test_normal))
+    ui_str = f"{ui_norm:.3f}" if ui_norm is not None else "None"
+    print(f"   Normal market (50%): UI={ui_str}, edge_zone={edge_norm}")
+    
+    # 极端市场（接近确定）
+    test_edge = [{'price': 0.92, 'size': 100}, {'price': 0.95, 'size': 100}]
+    ui_edge, edge_flag = calculate_ui(calculate_histogram(test_edge))
+    print(f"   Edge market (95%): UI={ui_edge}, edge_zone={edge_flag}")
     
     print("\n" + "=" * 60)
-    print("✅ All tests completed!")
+    print("✅ All v5.3 tests completed!")
