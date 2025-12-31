@@ -1,9 +1,10 @@
 """
-Lifecycle Phases 同步脚本
+Lifecycle Phases 同步脚本 v2
 
 功能：
 1. 回填历史 phases（用 Data API）
 2. 更新当前 phase（用 WebSocket 数据如果有）
+3. 门槛检查：不达标标记为 insufficient
 
 运行方式：
     python jobs/lifecycle_sync.py --markets 100
@@ -22,10 +23,12 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from sqlalchemy import text
-from utils.db import get_session, init_db, DATABASE_URL
+from utils.db import get_session, init_db, DATABASE_URL, IS_POSTGRES, get_interval_hours_sql
 from utils.polymarket_api import PolymarketAPI
 from utils.lifecycle import (
     PHASES,
+    MIN_TRADES_THRESHOLD,
+    MIN_VOLUME_THRESHOLD,
     calculate_phase_dates,
     get_current_phase,
     filter_trades_by_phase,
@@ -33,6 +36,7 @@ from utils.lifecycle import (
     save_phase_metrics,
     get_phase_metrics,
     create_lifecycle_table,
+    migrate_lifecycle_table,
 )
 
 
@@ -143,28 +147,27 @@ def sync_market_lifecycle(
         verbose: 是否打印详细日志
     
     Returns:
-        {'phases_synced': int, 'success': bool}
+        {'phases_synced': int, 'phases_valid': int, 'success': bool}
     """
     token_id = market['token_id']
     condition_id = market['condition_id']
     question = market['question']
     
     # 获取市场时间范围
-    # 注意：需要从 API 获取 created_at
     created_at_str = market.get('created_at')
     end_date_str = market.get('end_date')
     
     if not end_date_str:
         if verbose:
             print(f"  ⚠️ No end_date, skipping")
-        return {'phases_synced': 0, 'success': False}
+        return {'phases_synced': 0, 'phases_valid': 0, 'success': False}
     
     try:
         end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).replace(tzinfo=None)
     except:
         if verbose:
             print(f"  ⚠️ Invalid end_date, skipping")
-        return {'phases_synced': 0, 'success': False}
+        return {'phases_synced': 0, 'phases_valid': 0, 'success': False}
     
     # created_at：如果没有，估算为 end_date - 90 天
     if created_at_str:
@@ -200,10 +203,11 @@ def sync_market_lifecycle(
             print(f"  📈 Got {len(all_trades)} trades")
     
     phases_synced = 0
+    phases_valid = 0
     previous_band_width = None
     
     for phase_num, phase_start, phase_end in phases:
-        # 判断这个 phase 是否已完成
+        # 判断这个 phase 的状态
         phase_completed = now >= phase_end
         phase_in_progress = phase_start <= now < phase_end
         phase_future = now < phase_start
@@ -226,14 +230,11 @@ def sync_market_lifecycle(
         # 筛选这个 phase 的 trades
         phase_trades = filter_trades_by_phase(all_trades, phase_start, phase_end)
         
-        if not phase_trades:
-            if verbose:
-                print(f"     No trades in this phase")
-            continue
-        
         # 获取该 phase 结束时的价格（取最后一笔 trade 的价格）
-        phase_trades_sorted = sorted(phase_trades, key=lambda x: x.get('timestamp', 0))
-        price_at_end = float(phase_trades_sorted[-1].get('price', 0.5))
+        price_at_end = 0.5
+        if phase_trades:
+            phase_trades_sorted = sorted(phase_trades, key=lambda x: x.get('timestamp', 0))
+            price_at_end = float(phase_trades_sorted[-1].get('price', 0.5))
         
         # 计算剩余天数（该 phase 结束时）
         days_remaining = max(1, (end_date - phase_end).days)
@@ -265,8 +266,8 @@ def sync_market_lifecycle(
             aggressive_sell=aggressive_sell,
         )
         
-        if metrics.get('has_data'):
-            # 保存
+        # 保存
+        if metrics.get('has_data') or not phase_trades:
             success = save_phase_metrics(
                 session=session,
                 token_id=token_id,
@@ -278,18 +279,28 @@ def sync_market_lifecycle(
             
             if success:
                 phases_synced += 1
+                if metrics.get('is_valid'):
+                    phases_valid += 1
+                
                 if verbose:
+                    is_valid = metrics.get('is_valid', False)
+                    valid_str = "✅" if is_valid else "⚠️"
                     bw = metrics.get('band_width')
-                    ui = metrics.get('ui')
                     bw_str = f"{bw:.3f}" if bw else "N/A"
-                    ui_str = f"{ui:.3f}" if ui else "N/A"
-                    has_ws = "✅" if aggressor_histogram else "❌"
-                    print(f"     BW: {bw_str} | UI: {ui_str} | WS: {has_ws} | Trades: {metrics['trade_count']}")
-            
-            # 更新 previous_band_width
+                    trade_count = metrics.get('trade_count', 0)
+                    reason = metrics.get('validity_reason', '')
+                    
+                    print(f"     {valid_str} BW: {bw_str} | Trades: {trade_count} | {reason}")
+        
+        # 更新 previous_band_width
+        if metrics.get('band_width'):
             previous_band_width = metrics.get('band_width')
     
-    return {'phases_synced': phases_synced, 'success': True}
+    return {
+        'phases_synced': phases_synced,
+        'phases_valid': phases_valid,
+        'success': True
+    }
 
 
 def sync_all_lifecycles(
@@ -308,16 +319,21 @@ def sync_all_lifecycles(
         'success': 0,
         'failed': 0,
         'total_phases': 0,
+        'valid_phases': 0,
     }
     
     try:
         print(f"\n{'='*60}")
-        print(f"Lifecycle Phases Sync")
+        print(f"Lifecycle Phases Sync v2")
+        print(f"Database: {'PostgreSQL' if IS_POSTGRES else 'SQLite'}")
         print(f"Backfill: {backfill}")
+        print(f"Min Trades: {MIN_TRADES_THRESHOLD}")
+        print(f"Min Volume: ${MIN_VOLUME_THRESHOLD}")
         print(f"{'='*60}\n")
         
-        # 确保表存在
+        # 确保表存在并迁移
         create_lifecycle_table(session)
+        migrate_lifecycle_table(session)
         
         # 获取市场
         print(f"📊 Fetching markets...")
@@ -351,6 +367,7 @@ def sync_all_lifecycles(
                 if result['success']:
                     stats['success'] += 1
                     stats['total_phases'] += result['phases_synced']
+                    stats['valid_phases'] += result['phases_valid']
                 else:
                     stats['failed'] += 1
                 
@@ -370,18 +387,25 @@ def sync_all_lifecycles(
         print(f"Success: {stats['success']}")
         print(f"Failed: {stats['failed']}")
         print(f"Total phases synced: {stats['total_phases']}")
+        print(f"Valid phases: {stats['valid_phases']}")
+        
+        if stats['total_phases'] > 0:
+            valid_rate = stats['valid_phases'] / stats['total_phases'] * 100
+            print(f"Validity rate: {valid_rate:.1f}%")
         
         return stats
         
     except Exception as e:
         print(f"❌ Sync failed: {e}")
+        import traceback
+        traceback.print_exc()
         return stats
     finally:
         session.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Sync lifecycle phases')
+    parser = argparse.ArgumentParser(description='Sync lifecycle phases v2')
     parser.add_argument('--markets', type=int, default=100,
                        help='Number of markets (default: 100)')
     parser.add_argument('--backfill', action='store_true',

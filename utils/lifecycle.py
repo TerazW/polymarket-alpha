@@ -1,14 +1,19 @@
 """
-Market Lifecycle Phases - 生命周期阶段分析
+Market Lifecycle Phases - 生命周期阶段分析 v2
 
 功能：
-1. 将市场生命周期划分为 4 个阶段（各 25%）
-2. 每个阶段独立计算 Band/POC/POMD/UI/CER/AR/CS
-3. 支持历史回填 + 实时更新
+1. 固定时间切片（25% 生命周期 × 4 段）
+2. 成交量门槛检查（不达标标记为 insufficient）
+3. 每个阶段独立计算 Band/POC/POMD/UI/CER/AR/CS
+
+设计原则：
+- 边界固定：基于时间，历史不会改变
+- 诚实展示：数据不足就标记，不强行画
+- 质量保证：达标的 phase 才有可靠的 profile
 
 数据来源：
-- 历史 phases: Data API trades → Band/POC/UI/CER（无 aggressor）
-- 未来 phases: WebSocket → 全部指标（含 POMD/AR/CS）
+- Data API trades → Band/POC/UI/CER
+- WebSocket → POMD/AR/CS（如果有）
 """
 
 from datetime import datetime, timedelta
@@ -33,13 +38,17 @@ from utils.metrics import (
 )
 
 
+# ============================================================================
+# 配置
+# ============================================================================
+
 @dataclass
 class PhaseConfig:
     """Phase 配置"""
     phase_number: int  # 1, 2, 3, 4
     start_pct: float   # 0, 0.25, 0.5, 0.75
     end_pct: float     # 0.25, 0.5, 0.75, 1.0
-    
+
 
 # 4 个 phases，各 25%
 PHASES = [
@@ -49,6 +58,14 @@ PHASES = [
     PhaseConfig(4, 0.75, 1.00),
 ]
 
+# 门槛配置
+MIN_TRADES_THRESHOLD = 30      # 最少交易笔数
+MIN_VOLUME_THRESHOLD = 500     # 最少成交量（美元）
+
+
+# ============================================================================
+# Phase 计算
+# ============================================================================
 
 def calculate_phase_dates(
     created_at: datetime,
@@ -84,7 +101,7 @@ def get_current_phase(
     获取当前处于第几个 phase
     
     Returns:
-        phase_number (1-4) 或 None（已结算）
+        phase_number (1-4) 或 None（已结算或未开始）
     """
     if now is None:
         now = datetime.now()
@@ -104,6 +121,27 @@ def get_current_phase(
             return p.phase_number
     
     return 4  # 最后阶段
+
+
+def get_lifecycle_progress(
+    created_at: datetime,
+    end_date: datetime,
+    now: Optional[datetime] = None
+) -> float:
+    """
+    获取生命周期进度（0.0 ~ 1.0）
+    """
+    if now is None:
+        now = datetime.now()
+    
+    if now <= created_at:
+        return 0.0
+    if now >= end_date:
+        return 1.0
+    
+    total = (end_date - created_at).total_seconds()
+    elapsed = (now - created_at).total_seconds()
+    return elapsed / total
 
 
 def filter_trades_by_phase(
@@ -128,6 +166,41 @@ def filter_trades_by_phase(
     ]
 
 
+def check_phase_validity(
+    trades: List[Dict],
+    min_trades: int = MIN_TRADES_THRESHOLD,
+    min_volume: float = MIN_VOLUME_THRESHOLD
+) -> Tuple[bool, str]:
+    """
+    检查 phase 是否满足门槛
+    
+    Args:
+        trades: 该 phase 内的交易
+        min_trades: 最少交易笔数
+        min_volume: 最少成交量
+    
+    Returns:
+        (is_valid, reason)
+    """
+    if not trades:
+        return False, "no_trades"
+    
+    trade_count = len(trades)
+    total_volume = sum(float(t.get('size', 0)) for t in trades)
+    
+    if trade_count < min_trades:
+        return False, f"insufficient_trades ({trade_count} < {min_trades})"
+    
+    if total_volume < min_volume:
+        return False, f"insufficient_volume (${total_volume:.0f} < ${min_volume})"
+    
+    return True, "valid"
+
+
+# ============================================================================
+# 指标计算
+# ============================================================================
+
 def calculate_phase_metrics(
     trades: List[Dict],
     current_price: float,
@@ -137,6 +210,9 @@ def calculate_phase_metrics(
     aggressor_histogram: Optional[Dict[float, Dict]] = None,
     aggressive_buy: Optional[float] = None,
     aggressive_sell: Optional[float] = None,
+    # 门槛配置
+    min_trades: int = MIN_TRADES_THRESHOLD,
+    min_volume: float = MIN_VOLUME_THRESHOLD,
 ) -> Dict:
     """
     计算某个 phase 的所有指标
@@ -148,24 +224,39 @@ def calculate_phase_metrics(
         previous_band_width: 上一阶段的 band width（用于 ACR）
         aggressor_histogram: WebSocket price bins（可选，用于 POMD）
         aggressive_buy/sell: WebSocket aggressor 汇总（可选，用于 AR/CS）
+        min_trades: 最少交易笔数门槛
+        min_volume: 最少成交量门槛
     
     Returns:
-        包含所有指标的字典
+        包含所有指标的字典，含 is_valid 和 validity_reason
     """
+    # 检查门槛
+    is_valid, validity_reason = check_phase_validity(trades, min_trades, min_volume)
+    
+    trade_count = len(trades) if trades else 0
+    total_volume = sum(float(t.get('size', 0)) for t in trades) if trades else 0
+    
+    # 基础返回结构
+    result = {
+        'has_data': trade_count > 0,
+        'is_valid': is_valid,
+        'validity_reason': validity_reason,
+        'trade_count': trade_count,
+        'total_volume': total_volume,
+        'price_at_end': current_price,
+    }
+    
+    # 如果没有交易，直接返回
     if not trades:
-        return {
-            'has_data': False,
-            'trade_count': 0,
-        }
+        return result
     
     # 计算 histogram
     histogram = calculate_histogram(trades)
     
     if not histogram:
-        return {
-            'has_data': False,
-            'trade_count': len(trades),
-        }
+        result['validity_reason'] = "no_histogram"
+        result['is_valid'] = False
+        return result
     
     # Profile
     VAH, VAL, mid_prob = calculate_consensus_band(histogram)
@@ -190,19 +281,16 @@ def calculate_phase_metrics(
     
     if aggressive_buy is not None and aggressive_sell is not None:
         total_vol = aggressive_buy + aggressive_sell
-        ar = calculate_ar(aggressive_buy, aggressive_sell, total_vol)
-        cs = calculate_cs(aggressive_buy, aggressive_sell, total_vol)
-        volume_delta = calculate_volume_delta(aggressive_buy, aggressive_sell)
+        if total_vol > 0:
+            ar = calculate_ar(aggressive_buy, aggressive_sell, total_vol)
+            cs = calculate_cs(aggressive_buy, aggressive_sell, total_vol)
+            volume_delta = calculate_volume_delta(aggressive_buy, aggressive_sell)
     
     # 状态
     status = determine_status(ui, cer, cs)
     
-    # 统计
-    total_volume = sum(float(t.get('size', 0)) for t in trades)
-    
-    return {
-        'has_data': True,
-        
+    # 更新结果
+    result.update({
         # Profile
         'va_high': VAH,
         'va_low': VAL,
@@ -223,13 +311,14 @@ def calculate_phase_metrics(
         
         # Status
         'status': status,
-        
-        # Meta
-        'total_volume': total_volume,
-        'trade_count': len(trades),
-        'price_at_end': current_price,
-    }
+    })
+    
+    return result
 
+
+# ============================================================================
+# 数据库操作
+# ============================================================================
 
 def save_phase_metrics(
     session,
@@ -242,13 +331,11 @@ def save_phase_metrics(
     """
     保存 phase 指标到数据库
     """
-    if not metrics.get('has_data'):
-        return False
-    
     try:
         session.execute(text("""
             INSERT INTO lifecycle_phases
             (token_id, phase_number, phase_start, phase_end,
+             is_valid, validity_reason,
              va_high, va_low, band_width, poc, pomd,
              ui, ecr, acr, cer,
              ar, cs, volume_delta,
@@ -256,6 +343,7 @@ def save_phase_metrics(
              created_at)
             VALUES
             (:tid, :phase, :start, :end,
+             :valid, :reason,
              :vah, :val, :bw, :poc, :pomd,
              :ui, :ecr, :acr, :cer,
              :ar, :cs, :vdelta,
@@ -264,6 +352,8 @@ def save_phase_metrics(
             ON CONFLICT (token_id, phase_number) DO UPDATE SET
                 phase_start = EXCLUDED.phase_start,
                 phase_end = EXCLUDED.phase_end,
+                is_valid = EXCLUDED.is_valid,
+                validity_reason = EXCLUDED.validity_reason,
                 va_high = EXCLUDED.va_high,
                 va_low = EXCLUDED.va_low,
                 band_width = EXCLUDED.band_width,
@@ -285,6 +375,8 @@ def save_phase_metrics(
             'phase': phase_number,
             'start': phase_start,
             'end': phase_end,
+            'valid': metrics.get('is_valid', False),
+            'reason': metrics.get('validity_reason', 'unknown'),
             'vah': metrics.get('va_high'),
             'val': metrics.get('va_low'),
             'bw': metrics.get('band_width'),
@@ -321,6 +413,7 @@ def get_phase_metrics(session, token_id: str, phase_number: int) -> Optional[Dic
         result = session.execute(text("""
             SELECT 
                 phase_number, phase_start, phase_end,
+                is_valid, validity_reason,
                 va_high, va_low, band_width, poc, pomd,
                 ui, ecr, acr, cer,
                 ar, cs, volume_delta,
@@ -334,22 +427,24 @@ def get_phase_metrics(session, token_id: str, phase_number: int) -> Optional[Dic
                 'phase_number': result[0],
                 'phase_start': result[1],
                 'phase_end': result[2],
-                'va_high': float(result[3]) if result[3] else None,
-                'va_low': float(result[4]) if result[4] else None,
-                'band_width': float(result[5]) if result[5] else None,
-                'poc': float(result[6]) if result[6] else None,
-                'pomd': float(result[7]) if result[7] else None,
-                'ui': float(result[8]) if result[8] else None,
-                'ecr': float(result[9]) if result[9] else None,
-                'acr': float(result[10]) if result[10] else None,
-                'cer': float(result[11]) if result[11] else None,
-                'ar': float(result[12]) if result[12] else None,
-                'cs': float(result[13]) if result[13] else None,
-                'volume_delta': float(result[14]) if result[14] else None,
-                'status': result[15],
-                'total_volume': float(result[16]) if result[16] else None,
-                'trade_count': int(result[17]) if result[17] else 0,
-                'price_at_end': float(result[18]) if result[18] else None,
+                'is_valid': result[3] if result[3] is not None else False,
+                'validity_reason': result[4] or 'unknown',
+                'va_high': float(result[5]) if result[5] else None,
+                'va_low': float(result[6]) if result[6] else None,
+                'band_width': float(result[7]) if result[7] else None,
+                'poc': float(result[8]) if result[8] else None,
+                'pomd': float(result[9]) if result[9] else None,
+                'ui': float(result[10]) if result[10] else None,
+                'ecr': float(result[11]) if result[11] else None,
+                'acr': float(result[12]) if result[12] else None,
+                'cer': float(result[13]) if result[13] else None,
+                'ar': float(result[14]) if result[14] else None,
+                'cs': float(result[15]) if result[15] else None,
+                'volume_delta': float(result[16]) if result[16] else None,
+                'status': result[17],
+                'total_volume': float(result[18]) if result[18] else None,
+                'trade_count': int(result[19]) if result[19] else 0,
+                'price_at_end': float(result[20]) if result[20] else None,
             }
         
     except Exception as e:
@@ -375,7 +470,7 @@ def get_band_evolution(session, token_id: str) -> List[Dict]:
     获取 Band 演变数据（用于可视化）
     
     Returns:
-        [{phase, va_high, va_low, band_width, poc, pomd}, ...]
+        [{phase, va_high, va_low, band_width, poc, pomd, is_valid}, ...]
     """
     phases = get_all_phases(session, token_id)
     
@@ -389,13 +484,16 @@ def get_band_evolution(session, token_id: str) -> List[Dict]:
             'band_width': p['band_width'],
             'poc': p['poc'],
             'pomd': p['pomd'],
+            'is_valid': p['is_valid'],
+            'validity_reason': p['validity_reason'],
+            'trade_count': p['trade_count'],
         }
         for p in phases
     ]
 
 
 def create_lifecycle_table(session):
-    """创建 lifecycle_phases 表"""
+    """创建 lifecycle_phases 表（带 is_valid 字段）"""
     try:
         session.execute(text("""
             CREATE TABLE IF NOT EXISTS lifecycle_phases (
@@ -404,6 +502,9 @@ def create_lifecycle_table(session):
                 phase_number INTEGER,
                 phase_start TIMESTAMP,
                 phase_end TIMESTAMP,
+                
+                is_valid BOOLEAN DEFAULT FALSE,
+                validity_reason VARCHAR(100),
                 
                 va_high DECIMAL(10,4),
                 va_low DECIMAL(10,4),
@@ -446,12 +547,33 @@ def create_lifecycle_table(session):
         return False
 
 
+def migrate_lifecycle_table(session):
+    """迁移：添加 is_valid 和 validity_reason 字段"""
+    try:
+        # PostgreSQL
+        session.execute(text("""
+            ALTER TABLE lifecycle_phases 
+            ADD COLUMN IF NOT EXISTS is_valid BOOLEAN DEFAULT FALSE
+        """))
+        session.execute(text("""
+            ALTER TABLE lifecycle_phases 
+            ADD COLUMN IF NOT EXISTS validity_reason VARCHAR(100)
+        """))
+        session.commit()
+        print("✅ Migrated lifecycle_phases table")
+        return True
+    except Exception as e:
+        session.rollback()
+        print(f"⚠️ Migration error: {e}")
+        return False
+
+
 # ============================================================================
 # 测试
 # ============================================================================
 
 if __name__ == "__main__":
-    print("🧪 Testing Lifecycle Phases\n")
+    print("🧪 Testing Lifecycle Phases v2\n")
     print("=" * 60)
     
     # 模拟市场：100 天生命周期
@@ -469,19 +591,22 @@ if __name__ == "__main__":
         days = (end - start).days
         print(f"  Phase {phase_num}: {start.date()} → {end.date()} ({days} days)")
     
-    # 测试当前 phase
-    test_dates = [
-        datetime(2024, 1, 10),   # Phase 1
-        datetime(2024, 2, 10),   # Phase 2
-        datetime(2024, 3, 10),   # Phase 3
-        datetime(2024, 4, 5),    # Phase 4
-        datetime(2024, 4, 15),   # 已结算
-    ]
+    # 测试门槛检查
+    print("\n🔍 Validity Check Tests:")
     
-    print("\n📍 Current phase tests:")
-    for test_date in test_dates:
-        phase = get_current_phase(created_at, end_date, test_date)
-        print(f"  {test_date.date()}: Phase {phase}")
+    # 足够的交易
+    trades_enough = [{'size': 100, 'price': 0.5, 'timestamp': 0}] * 50
+    valid, reason = check_phase_validity(trades_enough)
+    print(f"  50 trades, $5000: {valid} ({reason})")
+    
+    # 交易不足
+    trades_few = [{'size': 100, 'price': 0.5, 'timestamp': 0}] * 10
+    valid, reason = check_phase_validity(trades_few)
+    print(f"  10 trades, $1000: {valid} ({reason})")
+    
+    # 空交易
+    valid, reason = check_phase_validity([])
+    print(f"  0 trades: {valid} ({reason})")
     
     print("\n" + "=" * 60)
     print("✅ Tests completed!")
