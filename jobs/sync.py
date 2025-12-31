@@ -43,6 +43,7 @@ from utils.metrics import (
     calculate_volume_delta,
     calculate_cs,
     determine_status,
+    determine_impulse_tag,
     filter_trades_by_time,
 )
 from utils.db import get_session, init_db
@@ -279,7 +280,14 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                 poc = calculate_poc(histogram)  # 交易集中点
                 
                 # === 3. 不确定性指标 ===
-                ui = calculate_ui(histogram)
+                ui_result = calculate_ui(histogram)
+                # v5.3: calculate_ui 返回 (ui, edge_zone)
+                if isinstance(ui_result, tuple):
+                    ui, edge_zone = ui_result
+                else:
+                    ui = ui_result
+                    edge_zone = False
+                
                 ecr = calculate_ecr(current_price, days_remaining)
                 
                 band_width_7d_ago = get_band_width_7d_ago(session, token_id)
@@ -304,12 +312,14 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                         agg_stats['aggressive_sell'],
                         agg_stats['total_volume']
                     )
+                    total_vol = agg_stats['total_volume']
                     stats['with_aggressor'] += 1
                     agg_str = f"✅ AR: {ar:.3f}" if ar else "✅ AR: N/A"
                 else:
                     ar = None
                     volume_delta = None
                     cs = None
+                    total_vol = None
                     agg_str = "🔒 No WS data"
                 
                 # === 5. 获取 Price Bins → 计算 POMD ===
@@ -323,22 +333,26 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                     pomd = None
                     pomd_str = "🔒 No bins"
                 
-                # === 6. 状态判定 ===
-                status = determine_status(ui, cer, cs)
+                # === 6. 状态判定 (v5.3) ===
+                status = determine_status(ui, cer, cs, total_vol, edge_zone)
+                
+                # === 7. Impulse Tag (v5.3) ===
+                impulse_tag = determine_impulse_tag(ui, cer, cs, pomd, current_price)
                 
                 # === 显示结果 ===
                 ui_str = f"{ui:.3f}" if ui is not None else "N/A"
                 cer_str = f"{cer:.3f}" if cer is not None else "N/A"
                 bw_str = f"{band_width:.3f}" if band_width is not None else "N/A"
                 poc_str = f"{poc:.2f}" if poc is not None else "N/A"
+                impulse_str = impulse_tag if impulse_tag else ""
                 
                 print(f"  💰 Price: {current_price*100:.1f}% | Vol: ${volume_24h:,.0f}")
                 print(f"  📊 BW: {bw_str} | UI: {ui_str} | CER: {cer_str}")
                 print(f"  📍 POC: {poc_str} | {pomd_str}")
                 print(f"  🎯 {agg_str}")
-                print(f"  🏷️  {category} | {status}\n")
+                print(f"  🏷️  {category} | {status} {impulse_str}\n")
                 
-                # === 7. 保存到数据库 ===
+                # === 8. 保存到数据库 ===
                 success = save_metrics(
                     session=session,
                     token_id=token_id,
@@ -360,7 +374,9 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                     cs=cs,
                     ar=ar,
                     volume_delta=volume_delta,
-                    status=status
+                    status=status,
+                    impulse_tag=impulse_tag,
+                    edge_zone=edge_zone
                 )
                 
                 if success:
@@ -425,7 +441,7 @@ def save_metrics(session, token_id, condition_id, question,
                  va_high, va_low, band_width, poc, pomd,
                  ui, ecr, acr, cer,
                  cs, ar, volume_delta,
-                 status):
+                 status, impulse_tag=None, edge_zone=False):
     """保存所有指标到数据库"""
     today = datetime.now().date()
     
@@ -452,20 +468,22 @@ def save_metrics(session, token_id, condition_id, question,
             'now': datetime.now()
         })
         
-        # 更新 daily_metrics 表
+        # 更新 daily_metrics 表 (v5.3: 包含 impulse_tag 和 edge_zone)
         session.execute(text("""
             INSERT INTO daily_metrics 
             (token_id, date, 
              va_high, va_low, band_width, poc, pomd,
              ui, ecr, acr, cer, 
              cs, ar, volume_delta,
-             status, current_price, days_to_expiry)
+             status, impulse_tag, edge_zone,
+             current_price, days_to_expiry)
             VALUES 
             (:tid, :date,
              :vah, :val, :bw, :poc, :pomd,
              :ui, :ecr, :acr, :cer,
              :cs, :ar, :vdelta,
-             :status, :price, :days)
+             :status, :impulse_tag, :edge_zone,
+             :price, :days)
             ON CONFLICT (token_id, date) DO UPDATE SET
                 va_high = EXCLUDED.va_high,
                 va_low = EXCLUDED.va_low,
@@ -480,6 +498,8 @@ def save_metrics(session, token_id, condition_id, question,
                 ar = EXCLUDED.ar,
                 volume_delta = EXCLUDED.volume_delta,
                 status = EXCLUDED.status,
+                impulse_tag = EXCLUDED.impulse_tag,
+                edge_zone = EXCLUDED.edge_zone,
                 current_price = EXCLUDED.current_price,
                 days_to_expiry = EXCLUDED.days_to_expiry
         """), {
@@ -498,6 +518,8 @@ def save_metrics(session, token_id, condition_id, question,
             'ar': ar,
             'vdelta': volume_delta,
             'status': status,
+            'impulse_tag': impulse_tag,
+            'edge_zone': edge_zone,
             'price': current_price * 100,
             'days': days_remaining
         })

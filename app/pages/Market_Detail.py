@@ -36,6 +36,8 @@ def get_market_detail(token_id: str):
                 m.volume_24h,
                 m.current_price,
                 dm.status,
+                dm.impulse_tag,
+                dm.edge_zone,
                 dm.ui,
                 dm.cer,
                 dm.cs,
@@ -177,12 +179,16 @@ def get_histogram_daterange(token_id: str, days: int = 7) -> dict:
 
 def get_status_color(status: str) -> str:
     """获取状态对应的颜色"""
+    if status is None:
+        return '#6c757d'  # 灰色
     if 'Informed' in status:
         return '#28a745'  # 绿色
     elif 'Fragmented' in status:
         return '#ffc107'  # 黄色
     elif 'Noisy' in status:
         return '#dc3545'  # 红色
+    elif 'Late-stage' in status:
+        return '#3b82f6'  # 蓝色
     return '#6c757d'  # 灰色
 
 
@@ -528,14 +534,32 @@ st.title(f"📊 {market['title']}")
 
 # 状态和分类
 status_color = get_status_color(market['status'])
+impulse_tag = market.get('impulse_tag')
 col_header1, col_header2, col_header3 = st.columns([2, 1, 1])
 
 with col_header1:
+    # 构建标签列表
+    impulse_html = ""
+    if impulse_tag:
+        # impulse_tag 颜色
+        impulse_colors = {
+            "⚡ EMERGING": "#8b5cf6",     # 紫色
+            "🔄 ABSORPTION": "#f59e0b",   # 橙色
+            "💨 EXHAUSTION": "#ef4444"    # 红色
+        }
+        impulse_color = impulse_colors.get(impulse_tag, "#6b7280")
+        impulse_html = f'''
+        <span style="background: {impulse_color}; color: white; padding: 5px 15px; border-radius: 20px; font-weight: bold; margin-left: 5px;">
+            {impulse_tag}
+        </span>
+        '''
+    
     st.markdown(f"""
-    <div style="display: flex; align-items: center; gap: 10px;">
+    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
         <span style="background: {status_color}; color: white; padding: 5px 15px; border-radius: 20px; font-weight: bold;">
             {market['status']}
         </span>
+        {impulse_html}
         <span style="background: #e9ecef; padding: 5px 15px; border-radius: 20px;">
             {market['category']}
         </span>
@@ -730,6 +754,19 @@ with main_tab2:
 # === Tab 3: Metrics ===
 with main_tab3:
     st.subheader("📊 Key Metrics")
+    
+    # 显示 Impulse Tag（如果有）
+    impulse_tag = market.get('impulse_tag')
+    if impulse_tag:
+        impulse_explanations = {
+            "⚡ EMERGING": "共识正在形成 - 订单流开始单边，分歧仍大但方向明确，早期参与机会",
+            "🔄 ABSORPTION": "关键位置拉锯 - 双方在当前价位对抗，一旦突破即产生强信号",
+            "💨 EXHAUSTION": "末期动能警告 - 看似所有人都同意，但结构已饱和，风险较高"
+        }
+        explanation = impulse_explanations.get(impulse_tag, "")
+        
+        st.info(f"**{impulse_tag}**: {explanation}")
+        st.markdown("")
     
     col1, col2, col3, col4 = st.columns(4)
     

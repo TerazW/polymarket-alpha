@@ -85,6 +85,8 @@ def init_db():
                 cer DECIMAL(10,4),
                 cs DECIMAL(10,4),
                 status VARCHAR(50),
+                impulse_tag VARCHAR(50),
+                edge_zone BOOLEAN DEFAULT FALSE,
                 current_price DECIMAL(10,2),
                 days_to_expiry INTEGER,
                 va_high DECIMAL(10,2),
@@ -156,6 +158,9 @@ def migrate_schema():
                 ("closed", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS closed BOOLEAN DEFAULT FALSE"),
                 ("active", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE"),
                 ("categories", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS categories TEXT"),
+                # v5.3 新字段
+                ("impulse_tag", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS impulse_tag VARCHAR(50)"),
+                ("edge_zone", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS edge_zone BOOLEAN DEFAULT FALSE"),
             ]
             
             for col_name, sql in migrations:
@@ -198,19 +203,26 @@ def migrate_schema():
         else:
             # SQLite: 需要检查列是否存在
             result = conn.execute(text("PRAGMA table_info(markets)")).fetchall()
-            existing_columns = [row[1] for row in result]
+            markets_columns = [row[1] for row in result]
+            
+            result2 = conn.execute(text("PRAGMA table_info(daily_metrics)")).fetchall()
+            metrics_columns = [row[1] for row in result2]
             
             new_columns = [
-                ("closed", "ALTER TABLE markets ADD COLUMN closed BOOLEAN DEFAULT FALSE"),
-                ("active", "ALTER TABLE markets ADD COLUMN active BOOLEAN DEFAULT TRUE"),
-                ("categories", "ALTER TABLE markets ADD COLUMN categories TEXT"),
+                ("markets", "closed", "ALTER TABLE markets ADD COLUMN closed BOOLEAN DEFAULT FALSE"),
+                ("markets", "active", "ALTER TABLE markets ADD COLUMN active BOOLEAN DEFAULT TRUE"),
+                ("markets", "categories", "ALTER TABLE markets ADD COLUMN categories TEXT"),
+                # v5.3 新字段
+                ("daily_metrics", "impulse_tag", "ALTER TABLE daily_metrics ADD COLUMN impulse_tag VARCHAR(50)"),
+                ("daily_metrics", "edge_zone", "ALTER TABLE daily_metrics ADD COLUMN edge_zone BOOLEAN DEFAULT FALSE"),
             ]
             
-            for col_name, sql in new_columns:
-                if col_name not in existing_columns:
+            for table, col_name, sql in new_columns:
+                existing = markets_columns if table == "markets" else metrics_columns
+                if col_name not in existing:
                     try:
                         conn.execute(text(sql))
-                        print(f"[DB Migration] ✅ Added {col_name} column")
+                        print(f"[DB Migration] ✅ Added {table}.{col_name} column")
                     except Exception as e:
                         print(f"[DB Migration] ⚠️ {col_name}: {e}")
                 else:
