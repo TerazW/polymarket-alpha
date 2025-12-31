@@ -24,7 +24,7 @@ from utils.db import (
 from utils.polymarket_api import PolymarketAPI
 from utils.metrics import (
     calculate_histogram, calculate_ui, calculate_cer, calculate_cs,
-    determine_status, filter_trades_by_time, get_band_width
+    determine_status, determine_impulse_tag, filter_trades_by_time, get_band_width
 )
 
 # WebSocket 数据获取函数
@@ -264,7 +264,14 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
                             current_price, volume_24h, category, categories_json)
             return True
         
-        ui = calculate_ui(histogram_all)
+        # v5.3: calculate_ui 返回 (ui, edge_zone) tuple
+        ui_result = calculate_ui(histogram_all)
+        if isinstance(ui_result, tuple):
+            ui, edge_zone = ui_result
+        else:
+            ui = ui_result
+            edge_zone = False
+        
         band_width_now = get_band_width(histogram_all)
         
         # 从 WebSocket 数据获取 aggressor 统计来计算 CS
@@ -300,7 +307,10 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
             days_remaining
         ) if band_width_now and band_width_7d_ago else None
         
-        status = determine_status(ui, cer, cs)
+        # v5.3: 更新的 status 和 impulse_tag
+        total_vol = ws_stats.get('total_volume') if ws_stats.get('has_data') else None
+        status = determine_status(ui, cer, cs, total_vol, edge_zone)
+        impulse_tag = determine_impulse_tag(ui, cer, cs, None, current_price)
         
         # 保存到数据库
         today = datetime.now().date()
@@ -340,16 +350,20 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
             va_high = current_price * 100 + (band_width_now * 50)
             va_low = current_price * 100 - (band_width_now * 50)
         
-        # 更新 daily_metrics 表
+        # 更新 daily_metrics 表 (v5.3: 包含 impulse_tag 和 edge_zone)
         session.execute(text("""
             INSERT INTO daily_metrics 
-            (token_id, date, ui, cer, cs, status, current_price, days_to_expiry, va_high, va_low)
-            VALUES (:tid, :date, :ui, :cer, :cs, :status, :price, :days, :vah, :val)
+            (token_id, date, ui, cer, cs, status, impulse_tag, edge_zone, 
+             current_price, days_to_expiry, va_high, va_low)
+            VALUES (:tid, :date, :ui, :cer, :cs, :status, :impulse_tag, :edge_zone,
+                    :price, :days, :vah, :val)
             ON CONFLICT (token_id, date) DO UPDATE SET
                 ui = EXCLUDED.ui,
                 cer = EXCLUDED.cer,
                 cs = EXCLUDED.cs,
                 status = EXCLUDED.status,
+                impulse_tag = EXCLUDED.impulse_tag,
+                edge_zone = EXCLUDED.edge_zone,
                 current_price = EXCLUDED.current_price,
                 days_to_expiry = EXCLUDED.days_to_expiry,
                 va_high = EXCLUDED.va_high,
@@ -361,6 +375,8 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
             'cer': cer,
             'cs': cs,
             'status': status,
+            'impulse_tag': impulse_tag,
+            'edge_zone': edge_zone,
             'price': current_price * 100,
             'days': days_remaining,
             'vah': va_high,
