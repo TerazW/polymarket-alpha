@@ -46,16 +46,19 @@ from collections import defaultdict
 AR_BULLISH_THRESHOLD = 0.10   # AR > 0.10 且 delta > 0 → BULLISH
 AR_BEARISH_THRESHOLD = 0.10   # AR > 0.10 且 delta < 0 → BEARISH
 
-# CS v2 参与度缩放因子（可选）
-CS_PARTICIPATION_SCALE = 1.0  # 可调整 log 的影响程度
+# CS v2 归一化基准
+CS_VOLUME_BASELINE = 1000.0   # V0: 归一化基准，使阈值跨市场稳定
+
+# POMD 最小阈值
+POMD_MIN_THRESHOLD_RATIO = 0.02  # 至少占总量 2% 才算有效争议点
+POMD_MIN_ABSOLUTE = 10.0         # 绝对最小值
 
 # 状态判定阈值
 UI_INFORMED_THRESHOLD = 0.30
 UI_NOISY_THRESHOLD = 0.50
 CER_INFORMED_THRESHOLD = 0.80
 CER_NOISY_THRESHOLD = 0.40
-CS_INFORMED_THRESHOLD = 2.0   # CS v2 新阈值（因为加了 log）
-CS_NOISY_THRESHOLD = 0.5
+CS_NOISY_THRESHOLD = 0.3   # CS 很低 = 没有方向性参与
 
 
 # ============================================================================
@@ -92,41 +95,68 @@ def calculate_consensus_band(
     coverage: float = 0.70
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    计算 Consensus Band (共识带)
+    计算 Consensus Band (共识带) - Market Profile Value Area 算法
     
-    定义：覆盖 X% 成交量的概率区间
-    方法：按成交量从大到小排序，累计到 coverage%
+    正确算法（围绕 POC 连续扩展）：
+    1. 找到 POC（成交量最大的 bin）
+    2. 从 POC 向两侧扩展
+    3. 每次选"成交量更大的那一侧"的相邻 bin
+    4. 直到覆盖目标成交量
+    
+    这样 VAH/VAL 才是真正"连贯"的 value area，不会把中间没成交的价格也算进去。
     
     Returns:
         (VAH, VAL, mid_probability)
         - VAH: Value Area High
-        - VAL: Value Area Low
+        - VAL: Value Area Low  
         - mid_probability: (VAH + VAL) / 2
     """
     if not histogram:
         return None, None, None
     
-    sorted_bins = sorted(histogram.items(), key=lambda x: x[1], reverse=True)
     total_volume = sum(histogram.values())
-    
     if total_volume == 0:
         return None, None, None
     
-    target_volume = total_volume * coverage
-    cumulative = 0
-    consensus_prices = []
-    
-    for price, volume in sorted_bins:
-        cumulative += volume
-        consensus_prices.append(price)
-        if cumulative >= target_volume:
-            break
-    
-    if not consensus_prices:
+    # 按价格排序
+    sorted_prices = sorted(histogram.keys())
+    if len(sorted_prices) == 0:
         return None, None, None
     
-    VAH = max(consensus_prices)
-    VAL = min(consensus_prices)
+    # 找 POC
+    poc_price = max(histogram.keys(), key=lambda p: histogram[p])
+    poc_idx = sorted_prices.index(poc_price)
+    
+    # 从 POC 开始扩展
+    target_volume = total_volume * coverage
+    cumulative = histogram[poc_price]
+    
+    low_idx = poc_idx
+    high_idx = poc_idx
+    
+    # 向两侧扩展直到达到目标
+    while cumulative < target_volume:
+        # 检查两侧是否还有空间
+        can_go_low = low_idx > 0
+        can_go_high = high_idx < len(sorted_prices) - 1
+        
+        if not can_go_low and not can_go_high:
+            break
+        
+        # 计算两侧下一个 bin 的成交量
+        low_volume = histogram[sorted_prices[low_idx - 1]] if can_go_low else 0
+        high_volume = histogram[sorted_prices[high_idx + 1]] if can_go_high else 0
+        
+        # 选择成交量更大的那一侧扩展
+        if can_go_low and (not can_go_high or low_volume >= high_volume):
+            low_idx -= 1
+            cumulative += histogram[sorted_prices[low_idx]]
+        elif can_go_high:
+            high_idx += 1
+            cumulative += histogram[sorted_prices[high_idx]]
+    
+    VAL = sorted_prices[low_idx]
+    VAH = sorted_prices[high_idx]
     mid_probability = (VAH + VAL) / 2
     
     return VAH, VAL, mid_probability
@@ -162,7 +192,8 @@ def calculate_poc(histogram: Dict[float, float]) -> Optional[float]:
 
 def calculate_pomd(
     aggressor_histogram: Dict[float, Dict],
-    min_threshold: float = 0
+    min_threshold: float = None,
+    total_volume: float = None
 ) -> Optional[float]:
     """
     POMD (Point of Max Disagreement) = 拉锯最激烈点
@@ -176,13 +207,26 @@ def calculate_pomd(
     
     Args:
         aggressor_histogram: {price: {'buy': x, 'sell': y, ...}}
-        min_threshold: 最小阈值，低于此值不算（避免噪音）
+        min_threshold: 最小阈值，None 时自动计算
+        total_volume: 总成交量，用于计算动态阈值
     
     Returns:
         POMD price，如果没有有效数据返回 None
     """
     if not aggressor_histogram:
         return None
+    
+    # 计算动态阈值
+    if min_threshold is None:
+        if total_volume and total_volume > 0:
+            # 至少占总量 2%
+            min_threshold = max(
+                total_volume * POMD_MIN_THRESHOLD_RATIO,
+                POMD_MIN_ABSOLUTE
+            )
+        else:
+            # 如果没有总量信息，用绝对最小值
+            min_threshold = POMD_MIN_ABSOLUTE
     
     valid_bins = {}
     for price, data in aggressor_histogram.items():
@@ -199,15 +243,57 @@ def calculate_pomd(
     return max(valid_bins.keys(), key=lambda p: valid_bins[p])
 
 
+def calculate_tails(
+    histogram: Dict[float, float],
+    vah: float,
+    val: float,
+    min_tail_bins: int = 2
+) -> Dict[str, List[float]]:
+    """
+    计算 Tail（被拒绝价格区）- Market Profile 风格
+    
+    定义：
+    - Upper Tail: 高于 VAH 的价格区（卖方拒绝区）
+    - Lower Tail: 低于 VAL 的价格区（买方拒绝区）
+    
+    意义：
+    - 价格快速扫过然后被拒绝
+    - 表示市场强烈不认可这些价格
+    - 类似传统 Market Profile 的 Single Prints
+    
+    Args:
+        histogram: 价格直方图
+        vah: Value Area High
+        val: Value Area Low
+        min_tail_bins: 最少几个 bin 才算 tail
+    
+    Returns:
+        {'upper_tail': [prices], 'lower_tail': [prices]}
+    """
+    if not histogram or vah is None or val is None:
+        return {'upper_tail': [], 'lower_tail': []}
+    
+    sorted_prices = sorted(histogram.keys())
+    
+    upper_tail = [p for p in sorted_prices if p > vah]
+    lower_tail = [p for p in sorted_prices if p < val]
+    
+    return {
+        'upper_tail': upper_tail if len(upper_tail) >= min_tail_bins else [],
+        'lower_tail': lower_tail if len(lower_tail) >= min_tail_bins else []
+    }
+
+
 def calculate_rejected_probabilities(
     histogram: Dict[float, float],
     threshold_percentile: float = 0.10
 ) -> List[float]:
     """
-    Rejected Probabilities = 被市场快速否定的概率区
+    Rejected Probabilities = 被市场快速否定的概率区（旧版本，保留兼容）
+    
+    注意：推荐使用 calculate_tails()，它基于 VAH/VAL 更准确
     
     定义：成交量在最低 10% 的价格区间
-    类似传统 Market Profile 的 Single Prints
     """
     if not histogram or len(histogram) < 3:
         return []
@@ -224,6 +310,54 @@ def calculate_rejected_probabilities(
         return []
 
 
+def get_market_profile(
+    histogram: Dict[float, float],
+    aggressor_histogram: Optional[Dict[float, Dict]] = None
+) -> Dict:
+    """
+    获取完整的 Market Profile 数据（用于可视化）
+    
+    Returns:
+        {
+            'histogram': {price: volume},
+            'poc': float,
+            'vah': float,
+            'val': float,
+            'band_width': float,
+            'upper_tail': [prices],
+            'lower_tail': [prices],
+            'pomd': float (如果有 aggressor 数据),
+            'total_volume': float,
+        }
+    """
+    if not histogram:
+        return None
+    
+    VAH, VAL, mid_prob = calculate_consensus_band(histogram)
+    poc = calculate_poc(histogram)
+    band_width = get_band_width(histogram)
+    tails = calculate_tails(histogram, VAH, VAL)
+    
+    pomd = None
+    if aggressor_histogram:
+        ws_vol = sum(d.get('buy', 0) + d.get('sell', 0) for d in aggressor_histogram.values())
+        pomd = calculate_pomd(aggressor_histogram, total_volume=ws_vol)
+    
+    return {
+        'histogram': histogram,
+        'poc': poc,
+        'vah': VAH,
+        'val': VAL,
+        'mid_probability': mid_prob,
+        'band_width': band_width,
+        'upper_tail': tails['upper_tail'],
+        'lower_tail': tails['lower_tail'],
+        'pomd': pomd,
+        'total_volume': sum(histogram.values()),
+        'price_levels': len(histogram),
+    }
+
+
 def get_volume_profile_summary(
     histogram: Dict[float, float],
     aggressor_histogram: Optional[Dict[float, Dict]] = None
@@ -232,11 +366,13 @@ def get_volume_profile_summary(
     VAH, VAL, mid_prob = calculate_consensus_band(histogram)
     band_width = get_band_width(histogram)
     poc = calculate_poc(histogram)
-    rejected = calculate_rejected_probabilities(histogram)
+    tails = calculate_tails(histogram, VAH, VAL)
+    rejected = calculate_rejected_probabilities(histogram)  # 保留旧版兼容
     
     pomd = None
     if aggressor_histogram:
-        pomd = calculate_pomd(aggressor_histogram)
+        ws_vol = sum(d.get('buy', 0) + d.get('sell', 0) for d in aggressor_histogram.values())
+        pomd = calculate_pomd(aggressor_histogram, total_volume=ws_vol)
     
     return {
         'VAH': VAH,
@@ -245,7 +381,9 @@ def get_volume_profile_summary(
         'band_width': band_width,
         'POC': poc,
         'POMD': pomd,
-        'rejected_probabilities': rejected,
+        'upper_tail': tails['upper_tail'],
+        'lower_tail': tails['lower_tail'],
+        'rejected_probabilities': rejected,  # 旧版兼容
         'total_volume': sum(histogram.values()) if histogram else 0,
         'price_levels': len(histogram) if histogram else 0
     }
@@ -419,11 +557,12 @@ def calculate_cs(
     """
     CS v2 (Conviction Score) = Directional AR × Participation
     
-    CS v2 = (|delta| / total) × log(1 + total_volume)
+    CS v2 = (|delta| / total) × log(1 + total_volume / V0)
     
-    为什么 v2 比 v1 好？
-    - v1: CS = AR → 小样本也能给高分（10 美元成交 AR=0.9）
-    - v2: CS = AR × log(1+V) → 需要"方向性 + 足够参与"才能高分
+    为什么用 V0 归一化？
+    - 原始 log(1+V) 的阈值会随 volume 单位变化而漂移
+    - log(1 + V/V0) 使阈值跨市场稳定可比
+    - V0 = 1000 意味着 $1000 成交量时 participation ≈ 0.69
     
     解读：
     - CS 低: 要么没方向，要么参与少
@@ -434,7 +573,7 @@ def calculate_cs(
     
     delta = abs(aggressive_buy - aggressive_sell)
     directional_ar = delta / total_volume
-    participation = math.log(1 + total_volume) * CS_PARTICIPATION_SCALE
+    participation = math.log(1 + total_volume / CS_VOLUME_BASELINE)
     
     return directional_ar * participation
 
@@ -515,17 +654,22 @@ def determine_status(
     🟢 Informed: 市场已形成稳定共识
        - UI < 0.30 (带宽窄)
        - CER >= 0.80 (收敛健康)
-       - CS >= 2.0 (信念强，v2 阈值)
+       - 注意：不要求 CS 高！已形成共识的市场可能很"平静"
     
     🔴 Noisy: 市场缺乏稳定认知结构
        - UI >= 0.50 (带宽太宽)
        - 或 CER < 0.40 (收敛阻塞)
-       - 或 CS < 0.5 (信念弱)
+       - 或 CS < 0.3 且有数据 (完全没方向性参与)
     
     🟡 Fragmented: 市场理解分裂，存在分歧
        - 其余情况
     
     ⚪ Unknown: 数据不足
+    
+    设计原则：
+    - Informed = 已稳定，不是"正在形成共识"
+    - CS 高 = 有人在主动推动，可能是事件驱动或共识形成中
+    - 因此 Informed 不要求 CS 高
     """
     if ui is None and cer is None:
         return "⚪ Unknown"
@@ -535,15 +679,15 @@ def determine_status(
         return "🔴 Noisy"
     if cer is not None and cer < CER_NOISY_THRESHOLD:
         return "🔴 Noisy"
+    # CS 很低 = 完全没有方向性参与（但要有数据才判断）
     if cs is not None and cs < CS_NOISY_THRESHOLD:
         return "🔴 Noisy"
     
-    # Informed 条件（全部满足）
+    # Informed 条件（UI + CER 都满足，不看 CS）
     ui_good = (ui is not None and ui < UI_INFORMED_THRESHOLD)
     cer_good = (cer is not None and cer >= CER_INFORMED_THRESHOLD)
-    cs_good = (cs is None or cs >= CS_INFORMED_THRESHOLD)
     
-    if ui_good and cer_good and cs_good:
+    if ui_good and cer_good:
         return "🟢 Informed"
     
     return "🟡 Fragmented"
@@ -667,12 +811,18 @@ def calculate_all_metrics(
     VAH, VAL, mid_prob = calculate_consensus_band(histogram)
     band_width = get_band_width(histogram)
     poc = calculate_poc(histogram)
-    rejected = calculate_rejected_probabilities(histogram)
+    tails = calculate_tails(histogram, VAH, VAL)
+    rejected = calculate_rejected_probabilities(histogram)  # 旧版兼容
     
-    # POMD（需要 aggressor histogram）
+    # POMD（需要 aggressor histogram + 动态阈值）
     pomd = None
     if aggressor_histogram:
-        pomd = calculate_pomd(aggressor_histogram)
+        # 计算 aggressor histogram 总量用于动态阈值
+        ws_vol = sum(
+            d.get('buy', 0) + d.get('sell', 0) 
+            for d in aggressor_histogram.values()
+        )
+        pomd = calculate_pomd(aggressor_histogram, total_volume=ws_vol)
     
     # 不确定性相关
     ui = calculate_ui(histogram)
@@ -704,7 +854,9 @@ def calculate_all_metrics(
         'band_width': band_width,
         'POC': poc,
         'POMD': pomd,
-        'rejected_probabilities': rejected,
+        'upper_tail': tails['upper_tail'],
+        'lower_tail': tails['lower_tail'],
+        'rejected_probabilities': rejected,  # 旧版兼容
         
         # 不确定性
         'UI': ui,
@@ -727,7 +879,8 @@ def calculate_all_metrics(
         'trades_24h_count': len(trades_24h),
         'band_width_7d_ago': band_width_7d_ago,
         'has_aggressor_data': aggressive_buy is not None,
-        'has_aggressor_histogram': aggressor_histogram is not None
+        'has_aggressor_histogram': aggressor_histogram is not None,
+        'histogram': histogram,  # 用于可视化
     }
 
 
@@ -753,8 +906,8 @@ if __name__ == "__main__":
     print(f"   Input (millis):  {ts_millis} → {norm_m}")
     print(f"   ✅ Both normalized to same value: {norm_s == norm_m}")
     
-    # === 测试 2: CS v2 vs v1 ===
-    print("\n📍 Test 2: CS v2 vs v1")
+    # === 测试 2: CS v2 vs v1 (with V0 normalization) ===
+    print("\n📍 Test 2: CS v2 with V0 Normalization")
     
     # 小样本高 AR
     buy_small, sell_small, vol_small = 9, 1, 10
@@ -763,7 +916,16 @@ if __name__ == "__main__":
     
     print(f"   Small sample ($10, AR=0.8):")
     print(f"     CS v1: {cs_v1_small:.3f}")
-    print(f"     CS v2: {cs_v2_small:.3f}")
+    print(f"     CS v2: {cs_v2_small:.4f} (V0={CS_VOLUME_BASELINE})")
+    
+    # 中样本
+    buy_med, sell_med, vol_med = 900, 100, 1000
+    cs_v1_med = calculate_cs_v1(buy_med, sell_med, vol_med)
+    cs_v2_med = calculate_cs(buy_med, sell_med, vol_med)
+    
+    print(f"   Medium sample ($1000, AR=0.8):")
+    print(f"     CS v1: {cs_v1_med:.3f}")
+    print(f"     CS v2: {cs_v2_med:.4f}")
     
     # 大样本相同 AR
     buy_large, sell_large, vol_large = 9000, 1000, 10000
@@ -772,9 +934,9 @@ if __name__ == "__main__":
     
     print(f"   Large sample ($10000, AR=0.8):")
     print(f"     CS v1: {cs_v1_large:.3f}")
-    print(f"     CS v2: {cs_v2_large:.3f}")
+    print(f"     CS v2: {cs_v2_large:.4f}")
     
-    print(f"   ✅ CS v2 properly scales with volume")
+    print(f"   ✅ CS v2 with V0 normalization: threshold stable across markets")
     
     # === 测试 3: Direction 判断 ===
     print("\n📍 Test 3: Direction (using AR threshold)")
@@ -791,8 +953,39 @@ if __name__ == "__main__":
     dir_neut = get_direction(52, 48, 100)
     print(f"   Buy=52, Sell=48, Total=100 → {dir_neut}")
     
-    # === 测试 4: POC vs POMD ===
-    print("\n📍 Test 4: POC vs POMD")
+    # === 测试 4: Consensus Band (围绕 POC 连续扩展) ===
+    print("\n📍 Test 4: Consensus Band (POC-centered continuous expansion)")
+    
+    # 模拟一个有 tail 的市场
+    test_trades_full = [
+        {'price': 0.58, 'size': 10},   # Lower tail
+        {'price': 0.59, 'size': 15},   # Lower tail
+        {'price': 0.60, 'size': 50},   # VAL 附近
+        {'price': 0.61, 'size': 80},   
+        {'price': 0.62, 'size': 120},  
+        {'price': 0.63, 'size': 180},  
+        {'price': 0.64, 'size': 250},  # POC
+        {'price': 0.65, 'size': 200},  
+        {'price': 0.66, 'size': 150},  
+        {'price': 0.67, 'size': 100},  # VAH 附近
+        {'price': 0.68, 'size': 40},   
+        {'price': 0.69, 'size': 20},   # Upper tail
+        {'price': 0.70, 'size': 10},   # Upper tail
+    ]
+    
+    histogram_full = calculate_histogram(test_trades_full)
+    poc_full = calculate_poc(histogram_full)
+    vah, val, mid = calculate_consensus_band(histogram_full)
+    tails = calculate_tails(histogram_full, vah, val)
+    
+    print(f"   POC: {poc_full}")
+    print(f"   Value Area: [{val}, {vah}]")
+    print(f"   Upper Tail: {tails['upper_tail']}")
+    print(f"   Lower Tail: {tails['lower_tail']}")
+    print(f"   ✅ Value Area is continuous around POC")
+    
+    # === 测试 5: POC vs POMD ===
+    print("\n📍 Test 5: POC vs POMD")
     
     test_trades = [
         {'price': 0.64, 'size': 120},
@@ -814,20 +1007,28 @@ if __name__ == "__main__":
     print(f"   POMD (最大争议): {pomd}")
     print(f"   ✅ POC ≠ POMD: 最大成交点不是最大争议点")
     
-    # === 测试 5: 状态判定 ===
-    print("\n📍 Test 5: Status Determination")
+    # === 测试 6: 状态判定 (Informed 不要求 CS 高) ===
+    print("\n📍 Test 6: Status Determination (Informed doesn't require high CS)")
     
-    # Informed
-    status1 = determine_status(ui=0.2, cer=0.9, cs=3.0)
-    print(f"   UI=0.2, CER=0.9, CS=3.0 → {status1}")
+    # Informed: UI 低 + CER 高，不管 CS
+    status1 = determine_status(ui=0.2, cer=0.9, cs=0.5)  # CS 中等也能 Informed
+    print(f"   UI=0.2, CER=0.9, CS=0.5 → {status1}")
+    
+    # Informed: 没有 CS 数据也能判定
+    status2 = determine_status(ui=0.2, cer=0.9, cs=None)
+    print(f"   UI=0.2, CER=0.9, CS=None → {status2}")
     
     # Noisy (high UI)
-    status2 = determine_status(ui=0.6, cer=0.9, cs=3.0)
-    print(f"   UI=0.6, CER=0.9, CS=3.0 → {status2}")
+    status3 = determine_status(ui=0.6, cer=0.9, cs=1.0)
+    print(f"   UI=0.6, CER=0.9, CS=1.0 → {status3}")
+    
+    # Noisy (very low CS = no participation)
+    status4 = determine_status(ui=0.3, cer=0.5, cs=0.1)
+    print(f"   UI=0.3, CER=0.5, CS=0.1 → {status4}")
     
     # Fragmented
-    status3 = determine_status(ui=0.35, cer=0.6, cs=1.5)
-    print(f"   UI=0.35, CER=0.6, CS=1.5 → {status3}")
+    status5 = determine_status(ui=0.35, cer=0.6, cs=0.8)
+    print(f"   UI=0.35, CER=0.6, CS=0.8 → {status5}")
     
     print("\n" + "=" * 60)
     print("✅ All tests completed!")

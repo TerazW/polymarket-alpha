@@ -94,7 +94,7 @@ def init_db():
             )
         """))
         
-        # Trade histogram 表
+        # Trade histogram 表 (旧版，保留兼容)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS trade_histogram (
                 id SERIAL PRIMARY KEY,
@@ -104,6 +104,22 @@ def init_db():
                 trade_count INTEGER,
                 volume DECIMAL(20,8),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        
+        # Daily histogram 表 (新版，包含 aggressor 数据，用于 Market Profile)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS daily_histogram (
+                id SERIAL PRIMARY KEY,
+                token_id VARCHAR(100),
+                date DATE,
+                price_bin DECIMAL(10,4),
+                volume DECIMAL(20,8),
+                aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                trade_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(token_id, date, price_bin)
             )
         """))
         
@@ -127,6 +143,7 @@ def migrate_schema():
     """
     迁移数据库 schema
     为现有数据库添加新字段：closed, active, categories
+    并创建 daily_histogram 表
     """
     from sqlalchemy import text
     
@@ -148,6 +165,36 @@ def migrate_schema():
                 except Exception as e:
                     print(f"[DB Migration] ⚠️ {col_name}: {e}")
             
+            # 创建 daily_histogram 表（如果不存在）
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS daily_histogram (
+                        id SERIAL PRIMARY KEY,
+                        token_id VARCHAR(100),
+                        date DATE,
+                        price_bin DECIMAL(10,4),
+                        volume DECIMAL(20,8),
+                        aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                        aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                        trade_count INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(token_id, date, price_bin)
+                    )
+                """))
+                print("[DB Migration] ✅ daily_histogram table ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ daily_histogram: {e}")
+            
+            # 创建索引
+            try:
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_daily_histogram_token_date 
+                    ON daily_histogram(token_id, date)
+                """))
+                print("[DB Migration] ✅ daily_histogram index ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ daily_histogram index: {e}")
+            
         else:
             # SQLite: 需要检查列是否存在
             result = conn.execute(text("PRAGMA table_info(markets)")).fetchall()
@@ -168,6 +215,26 @@ def migrate_schema():
                         print(f"[DB Migration] ⚠️ {col_name}: {e}")
                 else:
                     print(f"[DB Migration] ✅ {col_name} column exists")
+            
+            # SQLite: 创建 daily_histogram 表
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS daily_histogram (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        token_id VARCHAR(100),
+                        date DATE,
+                        price_bin DECIMAL(10,4),
+                        volume DECIMAL(20,8),
+                        aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                        aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                        trade_count INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(token_id, date, price_bin)
+                    )
+                """))
+                print("[DB Migration] ✅ daily_histogram table ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ daily_histogram: {e}")
         
         conn.commit()
     
