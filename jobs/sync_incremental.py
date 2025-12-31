@@ -1,46 +1,114 @@
 """
-智能增量同步系统
+智能增量同步系统 v2
 - 检测新市场
 - 移除已结算市场
 - 只更新有变化的市场
 - 保留历史数据
+- 支持多分类（categories JSON 数组）
 """
 
 import os
 import sys
+import json
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from datetime import datetime, timedelta
 from sqlalchemy import text
-from utils.db import get_session, init_db
+from utils.db import (
+    get_session, init_db, migrate_schema,
+    IS_POSTGRES, IS_SQLITE, 
+    get_date_7_days_ago_sql, get_interval_hours_sql
+)
 from utils.polymarket_api import PolymarketAPI
 from utils.metrics import (
-    calculate_histogram, calculate_ui, calculate_cs, calculate_cer,
+    calculate_histogram, calculate_ui, calculate_cer, calculate_cs,
     determine_status, filter_trades_by_time, get_band_width
 )
+
+# WebSocket 数据获取函数
+def get_aggressor_stats_from_db(session, token_id: str, hours: int = 24) -> dict:
+    """从 ws_trades_hourly 获取 aggressor 统计"""
+    try:
+        # 使用兼容的时间间隔 SQL
+        interval_sql = get_interval_hours_sql(hours)
+        
+        query = text(f"""
+            SELECT 
+                COALESCE(SUM(aggressive_buy), 0) as agg_buy,
+                COALESCE(SUM(aggressive_sell), 0) as agg_sell,
+                COALESCE(SUM(total_volume), 0) as total,
+                COALESCE(SUM(trade_count), 0) as count
+            FROM ws_trades_hourly
+            WHERE token_id = :tid
+            AND hour >= {interval_sql}
+        """)
+        
+        result = session.execute(query, {'tid': token_id}).fetchone()
+        
+        if result and result[3] > 0:
+            agg_buy = float(result[0])
+            agg_sell = float(result[1])
+            total = float(result[2])
+            
+            return {
+                'aggressive_buy': agg_buy,
+                'aggressive_sell': agg_sell,
+                'total_volume': total,
+                'trade_count': int(result[3]),
+                'has_data': True
+            }
+    except Exception:
+        pass
+    
+    return {'has_data': False}
 import time
 
 
 def get_active_markets_from_db(session) -> dict:
     """获取数据库中的活跃市场"""
-    result = session.execute(text("""
-        SELECT token_id, market_id, volume_24h, current_price, updated_at
-        FROM markets
-        WHERE closed = false
-        ORDER BY volume_24h DESC
-    """)).fetchall()
+    try:
+        result = session.execute(text("""
+            SELECT token_id, market_id, volume_24h, current_price, updated_at, 
+                   category, categories
+            FROM markets
+            WHERE closed = false OR closed IS NULL
+            ORDER BY volume_24h DESC
+        """)).fetchall()
+    except Exception:
+        # 回退：不带 closed 字段
+        result = session.execute(text("""
+            SELECT token_id, market_id, volume_24h, current_price, updated_at,
+                   COALESCE(category, 'Other') as category, 
+                   categories
+            FROM markets
+            ORDER BY volume_24h DESC
+        """)).fetchall()
     
-    return {
-        row[1]: {  # market_id (condition_id) 作为 key
+    markets = {}
+    for row in result:
+        market_id = row[1]
+        categories_raw = row[6] if len(row) > 6 else None
+        
+        # 解析 categories JSON
+        categories = []
+        if categories_raw:
+            try:
+                categories = json.loads(categories_raw) if isinstance(categories_raw, str) else categories_raw
+            except:
+                categories = []
+        
+        markets[market_id] = {
             'token_id': row[0],
             'volume_24h': float(row[2] or 0),
             'price': float(row[3] or 0),
-            'updated_at': row[4]
+            'updated_at': row[4],
+            'category': row[5] if len(row) > 5 else 'Other',
+            'categories': categories
         }
-        for row in result
-    }
+    
+    return markets
 
 
 def detect_new_markets(api_markets: list, db_markets: dict) -> list:
@@ -84,37 +152,42 @@ def detect_changed_markets(api_markets: list, db_markets: dict,
         # 检查交易量变化
         old_volume = db_market['volume_24h']
         new_volume = market['volume_24h']
-        
         volume_change = abs(new_volume - old_volume) / (old_volume + 1)
         
         # 检查价格变化
         old_price = db_market['price']
         new_price = market['price']
-        
         price_change = abs(new_price - old_price)
         
-        # 检查最后更新时间（处理字符串和 datetime 对象）
+        # 检查最后更新时间
         last_updated = db_market['updated_at']
         hours_since_update = 25  # 默认值，触发更新
         
         try:
             if isinstance(last_updated, str):
-                # SQLite 返回字符串，需要解析
                 from dateutil import parser
                 last_updated_dt = parser.parse(last_updated)
-                hours_since_update = (datetime.now() - last_updated_dt).total_seconds() / 3600
+                if last_updated_dt.tzinfo:
+                    from datetime import timezone
+                    now = datetime.now(timezone.utc)
+                else:
+                    now = datetime.now()
+                hours_since_update = (now - last_updated_dt).total_seconds() / 3600
             elif last_updated:
-                # PostgreSQL 返回 datetime 对象
-                hours_since_update = (datetime.now() - last_updated).total_seconds() / 3600
+                if hasattr(last_updated, 'tzinfo') and last_updated.tzinfo:
+                    from datetime import timezone
+                    now = datetime.now(timezone.utc)
+                else:
+                    now = datetime.now()
+                hours_since_update = (now - last_updated).total_seconds() / 3600
         except Exception:
-            # 解析失败，使用默认值（会触发更新）
             pass
         
         # 判断是否需要更新
         needs_update = (
-            volume_change > volume_change_threshold or  # 交易量变化 > 20%
-            price_change > price_change_threshold or    # 价格变化 > 5%
-            hours_since_update > 24                     # 超过 24 小时未更新
+            volume_change > volume_change_threshold or
+            price_change > price_change_threshold or
+            hours_since_update > 24
         )
         
         if needs_update:
@@ -123,53 +196,63 @@ def detect_changed_markets(api_markets: list, db_markets: dict,
     return changed_markets
 
 
-def mark_markets_as_closed(session, market_ids: list):
+def mark_markets_as_closed(session, market_ids: list) -> int:
     """标记市场为已结算"""
     if not market_ids:
         return 0
     
-    # 使用参数化查询
-    placeholders = ','.join([f':id{i}' for i in range(len(market_ids))])
-    params = {f'id{i}': market_id for i, market_id in enumerate(market_ids)}
-    
-    result = session.execute(
-        text(f"""
-            UPDATE markets 
-            SET closed = true, active = false 
-            WHERE market_id IN ({placeholders})
-        """),
-        params
-    )
-    session.commit()
-    return result.rowcount
+    try:
+        placeholders = ','.join([f':id{i}' for i in range(len(market_ids))])
+        params = {f'id{i}': market_id for i, market_id in enumerate(market_ids)}
+        
+        result = session.execute(
+            text(f"""
+                UPDATE markets 
+                SET closed = true, active = false 
+                WHERE market_id IN ({placeholders})
+            """),
+            params
+        )
+        session.commit()
+        return result.rowcount
+    except Exception as e:
+        print(f"  ⚠️ Could not mark as closed: {e}")
+        session.rollback()
+        return 0
 
 
 def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
-    """同步单个市场（从 sync.py 提取的逻辑）"""
+    """同步单个市场"""
     try:
         condition_id = market['condition_id']
         token_id = market['token_id']
         question = market['question']
         current_price = market['price']
         volume_24h = market['volume_24h']
+        category = market.get('category', 'Other')
+        categories = market.get('categories', [category])
+        
+        # categories 转 JSON 字符串
+        categories_json = json.dumps(categories) if categories else json.dumps([category])
         
         # 计算剩余天数
-        if market['end_date']:
+        days_remaining = 30
+        if market.get('end_date'):
             try:
                 end_date = datetime.fromisoformat(
                     market['end_date'].replace('Z', '+00:00')
                 )
                 days_remaining = max(1, (end_date.date() - datetime.now().date()).days)
             except:
-                days_remaining = 30
-        else:
-            days_remaining = 30
+                pass
         
         # 获取成交数据
         market_trades = api.get_trades_for_market(condition_id, limit=5000)
         
         if not market_trades:
-            return False
+            save_market_basic(session, token_id, condition_id, question,
+                            current_price, volume_24h, category, categories_json)
+            return True
         
         trades_24h = filter_trades_by_time(market_trades, hours=24)
         
@@ -177,21 +260,32 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
         histogram_all = calculate_histogram(market_trades)
         
         if not histogram_all:
-            return False
+            save_market_basic(session, token_id, condition_id, question,
+                            current_price, volume_24h, category, categories_json)
+            return True
         
         ui = calculate_ui(histogram_all)
-        cs = calculate_cs(trades_24h) if trades_24h else None
-        
         band_width_now = get_band_width(histogram_all)
         
-        # 获取 7 天前的 band width
+        # 从 WebSocket 数据获取 aggressor 统计来计算 CS
+        cs = None
+        ws_stats = get_aggressor_stats_from_db(session, token_id, hours=24)
+        if ws_stats.get('has_data'):
+            cs = calculate_cs(
+                ws_stats['aggressive_buy'],
+                ws_stats['aggressive_sell'],
+                ws_stats['total_volume']
+            )
+        
+        # 获取 7 天前的 band width（使用兼容的 SQL）
         band_width_7d_ago = None
         try:
-            result = session.execute(text("""
+            date_sql = get_date_7_days_ago_sql()
+            result = session.execute(text(f"""
                 SELECT va_high, va_low
                 FROM daily_metrics 
                 WHERE token_id = :token_id 
-                AND date = (CURRENT_DATE - INTERVAL '7 days')::date
+                AND date = {date_sql}
             """), {'token_id': token_id}).fetchone()
             
             if result and result[0] and result[1]:
@@ -214,13 +308,17 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
         # 更新 markets 表
         session.execute(text("""
             INSERT INTO markets 
-            (token_id, market_id, title, current_price, volume_24h, updated_at, closed, active)
-            VALUES (:tid, :mid, :title, :price, :vol, :now, false, true)
+            (token_id, market_id, title, current_price, volume_24h, 
+             category, categories, updated_at, closed, active)
+            VALUES (:tid, :mid, :title, :price, :vol, 
+                    :cat, :cats, :now, false, true)
             ON CONFLICT (token_id) DO UPDATE SET
                 market_id = EXCLUDED.market_id,
                 title = EXCLUDED.title,
                 current_price = EXCLUDED.current_price,
                 volume_24h = EXCLUDED.volume_24h,
+                category = EXCLUDED.category,
+                categories = EXCLUDED.categories,
                 updated_at = EXCLUDED.updated_at,
                 closed = EXCLUDED.closed,
                 active = EXCLUDED.active
@@ -230,16 +328,17 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
             'title': question,
             'price': current_price,
             'vol': volume_24h,
+            'cat': category,
+            'cats': categories_json,
             'now': datetime.now()
         })
         
         # 计算 VA 范围
+        va_high = None
+        va_low = None
         if band_width_now:
             va_high = current_price * 100 + (band_width_now * 50)
             va_low = current_price * 100 - (band_width_now * 50)
-        else:
-            va_high = None
-            va_low = None
         
         # 更新 daily_metrics 表
         session.execute(text("""
@@ -277,10 +376,45 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
         return False
 
 
+def save_market_basic(session, token_id, condition_id, question,
+                      current_price, volume_24h, category, categories_json):
+    """保存市场基本信息（无交易数据时）"""
+    try:
+        session.execute(text("""
+            INSERT INTO markets 
+            (token_id, market_id, title, current_price, volume_24h, 
+             category, categories, updated_at, closed, active)
+            VALUES (:tid, :mid, :title, :price, :vol, 
+                    :cat, :cats, :now, false, true)
+            ON CONFLICT (token_id) DO UPDATE SET
+                market_id = EXCLUDED.market_id,
+                title = EXCLUDED.title,
+                current_price = EXCLUDED.current_price,
+                volume_24h = EXCLUDED.volume_24h,
+                category = EXCLUDED.category,
+                categories = EXCLUDED.categories,
+                updated_at = EXCLUDED.updated_at
+        """), {
+            'tid': token_id,
+            'mid': condition_id,
+            'title': question,
+            'price': current_price,
+            'vol': volume_24h,
+            'cat': category,
+            'cats': categories_json,
+            'now': datetime.now()
+        })
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        print(f"  ⚠️ Basic save error: {e}")
+
+
 def incremental_sync(
     min_volume_24h: float = 100,
     volume_change_threshold: float = 0.2,
-    price_change_threshold: float = 0.05
+    price_change_threshold: float = 0.05,
+    use_categories: bool = True
 ):
     """
     智能增量同步
@@ -289,6 +423,7 @@ def incremental_sync(
         min_volume_24h: 最小 24h 交易量
         volume_change_threshold: 交易量变化阈值（0.2 = 20%）
         price_change_threshold: 价格变化阈值（0.05 = 5%）
+        use_categories: 是否按分类获取（True 更全面，False 更快）
     """
     session = get_session()
     api = PolymarketAPI()
@@ -303,16 +438,29 @@ def incremental_sync(
     
     try:
         print(f"\n{'='*70}")
-        print(f"🔄 Intelligent Incremental Sync")
-        print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"🔄 Intelligent Incremental Sync v2")
+        print(f"   Database: {'PostgreSQL' if IS_POSTGRES else 'SQLite'}")
+        print(f"   Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*70}\n")
+        
+        # Step 0: 确保 schema 是最新的
+        print("🔧 Step 0: Ensuring database schema...")
+        migrate_schema()
         
         # Step 1: 从 API 获取所有活跃市场
         print("📡 Step 1: Fetching all active markets from API...")
-        api_markets = api.get_all_markets_from_events(
-            min_volume_24h=min_volume_24h,
-            max_events=None
-        )
+        
+        if use_categories:
+            api_markets = api.get_markets_by_categories(
+                min_volume_24h=min_volume_24h,
+                total_limit=None
+            )
+        else:
+            api_markets = api.get_all_markets_from_events(
+                min_volume_24h=min_volume_24h,
+                max_events=None
+            )
+        
         print(f"   Found {len(api_markets)} active markets (volume > ${min_volume_24h})\n")
         
         # Step 2: 从数据库获取当前追踪的市场
@@ -349,7 +497,11 @@ def incremental_sync(
         if new_markets:
             print(f"🆕 Step 7: Syncing {len(new_markets)} new markets...")
             for idx, market in enumerate(new_markets, 1):
-                print(f"  [{idx}/{len(new_markets)}] {market['question'][:50]}...")
+                cat = market.get('category', 'Other')
+                cats = market.get('categories', [])
+                cats_str = f" (+{len(cats)-1})" if len(cats) > 1 else ""
+                print(f"  [{idx}/{len(new_markets)}] [{cat}{cats_str}] {market['question'][:40]}...")
+                
                 if sync_market(session, api, market):
                     stats['new'] += 1
                     print(f"    ✅ Synced")
@@ -357,7 +509,6 @@ def incremental_sync(
                     stats['failed'] += 1
                     print(f"    ❌ Failed")
                 
-                # Rate limit protection
                 if idx % 10 == 0:
                     time.sleep(2)
             print()
@@ -366,7 +517,9 @@ def incremental_sync(
         if changed_markets:
             print(f"🔄 Step 8: Updating {len(changed_markets)} changed markets...")
             for idx, market in enumerate(changed_markets, 1):
-                print(f"  [{idx}/{len(changed_markets)}] {market['question'][:50]}...")
+                cat = market.get('category', 'Other')
+                print(f"  [{idx}/{len(changed_markets)}] [{cat}] {market['question'][:40]}...")
+                
                 if sync_market(session, api, market):
                     stats['updated'] += 1
                     print(f"    ✅ Updated")
@@ -374,13 +527,12 @@ def incremental_sync(
                     stats['failed'] += 1
                     print(f"    ❌ Failed")
                 
-                # Rate limit protection
                 if idx % 10 == 0:
                     time.sleep(2)
             print()
         
-        # Step 9: 统计未变化的市场
-        stats['unchanged'] = len(db_markets) - len(changed_markets) - len(closed_market_ids)
+        # Step 9: 统计
+        stats['unchanged'] = max(0, len(db_markets) - len(changed_markets) - len(closed_market_ids))
         
         # 打印统计
         print(f"\n{'='*70}")
@@ -393,8 +545,37 @@ def incremental_sync(
         print(f"❌ Failed: {stats['failed']}")
         print(f"{'='*70}")
         
+        # 分类统计
+        try:
+            cat_stats = session.execute(text("""
+                SELECT category, COUNT(*) as count
+                FROM markets
+                WHERE closed = false OR closed IS NULL
+                GROUP BY category
+                ORDER BY count DESC
+            """)).fetchall()
+            
+            if cat_stats:
+                print(f"\n📂 Category Distribution (primary):")
+                for cat, count in cat_stats:
+                    print(f"   {cat or 'Other'}: {count}")
+        except:
+            pass
+        
+        # 多分类统计
+        try:
+            result = session.execute(text("""
+                SELECT COUNT(*) FROM markets 
+                WHERE categories IS NOT NULL 
+                AND categories != '[]'
+                AND (closed = false OR closed IS NULL)
+            """)).scalar()
+            print(f"\n📊 Markets with category data: {result}")
+        except:
+            pass
+        
         total_active = session.execute(
-            text("SELECT COUNT(*) FROM markets WHERE closed = false")
+            text("SELECT COUNT(*) FROM markets WHERE closed = false OR closed IS NULL")
         ).scalar()
         print(f"\n📈 Total active markets in DB: {total_active}")
         print(f"⏱️  Sync completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -414,13 +595,15 @@ def incremental_sync(
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Intelligent incremental market sync')
+    parser = argparse.ArgumentParser(description='Intelligent incremental market sync v2')
     parser.add_argument('--min-volume', type=float, default=100,
                        help='Minimum 24h volume (default: 100)')
     parser.add_argument('--volume-threshold', type=float, default=0.2,
                        help='Volume change threshold (default: 0.2 = 20%%)')
     parser.add_argument('--price-threshold', type=float, default=0.05,
                        help='Price change threshold (default: 0.05 = 5%%)')
+    parser.add_argument('--fast', action='store_true',
+                       help='Fast mode: skip category-based fetching')
     
     args = parser.parse_args()
     
@@ -430,9 +613,9 @@ if __name__ == "__main__":
     stats = incremental_sync(
         min_volume_24h=args.min_volume,
         volume_change_threshold=args.volume_threshold,
-        price_change_threshold=args.price_threshold
+        price_change_threshold=args.price_threshold,
+        use_categories=not args.fast
     )
     
-    # Exit code
     exit_code = 0 if stats['failed'] == 0 else 1
     sys.exit(exit_code)

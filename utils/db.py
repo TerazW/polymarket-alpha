@@ -28,9 +28,13 @@ else:
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     print(f"[DB Config] Using PostgreSQL (production)")
 
+# 判断数据库类型
+IS_POSTGRES = "postgresql" in DATABASE_URL
+IS_SQLITE = "sqlite" in DATABASE_URL
+
 # 创建引擎
 engine_kwargs = {}
-if "sqlite" in DATABASE_URL:
+if IS_SQLITE:
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 
 engine = create_engine(DATABASE_URL, echo=False, **engine_kwargs)
@@ -51,9 +55,8 @@ def init_db():
     """初始化数据库（创建所有表）"""
     from sqlalchemy import text
     
-    # 创建表的 SQL（兼容 SQLite 和 PostgreSQL）
     with engine.connect() as conn:
-        # Markets 表
+        # Markets 表 - 包含 closed, active, categories 字段
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS markets (
                 token_id VARCHAR(100) PRIMARY KEY,
@@ -61,9 +64,12 @@ def init_db():
                 title TEXT,
                 description TEXT,
                 category VARCHAR(50),
+                categories TEXT,
                 current_price DECIMAL(10,4),
                 volume_24h DECIMAL(20,8),
                 resolution_date TIMESTAMP,
+                closed BOOLEAN DEFAULT FALSE,
+                active BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -115,3 +121,70 @@ def init_db():
         conn.commit()
     
     print(f"[DB] Database initialized successfully")
+
+
+def migrate_schema():
+    """
+    迁移数据库 schema
+    为现有数据库添加新字段：closed, active, categories
+    """
+    from sqlalchemy import text
+    
+    print("\n[DB Migration] Starting schema migration...")
+    
+    with engine.connect() as conn:
+        if IS_POSTGRES:
+            # PostgreSQL: 使用 ADD COLUMN IF NOT EXISTS
+            migrations = [
+                ("closed", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS closed BOOLEAN DEFAULT FALSE"),
+                ("active", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE"),
+                ("categories", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS categories TEXT"),
+            ]
+            
+            for col_name, sql in migrations:
+                try:
+                    conn.execute(text(sql))
+                    print(f"[DB Migration] ✅ {col_name} column ready")
+                except Exception as e:
+                    print(f"[DB Migration] ⚠️ {col_name}: {e}")
+            
+        else:
+            # SQLite: 需要检查列是否存在
+            result = conn.execute(text("PRAGMA table_info(markets)")).fetchall()
+            existing_columns = [row[1] for row in result]
+            
+            new_columns = [
+                ("closed", "ALTER TABLE markets ADD COLUMN closed BOOLEAN DEFAULT FALSE"),
+                ("active", "ALTER TABLE markets ADD COLUMN active BOOLEAN DEFAULT TRUE"),
+                ("categories", "ALTER TABLE markets ADD COLUMN categories TEXT"),
+            ]
+            
+            for col_name, sql in new_columns:
+                if col_name not in existing_columns:
+                    try:
+                        conn.execute(text(sql))
+                        print(f"[DB Migration] ✅ Added {col_name} column")
+                    except Exception as e:
+                        print(f"[DB Migration] ⚠️ {col_name}: {e}")
+                else:
+                    print(f"[DB Migration] ✅ {col_name} column exists")
+        
+        conn.commit()
+    
+    print("[DB Migration] Migration completed\n")
+
+
+def get_date_7_days_ago_sql():
+    """返回兼容 PostgreSQL 和 SQLite 的 7 天前日期 SQL"""
+    if IS_POSTGRES:
+        return "(CURRENT_DATE - INTERVAL '7 days')::date"
+    else:
+        return "date('now', '-7 days')"
+
+
+def get_interval_hours_sql(hours: int = 24):
+    """返回兼容 PostgreSQL 和 SQLite 的时间间隔 SQL"""
+    if IS_POSTGRES:
+        return f"(NOW() - INTERVAL '{hours} hours')"
+    else:
+        return f"datetime('now', '-{hours} hours')"
