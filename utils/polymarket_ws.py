@@ -1,8 +1,13 @@
 """
-Polymarket WebSocket 客户端
+Polymarket WebSocket 客户端 (v2 - 优化版)
 用于收集实时 trades 数据（带 aggressor 方向）
 
-WebSocket Market Channel 提供 `last_trade_price` 消息：
+优化点：
+1. TradeAggregator 改成增量计数器（不存 list）
+2. 支持按小时桶聚合
+3. O(1) 查询统计
+
+WebSocket Market Channel 的 `last_trade_price` 消息：
 {
     "asset_id": "...",
     "event_type": "last_trade_price",
@@ -21,12 +26,218 @@ import json
 import time
 import threading
 from datetime import datetime
-from typing import Dict, List, Callable, Optional
+from typing import Dict, List, Callable, Optional, Tuple
 from collections import defaultdict
+from dataclasses import dataclass, field
 from websocket import WebSocketApp
 
 # WebSocket URL
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+
+
+@dataclass
+class AggressorStats:
+    """单个 asset 的 aggressor 统计（增量计数器）"""
+    aggressive_buy: float = 0.0
+    aggressive_sell: float = 0.0
+    trade_count: int = 0
+    last_trade_ts: int = 0  # 最后一笔 trade 的时间戳（毫秒）
+    
+    @property
+    def total_volume(self) -> float:
+        return self.aggressive_buy + self.aggressive_sell
+    
+    @property
+    def volume_delta(self) -> float:
+        return self.aggressive_buy - self.aggressive_sell
+    
+    @property
+    def directional_ar(self) -> Optional[float]:
+        """
+        Directional AR = |delta| / total_volume
+        
+        意义：
+        - 0 = 买卖对冲，方向不明
+        - 1 = 完全单边，强方向性
+        """
+        if self.total_volume <= 0:
+            return None
+        return abs(self.volume_delta) / self.total_volume
+    
+    def add_trade(self, side: str, size: float, timestamp: int):
+        """添加一笔 trade（增量更新）"""
+        if side == 'BUY':
+            self.aggressive_buy += size
+        elif side == 'SELL':
+            self.aggressive_sell += size
+        
+        self.trade_count += 1
+        self.last_trade_ts = max(self.last_trade_ts, timestamp)
+    
+    def reset(self):
+        """重置计数器"""
+        self.aggressive_buy = 0.0
+        self.aggressive_sell = 0.0
+        self.trade_count = 0
+        self.last_trade_ts = 0
+    
+    def to_dict(self) -> Dict:
+        return {
+            'aggressive_buy': self.aggressive_buy,
+            'aggressive_sell': self.aggressive_sell,
+            'total_volume': self.total_volume,
+            'volume_delta': self.volume_delta,
+            'directional_ar': self.directional_ar,
+            'trade_count': self.trade_count,
+            'last_trade_ts': self.last_trade_ts
+        }
+
+
+class TradeAggregator:
+    """
+    Trades 聚合器 (v2 - 增量计数器版)
+    
+    优化：
+    - 不存储逐笔 trade list
+    - 直接累加计数器
+    - O(1) 查询
+    - 支持按 (asset_id, hour) 聚合
+    """
+    
+    def __init__(self):
+        # {asset_id: AggressorStats}
+        self.stats_by_asset: Dict[str, AggressorStats] = defaultdict(AggressorStats)
+        
+        # {(asset_id, hour_str): AggressorStats} - 按小时桶
+        self.stats_by_hour: Dict[Tuple[str, str], AggressorStats] = defaultdict(AggressorStats)
+        
+        self.lock = threading.Lock()
+        
+        # 追踪上次 flush 时间
+        self.last_flush_ts: int = int(datetime.now().timestamp() * 1000)
+    
+    def add_trade(self, trade: Dict):
+        """
+        添加一笔 trade（O(1) 操作）
+        
+        Args:
+            trade: {asset_id, side, size, timestamp, ...}
+        """
+        asset_id = trade.get('asset_id')
+        side = trade.get('side', '')
+        size = float(trade.get('size', 0))
+        timestamp = int(trade.get('timestamp', 0))
+        
+        if not asset_id or not side or size <= 0:
+            return
+        
+        # 计算小时桶
+        hour_str = self._get_hour_str(timestamp)
+        
+        with self.lock:
+            # 更新 asset 级别统计
+            self.stats_by_asset[asset_id].add_trade(side, size, timestamp)
+            
+            # 更新小时桶统计
+            key = (asset_id, hour_str)
+            self.stats_by_hour[key].add_trade(side, size, timestamp)
+    
+    def _get_hour_str(self, timestamp_ms: int) -> str:
+        """将毫秒时间戳转换为小时字符串 (YYYY-MM-DD HH:00:00)"""
+        dt = datetime.fromtimestamp(timestamp_ms / 1000)
+        return dt.strftime("%Y-%m-%d %H:00:00")
+    
+    def get_stats(self, asset_id: str) -> Dict:
+        """
+        获取某个 asset 的统计（O(1)）
+        
+        Returns:
+            统计字典
+        """
+        with self.lock:
+            stats = self.stats_by_asset.get(asset_id)
+            if stats:
+                return stats.to_dict()
+        
+        return AggressorStats().to_dict()
+    
+    def get_hourly_stats(self, asset_id: str, hour_str: str) -> Dict:
+        """获取某个 asset 某小时的统计"""
+        with self.lock:
+            key = (asset_id, hour_str)
+            stats = self.stats_by_hour.get(key)
+            if stats:
+                return stats.to_dict()
+        
+        return AggressorStats().to_dict()
+    
+    def get_all_hourly_stats(self) -> Dict[Tuple[str, str], Dict]:
+        """
+        获取所有小时桶的统计（用于 flush）
+        
+        Returns:
+            {(asset_id, hour_str): stats_dict}
+        """
+        with self.lock:
+            return {
+                key: stats.to_dict() 
+                for key, stats in self.stats_by_hour.items()
+                if stats.trade_count > 0
+            }
+    
+    def get_stats_since_last_flush(self) -> Dict[str, Dict]:
+        """
+        获取自上次 flush 以来的统计
+        
+        注意：这里返回的是 asset 级别的累积统计
+        flush 后应该调用 clear_and_update_flush_time()
+        """
+        with self.lock:
+            return {
+                asset_id: stats.to_dict()
+                for asset_id, stats in self.stats_by_asset.items()
+                if stats.trade_count > 0
+            }
+    
+    def clear_and_update_flush_time(self):
+        """清空统计并更新 flush 时间"""
+        with self.lock:
+            # 记录最新的 trade 时间作为下次 flush 的起点
+            max_ts = self.last_flush_ts
+            for stats in self.stats_by_asset.values():
+                if stats.last_trade_ts > max_ts:
+                    max_ts = stats.last_trade_ts
+            
+            self.last_flush_ts = max_ts if max_ts > self.last_flush_ts else int(datetime.now().timestamp() * 1000)
+            
+            # 清空
+            self.stats_by_asset.clear()
+            self.stats_by_hour.clear()
+    
+    def clear_asset(self, asset_id: str):
+        """清空单个 asset 的统计"""
+        with self.lock:
+            if asset_id in self.stats_by_asset:
+                self.stats_by_asset[asset_id].reset()
+            
+            # 清空相关的小时桶
+            keys_to_remove = [k for k in self.stats_by_hour if k[0] == asset_id]
+            for k in keys_to_remove:
+                del self.stats_by_hour[k]
+    
+    def get_summary(self) -> Dict:
+        """获取汇总信息"""
+        with self.lock:
+            total_trades = sum(s.trade_count for s in self.stats_by_asset.values())
+            total_volume = sum(s.total_volume for s in self.stats_by_asset.values())
+            
+            return {
+                'assets_count': len(self.stats_by_asset),
+                'hourly_buckets': len(self.stats_by_hour),
+                'total_trades': total_trades,
+                'total_volume': total_volume,
+                'last_flush_ts': self.last_flush_ts
+            }
 
 
 class PolymarketWebSocket:
@@ -36,7 +247,7 @@ class PolymarketWebSocket:
     功能：
     1. 订阅多个市场的实时成交
     2. 收集 last_trade_price 消息（带 aggressor side）
-    3. 支持回调函数处理数据
+    3. 使用增量计数器聚合
     4. 自动重连 + ping 保活
     """
     
@@ -56,7 +267,7 @@ class PolymarketWebSocket:
             on_book: 收到 orderbook 时的回调函数
             verbose: 是否打印日志
         """
-        self.asset_ids = asset_ids
+        self.asset_ids = list(asset_ids)
         self.on_trade_callback = on_trade
         self.on_book_callback = on_book
         self.verbose = verbose
@@ -65,9 +276,8 @@ class PolymarketWebSocket:
         self.is_running = False
         self.ping_thread: Optional[threading.Thread] = None
         
-        # 数据存储
-        self.trades: List[Dict] = []
-        self.trades_lock = threading.Lock()
+        # 使用增量计数器聚合器
+        self.aggregator = TradeAggregator()
         
         # 统计
         self.stats = {
@@ -120,14 +330,6 @@ class PolymarketWebSocket:
             elif event_type == "book":
                 self._handle_book(data)
             
-            # price_change - 价格变动
-            elif event_type == "price_change":
-                pass  # 暂不处理
-            
-            # tick_size_change
-            elif event_type == "tick_size_change":
-                pass  # 暂不处理
-                
         except json.JSONDecodeError:
             self._log(f"⚠️ Invalid JSON: {message[:100]}")
         except Exception as e:
@@ -135,31 +337,19 @@ class PolymarketWebSocket:
             self.stats['errors'] += 1
     
     def _handle_trade(self, data: Dict):
-        """
-        处理 last_trade_price 消息
-        
-        关键字段：
-        - asset_id: token ID
-        - market: condition ID
-        - price: 成交价格
-        - size: 成交量
-        - side: "BUY" 或 "SELL" ← 这是 TAKER 方向！
-        - timestamp: 毫秒时间戳
-        """
+        """处理 last_trade_price 消息"""
         trade = {
             'asset_id': data.get('asset_id'),
             'market': data.get('market'),
             'price': float(data.get('price', 0)),
             'size': float(data.get('size', 0)),
-            'side': data.get('side'),  # BUY = taker 买, SELL = taker 卖
-            'timestamp': int(data.get('timestamp', 0)),  # 毫秒
+            'side': data.get('side'),
+            'timestamp': int(data.get('timestamp', 0)),
             'fee_rate_bps': data.get('fee_rate_bps', '0'),
-            'received_at': datetime.now().isoformat()
         }
         
-        # 存储
-        with self.trades_lock:
-            self.trades.append(trade)
+        # 增量更新聚合器
+        self.aggregator.add_trade(trade)
         
         self.stats['trades_received'] += 1
         
@@ -167,8 +357,9 @@ class PolymarketWebSocket:
         if self.on_trade_callback:
             self.on_trade_callback(trade)
         
-        if self.verbose and self.stats['trades_received'] % 100 == 0:
-            self._log(f"📊 Trades received: {self.stats['trades_received']}")
+        if self.verbose and self.stats['trades_received'] % 500 == 0:
+            summary = self.aggregator.get_summary()
+            self._log(f"📊 Trades: {self.stats['trades_received']} | Assets: {summary['assets_count']} | Vol: {summary['total_volume']:.0f}")
     
     def _handle_book(self, data: Dict):
         """处理 book 消息"""
@@ -218,37 +409,21 @@ class PolymarketWebSocket:
             self.ws.send(json.dumps(msg))
             self._log(f"📴 Unsubscribed from {len(asset_ids)} assets")
     
-    def get_trades(self, clear: bool = False) -> List[Dict]:
-        """
-        获取收集到的 trades
-        
-        Args:
-            clear: 是否清空缓存
-        
-        Returns:
-            trades 列表
-        """
-        with self.trades_lock:
-            trades = list(self.trades)
-            if clear:
-                self.trades = []
-        return trades
+    def get_aggregator(self) -> TradeAggregator:
+        """获取聚合器"""
+        return self.aggregator
     
     def get_stats(self) -> Dict:
         """获取统计信息"""
+        agg_summary = self.aggregator.get_summary()
         return {
             **self.stats,
-            'trades_in_buffer': len(self.trades),
+            **agg_summary,
             'assets_subscribed': len(self.asset_ids)
         }
     
     def run(self, reconnect: bool = True):
-        """
-        启动 WebSocket（阻塞）
-        
-        Args:
-            reconnect: 断线后是否自动重连
-        """
+        """启动 WebSocket（阻塞）"""
         while True:
             try:
                 self._log(f"🔗 Connecting to {WS_URL}...")
@@ -280,12 +455,7 @@ class PolymarketWebSocket:
                 time.sleep(5)
     
     def run_async(self) -> threading.Thread:
-        """
-        在后台线程中启动 WebSocket（非阻塞）
-        
-        Returns:
-            后台线程对象
-        """
+        """在后台线程中启动 WebSocket（非阻塞）"""
         thread = threading.Thread(target=self.run, daemon=True)
         thread.start()
         return thread
@@ -297,129 +467,22 @@ class PolymarketWebSocket:
             self.ws.close()
 
 
-class TradeAggregator:
-    """
-    Trades 聚合器
-    
-    功能：
-    - 按 market/token 聚合 trades
-    - 计算 aggressive buy/sell volume
-    - 计算 AR, Volume Delta
-    """
-    
-    def __init__(self):
-        # {asset_id: [trades]}
-        self.trades_by_asset: Dict[str, List[Dict]] = defaultdict(list)
-        self.lock = threading.Lock()
-    
-    def add_trade(self, trade: Dict):
-        """添加一笔 trade"""
-        asset_id = trade.get('asset_id')
-        if asset_id:
-            with self.lock:
-                self.trades_by_asset[asset_id].append(trade)
-    
-    def get_aggressor_stats(
-        self, 
-        asset_id: str, 
-        since_ms: Optional[int] = None
-    ) -> Dict:
-        """
-        获取某个 asset 的 aggressor 统计
-        
-        Args:
-            asset_id: token ID
-            since_ms: 只统计这个时间戳之后的 trades（毫秒）
-        
-        Returns:
-            {
-                'aggressive_buy_volume': float,
-                'aggressive_sell_volume': float,
-                'total_volume': float,
-                'volume_delta': float,
-                'ar': float,
-                'trade_count': int
-            }
-        """
-        with self.lock:
-            trades = self.trades_by_asset.get(asset_id, [])
-        
-        # 时间过滤
-        if since_ms:
-            trades = [t for t in trades if t.get('timestamp', 0) >= since_ms]
-        
-        if not trades:
-            return {
-                'aggressive_buy_volume': 0,
-                'aggressive_sell_volume': 0,
-                'total_volume': 0,
-                'volume_delta': 0,
-                'ar': None,
-                'trade_count': 0
-            }
-        
-        agg_buy = 0.0
-        agg_sell = 0.0
-        
-        for trade in trades:
-            size = trade.get('size', 0)
-            side = trade.get('side', '')
-            
-            if side == 'BUY':
-                agg_buy += size
-            elif side == 'SELL':
-                agg_sell += size
-        
-        total = agg_buy + agg_sell
-        delta = agg_buy - agg_sell
-        
-        # AR = aggressive_volume / total_volume
-        # 在预测市场，所有 trades 都是 taker 触发的，所以 AR 实际上是 |delta| / total 的概念
-        # 但按照原定义，AR 应该接近 1（因为所有 volume 都来自 taker）
-        ar = 1.0 if total > 0 else None
-        
-        return {
-            'aggressive_buy_volume': agg_buy,
-            'aggressive_sell_volume': agg_sell,
-            'total_volume': total,
-            'volume_delta': delta,
-            'ar': ar,
-            'trade_count': len(trades)
-        }
-    
-    def clear(self, asset_id: Optional[str] = None):
-        """清空数据"""
-        with self.lock:
-            if asset_id:
-                self.trades_by_asset[asset_id] = []
-            else:
-                self.trades_by_asset.clear()
-
-
 # ============================================================================
 # 测试代码
 # ============================================================================
 
 if __name__ == "__main__":
-    print("🧪 Testing Polymarket WebSocket\n")
+    print("🧪 Testing Polymarket WebSocket (v2 - Optimized)\n")
     print("=" * 60)
     
-    # 示例 asset ID（你需要替换成真实的 token ID）
-    # 可以从你的数据库或 API 获取
+    # 示例 asset ID
     test_asset_ids = [
-        # 添加一些活跃市场的 token IDs
         "21742633143463906290569050155826241533067272736897614950488156847949938836455",
     ]
     
-    # 创建聚合器
-    aggregator = TradeAggregator()
-    
     def on_trade(trade: Dict):
-        """收到 trade 时的回调"""
-        aggregator.add_trade(trade)
-        print(f"  💰 Trade: {trade['side']} {trade['size']:.2f} @ {trade['price']:.4f}")
+        print(f"  💰 {trade['side']} {trade['size']:.2f} @ {trade['price']:.4f}")
     
-    # 创建 WebSocket 客户端
     ws = PolymarketWebSocket(
         asset_ids=test_asset_ids,
         on_trade=on_trade,
@@ -427,28 +490,26 @@ if __name__ == "__main__":
     )
     
     print(f"\n📡 Subscribing to {len(test_asset_ids)} assets...")
-    print("Press Ctrl+C to stop\n")
+    print("Running for 30 seconds...\n")
     
     try:
-        # 运行 30 秒测试
         thread = ws.run_async()
         time.sleep(30)
         
-        # 打印统计
         print("\n" + "=" * 60)
-        print("📊 Statistics:")
+        print("📊 Final Statistics:")
         stats = ws.get_stats()
         for k, v in stats.items():
             print(f"  {k}: {v}")
         
-        # 打印聚合数据
+        print("\n📈 Per-Asset Stats:")
         for asset_id in test_asset_ids:
-            agg_stats = aggregator.get_aggressor_stats(asset_id)
-            print(f"\n📈 Asset {asset_id[:20]}...:")
-            print(f"  Aggressive Buy:  {agg_stats['aggressive_buy_volume']:.2f}")
-            print(f"  Aggressive Sell: {agg_stats['aggressive_sell_volume']:.2f}")
-            print(f"  Volume Delta:    {agg_stats['volume_delta']:.2f}")
-            print(f"  Trade Count:     {agg_stats['trade_count']}")
+            asset_stats = ws.aggregator.get_stats(asset_id)
+            print(f"  {asset_id[:20]}...:")
+            print(f"    Buy:   {asset_stats['aggressive_buy']:.2f}")
+            print(f"    Sell:  {asset_stats['aggressive_sell']:.2f}")
+            print(f"    Delta: {asset_stats['volume_delta']:.2f}")
+            print(f"    AR:    {asset_stats['directional_ar']}")
         
     except KeyboardInterrupt:
         print("\n👋 Stopped")

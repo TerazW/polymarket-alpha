@@ -1,12 +1,11 @@
 """
-WebSocket Trades 收集器
+WebSocket Trades 收集器 (v2 - 优化版)
 后台服务：收集实时 trades 数据（带 aggressor）并写入数据库
 
-用途：
-1. 实时收集 Polymarket WebSocket trades
-2. 聚合计算 AR / Volume Delta / CS
-3. 定期写入数据库
-4. 供 sync.py 使用
+优化点：
+1. 使用 last_flush_ts 而非 now-1h（避免丢数据）
+2. 使用增量计数器（内存效率）
+3. 按小时桶聚合写入
 
 运行方式：
     python jobs/ws_collector.py --markets 100
@@ -30,26 +29,27 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from sqlalchemy import text
-from utils.db import get_session, init_db
+from utils.db import get_session, init_db, DATABASE_URL
 from utils.polymarket_api import PolymarketAPI
-from utils.polymarket_ws import PolymarketWebSocket, TradeAggregator
+from utils.polymarket_ws import PolymarketWebSocket
 
 
 class WSTradeCollector:
     """
-    WebSocket Trades 收集器
+    WebSocket Trades 收集器 (v2 - 优化版)
     
     功能：
     1. 获取活跃市场列表
     2. 订阅 WebSocket
     3. 收集 trades（带 aggressor side）
-    4. 定期聚合并写入数据库
+    4. 使用 last_flush_ts 追踪，避免丢数据
+    5. 定期聚合并写入数据库
     """
     
     def __init__(
         self,
         max_markets: int = 100,
-        flush_interval: int = 60,  # 每 60 秒写入一次
+        flush_interval: int = 60,
         verbose: bool = True
     ):
         self.max_markets = max_markets
@@ -57,7 +57,6 @@ class WSTradeCollector:
         self.verbose = verbose
         
         self.api = PolymarketAPI()
-        self.aggregator = TradeAggregator()
         self.ws: Optional[PolymarketWebSocket] = None
         
         # {token_id: market_info}
@@ -66,9 +65,10 @@ class WSTradeCollector:
         # 统计
         self.stats = {
             'started_at': None,
-            'total_trades': 0,
             'total_flushes': 0,
-            'last_flush': None
+            'total_records_written': 0,
+            'last_flush': None,
+            'flush_errors': 0
         }
     
     def _log(self, message: str):
@@ -77,16 +77,11 @@ class WSTradeCollector:
             print(f"[{timestamp}] {message}")
     
     def load_markets(self) -> List[str]:
-        """
-        获取活跃市场的 token IDs
-        
-        Returns:
-            token_ids 列表
-        """
+        """获取活跃市场的 token IDs"""
         self._log(f"📡 Loading top {self.max_markets} markets...")
         
         markets = self.api.get_markets_by_categories(
-            min_volume_24h=1000,  # 只订阅高活跃度市场
+            min_volume_24h=1000,
             total_limit=self.max_markets
         )
         
@@ -100,87 +95,93 @@ class WSTradeCollector:
         self._log(f"✅ Loaded {len(token_ids)} markets")
         return token_ids
     
-    def on_trade(self, trade: Dict):
-        """收到 trade 时的回调"""
-        self.aggregator.add_trade(trade)
-        self.stats['total_trades'] += 1
-        
-        if self.verbose and self.stats['total_trades'] % 500 == 0:
-            self._log(f"📊 Total trades: {self.stats['total_trades']}")
-    
     def flush_to_db(self):
         """
         将聚合数据写入数据库
+        
+        优化：
+        - 使用 aggregator 的 last_flush_ts 追踪
+        - flush 完成后才清空并更新时间戳
+        - 避免数据丢失
         """
+        if not self.ws:
+            return
+        
         session = get_session()
+        aggregator = self.ws.get_aggregator()
         
         try:
             now = datetime.now()
-            today = now.date()
             
-            # 获取过去 1 小时的数据
-            since_ms = int((now - timedelta(hours=1)).timestamp() * 1000)
+            # 获取自上次 flush 以来的所有统计
+            all_stats = aggregator.get_stats_since_last_flush()
+            
+            if not all_stats:
+                self._log("📭 No new trades to flush")
+                return
             
             records_written = 0
+            current_hour = now.replace(minute=0, second=0, microsecond=0)
             
-            for token_id, market in self.markets.items():
-                # 获取聚合统计
-                stats = self.aggregator.get_aggressor_stats(
-                    asset_id=token_id,
-                    since_ms=since_ms
-                )
-                
+            for token_id, stats in all_stats.items():
                 if stats['trade_count'] == 0:
                     continue
                 
-                # 写入 ws_trades_hourly 表
-                session.execute(text("""
-                    INSERT INTO ws_trades_hourly 
-                    (token_id, hour, aggressive_buy, aggressive_sell, 
-                     volume_delta, total_volume, trade_count, created_at)
-                    VALUES 
-                    (:tid, :hour, :agg_buy, :agg_sell, 
-                     :delta, :total, :count, :now)
-                    ON CONFLICT (token_id, hour) DO UPDATE SET
-                        aggressive_buy = ws_trades_hourly.aggressive_buy + EXCLUDED.aggressive_buy,
-                        aggressive_sell = ws_trades_hourly.aggressive_sell + EXCLUDED.aggressive_sell,
-                        volume_delta = ws_trades_hourly.volume_delta + EXCLUDED.volume_delta,
-                        total_volume = ws_trades_hourly.total_volume + EXCLUDED.total_volume,
-                        trade_count = ws_trades_hourly.trade_count + EXCLUDED.trade_count
-                """), {
-                    'tid': token_id,
-                    'hour': now.replace(minute=0, second=0, microsecond=0),
-                    'agg_buy': stats['aggressive_buy_volume'],
-                    'agg_sell': stats['aggressive_sell_volume'],
-                    'delta': stats['volume_delta'],
-                    'total': stats['total_volume'],
-                    'count': stats['trade_count'],
-                    'now': now
-                })
-                
-                records_written += 1
+                try:
+                    # 写入 ws_trades_hourly 表
+                    # 使用 UPSERT：同一小时内累加
+                    session.execute(text("""
+                        INSERT INTO ws_trades_hourly 
+                        (token_id, hour, aggressive_buy, aggressive_sell, 
+                         volume_delta, total_volume, trade_count, created_at)
+                        VALUES 
+                        (:tid, :hour, :agg_buy, :agg_sell, 
+                         :delta, :total, :count, :now)
+                        ON CONFLICT (token_id, hour) DO UPDATE SET
+                            aggressive_buy = ws_trades_hourly.aggressive_buy + EXCLUDED.aggressive_buy,
+                            aggressive_sell = ws_trades_hourly.aggressive_sell + EXCLUDED.aggressive_sell,
+                            volume_delta = ws_trades_hourly.volume_delta + EXCLUDED.volume_delta,
+                            total_volume = ws_trades_hourly.total_volume + EXCLUDED.total_volume,
+                            trade_count = ws_trades_hourly.trade_count + EXCLUDED.trade_count
+                    """), {
+                        'tid': token_id,
+                        'hour': current_hour,
+                        'agg_buy': stats['aggressive_buy'],
+                        'agg_sell': stats['aggressive_sell'],
+                        'delta': stats['volume_delta'],
+                        'total': stats['total_volume'],
+                        'count': stats['trade_count'],
+                        'now': now
+                    })
+                    
+                    records_written += 1
+                    
+                except Exception as e:
+                    self._log(f"  ⚠️ Error writing {token_id[:20]}...: {e}")
+                    continue
             
             session.commit()
             
-            # 清空聚合器
-            self.aggregator.clear()
+            # 成功后才清空聚合器并更新 flush 时间
+            aggregator.clear_and_update_flush_time()
             
             self.stats['total_flushes'] += 1
+            self.stats['total_records_written'] += records_written
             self.stats['last_flush'] = now
             
-            self._log(f"💾 Flushed {records_written} records to database")
+            self._log(f"💾 Flushed {records_written} records | Total: {self.stats['total_records_written']}")
             
         except Exception as e:
             session.rollback()
+            self.stats['flush_errors'] += 1
             self._log(f"❌ Flush error: {e}")
         finally:
             session.close()
     
     def run(self):
-        """
-        启动收集器（阻塞）
-        """
-        self._log("🚀 Starting WebSocket Trade Collector")
+        """启动收集器（阻塞）"""
+        self._log("🚀 Starting WebSocket Trade Collector v2")
+        self._log(f"   Database: {DATABASE_URL[:50]}...")
         self.stats['started_at'] = datetime.now()
         
         # 1. 加载市场
@@ -196,8 +197,7 @@ class WSTradeCollector:
         # 3. 创建 WebSocket
         self.ws = PolymarketWebSocket(
             asset_ids=token_ids,
-            on_trade=self.on_trade,
-            verbose=False  # WS 本身不打印日志
+            verbose=False
         )
         
         # 4. 启动 WebSocket（后台）
@@ -205,6 +205,7 @@ class WSTradeCollector:
         
         self._log(f"📡 WebSocket connected, monitoring {len(token_ids)} markets")
         self._log(f"⏰ Flush interval: {self.flush_interval} seconds")
+        self._log(f"🔄 Using last_flush_ts tracking (no data loss)")
         
         # 5. 定期 flush 循环
         try:
@@ -212,9 +213,18 @@ class WSTradeCollector:
                 time.sleep(self.flush_interval)
                 self.flush_to_db()
                 
+                # 打印状态
+                if self.ws:
+                    ws_stats = self.ws.get_stats()
+                    self._log(f"📊 WS: {ws_stats['trades_received']} trades | {ws_stats['assets_count']} assets active")
+                
         except KeyboardInterrupt:
             self._log("👋 Stopping...")
         finally:
+            # 最后一次 flush
+            self._log("💾 Final flush...")
+            self.flush_to_db()
+            
             if self.ws:
                 self.ws.stop()
             self._print_stats()
@@ -223,27 +233,50 @@ class WSTradeCollector:
         """确保数据库表存在"""
         session = get_session()
         try:
-            # ws_trades_hourly 表 - 按小时聚合的 aggressor 数据
-            session.execute(text("""
-                CREATE TABLE IF NOT EXISTS ws_trades_hourly (
-                    id SERIAL PRIMARY KEY,
-                    token_id VARCHAR(100),
-                    hour TIMESTAMP,
-                    aggressive_buy DECIMAL(20,8) DEFAULT 0,
-                    aggressive_sell DECIMAL(20,8) DEFAULT 0,
-                    volume_delta DECIMAL(20,8) DEFAULT 0,
-                    total_volume DECIMAL(20,8) DEFAULT 0,
-                    trade_count INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(token_id, hour)
-                )
-            """))
+            # 检测数据库类型
+            is_sqlite = 'sqlite' in DATABASE_URL.lower()
             
-            # 创建索引
-            session.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_ws_trades_token_hour 
-                ON ws_trades_hourly(token_id, hour)
-            """))
+            if is_sqlite:
+                # SQLite 语法
+                session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS ws_trades_hourly (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        token_id VARCHAR(100),
+                        hour TIMESTAMP,
+                        aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                        aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                        volume_delta DECIMAL(20,8) DEFAULT 0,
+                        total_volume DECIMAL(20,8) DEFAULT 0,
+                        trade_count INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(token_id, hour)
+                    )
+                """))
+            else:
+                # PostgreSQL 语法
+                session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS ws_trades_hourly (
+                        id SERIAL PRIMARY KEY,
+                        token_id VARCHAR(100),
+                        hour TIMESTAMP,
+                        aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                        aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                        volume_delta DECIMAL(20,8) DEFAULT 0,
+                        total_volume DECIMAL(20,8) DEFAULT 0,
+                        trade_count INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(token_id, hour)
+                    )
+                """))
+            
+            # 创建索引（两者语法相同）
+            try:
+                session.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_ws_trades_token_hour 
+                    ON ws_trades_hourly(token_id, hour)
+                """))
+            except:
+                pass  # 索引可能已存在
             
             session.commit()
             self._log("✅ Database tables ready")
@@ -259,6 +292,7 @@ class WSTradeCollector:
         print("\n" + "=" * 60)
         print("📊 Collector Statistics")
         print("=" * 60)
+        
         for k, v in self.stats.items():
             print(f"  {k}: {v}")
         
@@ -267,7 +301,16 @@ class WSTradeCollector:
             print("\n📡 WebSocket Statistics:")
             for k, v in ws_stats.items():
                 print(f"  {k}: {v}")
+        
+        # 运行时长
+        if self.stats['started_at']:
+            duration = datetime.now() - self.stats['started_at']
+            print(f"\n⏱️ Total runtime: {duration}")
 
+
+# ============================================================================
+# 辅助函数：供 sync.py 使用
+# ============================================================================
 
 def get_aggressor_stats_from_db(
     session,
@@ -283,75 +326,63 @@ def get_aggressor_stats_from_db(
         hours: 过去多少小时
     
     Returns:
-        聚合统计
+        {
+            'aggressive_buy': float,
+            'aggressive_sell': float,
+            'total_volume': float,
+            'volume_delta': float,
+            'directional_ar': float,  # |delta| / total
+            'trade_count': int,
+            'has_data': bool
+        }
     """
     try:
+        # PostgreSQL 语法
         query = text("""
             SELECT 
-                SUM(aggressive_buy) as agg_buy,
-                SUM(aggressive_sell) as agg_sell,
-                SUM(volume_delta) as delta,
-                SUM(total_volume) as total,
-                SUM(trade_count) as count
+                COALESCE(SUM(aggressive_buy), 0) as agg_buy,
+                COALESCE(SUM(aggressive_sell), 0) as agg_sell,
+                COALESCE(SUM(total_volume), 0) as total,
+                COALESCE(SUM(trade_count), 0) as count
             FROM ws_trades_hourly
             WHERE token_id = :tid
-            AND hour >= NOW() - INTERVAL ':hours hours'
-        """.replace(':hours', str(hours)))
+            AND hour >= (NOW() - INTERVAL '24 hours')
+        """)
         
         result = session.execute(query, {'tid': token_id}).fetchone()
         
-        if result and result[4] and result[4] > 0:
+        if result and result[3] > 0:
+            agg_buy = float(result[0])
+            agg_sell = float(result[1])
+            total = float(result[2])
+            delta = agg_buy - agg_sell
+            
+            # Directional AR = |delta| / total
+            directional_ar = abs(delta) / total if total > 0 else None
+            
             return {
-                'aggressive_buy_volume': float(result[0] or 0),
-                'aggressive_sell_volume': float(result[1] or 0),
-                'volume_delta': float(result[2] or 0),
-                'total_volume': float(result[3] or 0),
-                'trade_count': int(result[4] or 0),
+                'aggressive_buy': agg_buy,
+                'aggressive_sell': agg_sell,
+                'total_volume': total,
+                'volume_delta': delta,
+                'directional_ar': directional_ar,
+                'trade_count': int(result[3]),
                 'has_data': True
             }
         
     except Exception as e:
-        print(f"⚠️ Error getting aggressor stats: {e}")
+        # 表可能不存在或其他错误
+        pass
     
     return {
-        'aggressive_buy_volume': 0,
-        'aggressive_sell_volume': 0,
-        'volume_delta': 0,
+        'aggressive_buy': 0,
+        'aggressive_sell': 0,
         'total_volume': 0,
+        'volume_delta': 0,
+        'directional_ar': None,
         'trade_count': 0,
         'has_data': False
     }
-
-
-def calculate_cs_from_aggressor(
-    aggressive_buy: float,
-    aggressive_sell: float,
-    total_volume: float
-) -> Optional[float]:
-    """
-    从 aggressor 数据计算 CS
-    
-    CS = (AR × |delta|) / total_volume
-    
-    在预测市场：
-    - AR ≈ 1（所有 trades 都是 taker 触发）
-    - delta = aggressive_buy - aggressive_sell
-    
-    简化公式：
-    CS = |delta| / total_volume
-    
-    意义：
-    - CS 高 → 单边压倒性主动成交，强信念
-    - CS 低 → 买卖双方主动成交均衡，弱信念
-    """
-    if total_volume <= 0:
-        return None
-    
-    delta = abs(aggressive_buy - aggressive_sell)
-    cs = delta / total_volume
-    
-    # CS 范围 [0, 1]
-    return min(cs, 1.0)
 
 
 # ============================================================================
@@ -359,7 +390,7 @@ def calculate_cs_from_aggressor(
 # ============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='WebSocket Trade Collector')
+    parser = argparse.ArgumentParser(description='WebSocket Trade Collector v2')
     parser.add_argument('--markets', type=int, default=100,
                        help='Number of markets to monitor (default: 100)')
     parser.add_argument('--interval', type=int, default=60,
@@ -370,10 +401,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     print("=" * 60)
-    print("🌐 Polymarket WebSocket Trade Collector")
+    print("🌐 Polymarket WebSocket Trade Collector v2")
     print("=" * 60)
     print(f"Markets: {args.markets}")
     print(f"Flush interval: {args.interval}s")
+    print(f"Optimizations: last_flush_ts tracking, incremental counters")
     print("=" * 60)
     
     # 初始化数据库

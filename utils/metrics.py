@@ -1,6 +1,11 @@
 """
-Market Sensemaking 指标计算 - 完整版 v2
+Market Sensemaking 指标计算 - 完整版 v3
 路线 B：WebSocket + Data API 版本（带 aggressor）
+
+优化：
+- AR 改成 Directional AR = |delta| / total_volume
+- AR 和 CS 语义统一（CS = AR，避免重复）
+- 更清晰的指标定义
 
 === 可用指标 ===
 
@@ -16,16 +21,15 @@ Market Sensemaking 指标计算 - 完整版 v2
    ✅ ACR - Actual Convergence Rate
    ✅ CER - Convergence Efficiency Ratio
 
-3. 信念强度类 - ✅ UNLOCKED (WebSocket 提供 aggressor 数据)
-   ✅ AR - Aggressive Ratio
-   ✅ Volume Delta
-   ✅ CS - Conviction Score
+3. 信念强度类 - ✅ UNLOCKED
+   ✅ AR (Directional) - 方向性强度 |delta| / total
+   ✅ Volume Delta - 主动买卖差额
+   ✅ CS - Conviction Score (= AR，统一定义)
 """
 
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
-import statistics
 
 
 # ============================================================================
@@ -50,7 +54,6 @@ def calculate_histogram(trades: List[Dict], tick_size: float = 0.01) -> Dict[flo
             price = float(trade.get('price', 0))
             size = float(trade.get('size', 0))
             
-            # 价格分箱
             bin_price = round(price / tick_size) * tick_size
             bin_price = round(bin_price, 4)
             
@@ -276,17 +279,17 @@ def calculate_ar(
     total_volume: float
 ) -> Optional[float]:
     """
-    ✅ UNLOCKED: 使用 WebSocket aggressor 数据
+    ✅ Directional AR (方向性 Aggressive Ratio)
     
-    AR (Aggressive Ratio) = aggressive_volume / total_volume
+    定义：AR = |delta| / total_volume
     
-    在预测市场中，所有 trades 都是由 taker 触发的：
-    - aggressive_buy = taker 主动买入的 volume
-    - aggressive_sell = taker 主动卖出的 volume
+    意义：
+    - 0 = 买卖完全对冲，无方向性
+    - 1 = 完全单边，强方向性
     
-    AR 的意义：
-    - 接近 1（默认）表示所有成交都来自主动方
-    - 在计算 CS 时更关注 delta 而非 AR
+    注意：这和传统的 AR（主动成交占比）不同！
+    传统 AR 在预测市场恒等于 1（所有成交都是 taker 触发）。
+    我们用 Directional AR 来表示"方向性强度"，更有信息量。
     
     Args:
         aggressive_buy: 主动买入量
@@ -299,10 +302,10 @@ def calculate_ar(
     if total_volume <= 0:
         return None
     
-    # 在预测市场，所有交易都是 taker 触发的
-    # 所以 AR 理论上 = 1
-    # 但我们可以用 |buy - sell| / total 来表示"方向性强度"
-    return 1.0
+    delta = abs(aggressive_buy - aggressive_sell)
+    ar = delta / total_volume
+    
+    return min(ar, 1.0)
 
 
 def calculate_volume_delta(
@@ -310,21 +313,21 @@ def calculate_volume_delta(
     aggressive_sell: float
 ) -> Optional[float]:
     """
-    ✅ UNLOCKED: 使用 WebSocket aggressor 数据
+    ✅ Volume Delta
     
-    Volume Delta = aggressive_buy - aggressive_sell
+    定义：Delta = aggressive_buy - aggressive_sell
     
     意义：
-    - Delta > 0 → 主动买入占优（看涨）
-    - Delta < 0 → 主动卖出占优（看跌）
-    - |Delta| 大 → 强单边力量
+    - Delta > 0 → 主动买入占优（看涨压力）
+    - Delta < 0 → 主动卖出占优（看跌压力）
+    - |Delta| 大 → 单边力量强
     
     Args:
         aggressive_buy: 主动买入量
         aggressive_sell: 主动卖出量
     
     Returns:
-        Volume Delta
+        Volume Delta（可正可负）
     """
     return aggressive_buy - aggressive_sell
 
@@ -335,18 +338,19 @@ def calculate_cs(
     total_volume: float
 ) -> Optional[float]:
     """
-    ✅ UNLOCKED: 使用 WebSocket aggressor 数据
+    ✅ CS (Conviction Score) = Directional AR
     
-    CS (Conviction Score) = |delta| / total_volume
+    定义：CS = |delta| / total_volume
     
-    简化说明：
-    - 原公式：CS = (AR × |delta|) / total_volume
-    - 在预测市场 AR ≈ 1，所以简化为 |delta| / total_volume
+    注意：CS 和 Directional AR 是同一个值！
+    保留 CS 是为了语义清晰：
+    - AR 强调"方向性"（order flow 视角）
+    - CS 强调"信念强度"（market microstructure 视角）
     
-    意义：
-    - CS 高 (> 0.5) → 强单边主动成交，强信念
-    - CS 中 (0.2-0.5) → 有方向偏好，中等信念
-    - CS 低 (< 0.2) → 买卖均衡，弱信念
+    解读：
+    - CS > 0.5 → 强单边信念（一边倒）
+    - CS 0.2-0.5 → 中等信念（有方向偏好）
+    - CS < 0.2 → 弱信念（买卖均衡，犹豫不决）
     
     Args:
         aggressive_buy: 主动买入量
@@ -356,14 +360,8 @@ def calculate_cs(
     Returns:
         CS 值（0-1）
     """
-    if total_volume <= 0:
-        return None
-    
-    delta = abs(aggressive_buy - aggressive_sell)
-    cs = delta / total_volume
-    
-    # 限制在 [0, 1]
-    return min(cs, 1.0)
+    # CS = AR（统一定义）
+    return calculate_ar(aggressive_buy, aggressive_sell, total_volume)
 
 
 def get_conviction_metrics(
@@ -380,15 +378,16 @@ def get_conviction_metrics(
         total_volume: 总成交量
     
     Returns:
-        包含 AR, Volume Delta, CS 的字典
+        包含 AR, Volume Delta, CS, direction 的字典
     """
     delta = calculate_volume_delta(aggressive_buy, aggressive_sell)
+    ar = calculate_ar(aggressive_buy, aggressive_sell, total_volume)
     
-    # 方向
+    # 方向判定
     if delta is not None:
-        if delta > 0:
+        if delta > total_volume * 0.1:  # delta > 10% of volume
             direction = "BULLISH"
-        elif delta < 0:
+        elif delta < -total_volume * 0.1:
             direction = "BEARISH"
         else:
             direction = "NEUTRAL"
@@ -396,9 +395,9 @@ def get_conviction_metrics(
         direction = "UNKNOWN"
     
     return {
-        'AR': calculate_ar(aggressive_buy, aggressive_sell, total_volume),
+        'AR': ar,
         'volume_delta': delta,
-        'CS': calculate_cs(aggressive_buy, aggressive_sell, total_volume),
+        'CS': ar,  # CS = AR
         'aggressive_buy': aggressive_buy,
         'aggressive_sell': aggressive_sell,
         'total_volume': total_volume,
@@ -407,7 +406,7 @@ def get_conviction_metrics(
 
 
 # ============================================================================
-# 4. 状态判定 - 更新版（使用 CS）
+# 4. 状态判定 - 使用 CS
 # ============================================================================
 
 def determine_status(
@@ -416,7 +415,7 @@ def determine_status(
     cs: Optional[float] = None
 ) -> str:
     """
-    判定市场状态 - 完整版（使用 CS）
+    判定市场状态
     
     分类逻辑：
     - 🟢 Informed: 低不确定性 + 健康收敛 + 强信念
@@ -433,7 +432,7 @@ def determine_status(
     if ui is None and cer is None:
         return "⚪ Unknown"
     
-    # 🔴 Noisy
+    # 🔴 Noisy（任一指标很差）
     if (ui is not None and ui >= 0.50):
         return "🔴 Noisy"
     if (cer is not None and cer < 0.4):
@@ -441,10 +440,10 @@ def determine_status(
     if (cs is not None and cs < 0.15):
         return "🔴 Noisy"
     
-    # 🟢 Informed
+    # 🟢 Informed（所有可用指标都好）
     ui_good = (ui is not None and ui < 0.30)
     cer_good = (cer is not None and cer >= 0.8)
-    cs_good = (cs is None or cs >= 0.35)  # CS 不可用时不阻挡
+    cs_good = (cs is None or cs >= 0.35)
     
     if ui_good and cer_good and cs_good:
         return "🟢 Informed"
@@ -503,7 +502,7 @@ def calculate_all_metrics(
     Returns:
         包含所有指标的字典
     """
-    # 计算 histogram（使用 Data API trades）
+    # 计算 histogram
     histogram = calculate_histogram(trades_all)
     
     # Profile 相关
@@ -525,7 +524,6 @@ def calculate_all_metrics(
         volume_delta = calculate_volume_delta(aggressive_buy, aggressive_sell)
         cs = calculate_cs(aggressive_buy, aggressive_sell, total_vol)
     else:
-        # 没有 WebSocket 数据
         ar = None
         volume_delta = None
         cs = None
@@ -549,9 +547,9 @@ def calculate_all_metrics(
         'CER': cer,
         
         # 信念强度
-        'AR': ar,
+        'AR': ar,  # Directional AR
         'volume_delta': volume_delta,
-        'CS': cs,
+        'CS': cs,  # = AR
         
         # 状态
         'status': status,
@@ -570,7 +568,7 @@ def calculate_all_metrics(
 # ============================================================================
 
 if __name__ == "__main__":
-    print("🧪 Testing Metrics (Complete Version v2 - With Aggressor)\n")
+    print("🧪 Testing Metrics v3 (Directional AR)\n")
     print("=" * 60)
     
     # 模拟交易数据
@@ -582,15 +580,16 @@ if __name__ == "__main__":
         {'price': 0.66, 'size': 150, 'timestamp': int(datetime.now().timestamp())},
         {'price': 0.67, 'size': 90, 'timestamp': int(datetime.now().timestamp())},
         {'price': 0.68, 'size': 60, 'timestamp': int(datetime.now().timestamp())},
-        {'price': 0.70, 'size': 20, 'timestamp': int(datetime.now().timestamp())},
-        {'price': 0.55, 'size': 15, 'timestamp': int(datetime.now().timestamp())},
     ]
     
     # 模拟 WebSocket aggressor 数据
-    agg_buy = 500.0   # 主动买入
-    agg_sell = 250.0  # 主动卖出
+    # 场景：强 bullish（买入远大于卖出）
+    agg_buy = 700.0
+    agg_sell = 200.0
     
-    # 计算所有指标
+    print(f"📊 Test scenario: Aggressive Buy={agg_buy}, Sell={agg_sell}")
+    print(f"   Expected: Strong bullish signal\n")
+    
     metrics = calculate_all_metrics(
         trades_all=test_trades,
         trades_24h=test_trades,
@@ -601,31 +600,43 @@ if __name__ == "__main__":
         aggressive_sell=agg_sell
     )
     
-    print("\n📊 1. Profile 相关指标")
+    print("📈 Results:")
     print("-" * 40)
-    print(f"  VAH:     {metrics['VAH']:.4f}" if metrics['VAH'] else "  VAH: N/A")
-    print(f"  VAL:     {metrics['VAL']:.4f}" if metrics['VAL'] else "  VAL: N/A")
-    print(f"  BW:      {metrics['band_width']:.4f}" if metrics['band_width'] else "  BW: N/A")
-    print(f"  POMD:    {metrics['POMD']:.4f}" if metrics['POMD'] else "  POMD: N/A")
+    print(f"  AR (Directional): {metrics['AR']:.4f}" if metrics['AR'] else "  AR: N/A")
+    print(f"  Volume Delta:     {metrics['volume_delta']:.2f}" if metrics['volume_delta'] is not None else "  Delta: N/A")
+    print(f"  CS:               {metrics['CS']:.4f}" if metrics['CS'] else "  CS: N/A")
+    print(f"  Status:           {metrics['status']}")
     
-    print("\n📈 2. 不确定性指标")
-    print("-" * 40)
-    print(f"  UI:      {metrics['UI']:.4f}" if metrics['UI'] else "  UI: N/A")
-    print(f"  ECR:     {metrics['ECR']:.6f}" if metrics['ECR'] else "  ECR: N/A")
-    print(f"  ACR:     {metrics['ACR']:.6f}" if metrics['ACR'] else "  ACR: N/A")
-    print(f"  CER:     {metrics['CER']:.4f}" if metrics['CER'] else "  CER: N/A")
-    
-    print("\n✅ 3. 信念强度指标 (UNLOCKED!)")
-    print("-" * 40)
-    print(f"  AR:           {metrics['AR']:.4f}" if metrics['AR'] else "  AR: N/A")
-    print(f"  Volume Delta: {metrics['volume_delta']:.2f}" if metrics['volume_delta'] is not None else "  Delta: N/A")
-    print(f"  CS:           {metrics['CS']:.4f}" if metrics['CS'] else "  CS: N/A")
-    print(f"  Has Data:     {metrics['has_aggressor_data']}")
-    
-    print("\n📍 4. 状态判定")
-    print("-" * 40)
-    print(f"  Status: {metrics['status']}")
-    print(f"  解释: {metrics['status_explanation']}")
+    # AR 应该 = |700-200| / 900 = 500/900 ≈ 0.556
+    expected_ar = abs(agg_buy - agg_sell) / (agg_buy + agg_sell)
+    print(f"\n✅ Expected AR: {expected_ar:.4f}")
+    print(f"   AR = |delta| / total = |{agg_buy}-{agg_sell}| / {agg_buy+agg_sell}")
     
     print("\n" + "=" * 60)
-    print("✅ Metrics test completed!")
+    
+    # 场景 2：弱信念（买卖均衡）
+    print("\n📊 Test scenario 2: Balanced (weak conviction)")
+    agg_buy2 = 500.0
+    agg_sell2 = 480.0
+    
+    metrics2 = calculate_all_metrics(
+        trades_all=test_trades,
+        trades_24h=test_trades,
+        current_price=0.65,
+        days_remaining=30,
+        band_width_7d_ago=0.12,
+        aggressive_buy=agg_buy2,
+        aggressive_sell=agg_sell2
+    )
+    
+    print(f"  AR: {metrics2['AR']:.4f}" if metrics2['AR'] else "  AR: N/A")
+    print(f"  Delta: {metrics2['volume_delta']:.2f}")
+    print(f"  CS: {metrics2['CS']:.4f}" if metrics2['CS'] else "  CS: N/A")
+    print(f"  Status: {metrics2['status']}")
+    
+    # AR 应该很低 = |500-480| / 980 = 20/980 ≈ 0.02
+    expected_ar2 = abs(agg_buy2 - agg_sell2) / (agg_buy2 + agg_sell2)
+    print(f"  Expected AR: {expected_ar2:.4f} (very low = weak conviction)")
+    
+    print("\n" + "=" * 60)
+    print("✅ Tests completed!")
