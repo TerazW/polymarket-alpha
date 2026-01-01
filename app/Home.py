@@ -1,6 +1,6 @@
 """
-Market Sensemaking - 主页面 v3.0
-新增：Market Profile Evolution（4 Phase 并排显示）
+Market Sensemaking - Main Page v3.1
+Features: Market Profile Evolution with 4 Phases side-by-side
 """
 
 import streamlit as st
@@ -10,14 +10,14 @@ from sqlalchemy import text
 import sys
 import os
 
-# 添加项目路径
+# Add project path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from utils.db import get_session
 
-# === 页面配置 ===
+# === Page Configuration ===
 st.set_page_config(
     page_title="Market Sensemaking",
     page_icon="📊",
@@ -25,28 +25,28 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# === 自定义 CSS ===
+# === Custom CSS ===
 st.markdown("""
 <style>
-/* 隐藏 Streamlit 默认元素 */
+/* Hide Streamlit default elements */
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 header {visibility: hidden;}
 [data-testid="stSidebar"] {display: none;}
 [data-testid="collapsedControl"] {display: none;}
 
-/* 减少顶部空白 */
+/* Reduce top padding */
 .block-container {
     padding-top: 1rem !important;
     padding-bottom: 1rem !important;
 }
 
-/* 全局背景 */
+/* Global background */
 .stApp {
     background: #f8f9fa;
 }
 
-/* 统计卡片 */
+/* Stat cards */
 .stat-card {
     background: white;
     border-radius: 12px;
@@ -55,7 +55,7 @@ header {visibility: hidden;}
     text-align: center;
 }
 
-/* 市场卡片 */
+/* Market cards */
 .market-card {
     background: white;
     border-radius: 12px;
@@ -122,7 +122,7 @@ header {visibility: hidden;}
     display: inline-block;
 }
 
-/* 图例样式 */
+/* Legend styles */
 .profile-legend {
     display: flex;
     gap: 20px;
@@ -145,10 +145,11 @@ header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-# === 数据库查询函数 ===
+
+# === Database Query Functions ===
 @st.cache_data(ttl=60)
 def get_all_markets():
-    """获取所有市场数据"""
+    """Get all market data with complete metrics"""
     session = get_session()
     try:
         query = text("""
@@ -168,7 +169,15 @@ def get_all_markets():
                 d.band_width,
                 d.va_high,
                 d.va_low,
-                d.pomd
+                d.poc,
+                d.pomd,
+                d.ar,
+                d.volume_delta,
+                d.total_volume,
+                d.trade_count,
+                d.ecr,
+                d.acr,
+                d.edge_zone
             FROM markets m
             LEFT JOIN daily_metrics d ON m.token_id = d.token_id 
                 AND d.date = (SELECT MAX(date) FROM daily_metrics WHERE token_id = m.token_id)
@@ -196,22 +205,31 @@ def get_all_markets():
                 'current_price': float(row[6] or 0),
                 'status': row[7] or 'Unknown',
                 'impulse_tag': row[8],
-                'ui': row[9],
-                'cer': row[10],
-                'cs': row[11],
-                'band_width': row[12],
-                'va_high': row[13],
-                'va_low': row[14],
-                'pomd': row[15]
+                'ui': float(row[9]) if row[9] is not None else None,
+                'cer': float(row[10]) if row[10] is not None else None,
+                'cs': float(row[11]) if row[11] is not None else None,
+                'band_width': float(row[12]) if row[12] is not None else None,
+                'va_high': float(row[13]) if row[13] is not None else None,
+                'va_low': float(row[14]) if row[14] is not None else None,
+                'poc': float(row[15]) if row[15] is not None else None,
+                'pomd': float(row[16]) if row[16] is not None else None,
+                'ar': float(row[17]) if row[17] is not None else None,
+                'volume_delta': float(row[18]) if row[18] is not None else None,
+                'total_volume': float(row[19]) if row[19] is not None else None,
+                'trade_count': int(row[20]) if row[20] is not None else None,
+                'ecr': float(row[21]) if row[21] is not None else None,
+                'acr': float(row[22]) if row[22] is not None else None,
+                'edge_zone': bool(row[23]) if row[23] is not None else False,
             })
         
         return markets
     finally:
         session.close()
 
+
 @st.cache_data(ttl=300)
 def get_categories():
-    """获取所有分类"""
+    """Get all categories"""
     session = get_session()
     try:
         query = text("""
@@ -231,7 +249,7 @@ def get_categories():
 @st.cache_data(ttl=120)
 def get_phase_histograms(token_id: str):
     """
-    从 phase_histogram 表获取所有 Phase 的 histogram 数据
+    Get histogram data for all Phases from phase_histogram table
     
     Returns:
         {phase_number: {price_bin: {'volume', 'buy', 'sell'}}}
@@ -262,8 +280,7 @@ def get_phase_histograms(token_id: str):
         
         return dict(histograms)
         
-    except Exception as e:
-        # 表可能不存在
+    except Exception:
         return {}
     finally:
         session.close()
@@ -271,7 +288,7 @@ def get_phase_histograms(token_id: str):
 
 @st.cache_data(ttl=120)
 def get_lifecycle_phases(token_id: str):
-    """获取 lifecycle phases 元数据"""
+    """Get lifecycle phases metadata"""
     session = get_session()
     try:
         result = session.execute(text("""
@@ -305,7 +322,7 @@ def get_lifecycle_phases(token_id: str):
 
 
 def get_status_stats(markets):
-    """计算状态统计"""
+    """Calculate status statistics"""
     stats = {'Informed': 0, 'Fragmented': 0, 'Noisy': 0}
     for m in markets:
         status = m.get('status', '')
@@ -319,8 +336,9 @@ def get_status_stats(markets):
                 stats['Noisy'] += 1
     return stats
 
+
 def clean_status(status):
-    """清理状态值，提取纯文本"""
+    """Clean status value, extract pure text"""
     if not status:
         return 'Unknown'
     status_lower = status.lower()
@@ -332,8 +350,9 @@ def clean_status(status):
         return 'Noisy'
     return 'Unknown'
 
+
 def format_volume(vol):
-    """格式化交易量"""
+    """Format volume"""
     if vol >= 1_000_000:
         return f"${vol/1_000_000:.1f}M"
     elif vol >= 1_000:
@@ -341,7 +360,15 @@ def format_volume(vol):
     else:
         return f"${vol:.0f}"
 
-# === 颜色配置 ===
+
+def format_metric(value, decimals=2):
+    """Format metric value for display"""
+    if value is None:
+        return "—"
+    return f"{value:.{decimals}f}"
+
+
+# === Color Configuration ===
 STATUS_COLORS = {
     'Informed': ('#d3f9d8', '#2b8a3e'),
     'Fragmented': ('#fff3bf', '#e67700'),
@@ -355,436 +382,11 @@ IMPULSE_COLORS = {
     '💨 EXHAUSTION': ('#ffe3e3', '#c92a2a')
 }
 
-# === 检查是否是详情页模式 ===
-query_params = st.query_params
-if 'market' in query_params:
-    # ==================== 详情页模式 ====================
-    token_id = query_params['market']
-    
-    markets = get_all_markets()
-    market = next((m for m in markets if m['token_id'] == token_id), None)
-    
-    if market:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-        
-        # 返回按钮
-        if st.button("← Back to Markets"):
-            st.query_params.clear()
-            st.rerun()
-        
-        # === 顶部：市场标题 + 状态 ===
-        status = clean_status(market.get('status'))
-        bg, color = STATUS_COLORS.get(status, STATUS_COLORS['Unknown'])
-        
-        st.markdown(f"### {market['title']}")
-        
-        # 状态行
-        status_html = f'''
-<div style="display:flex;align-items:center;gap:12px;margin:8px 0 20px 0;">
-<span style="background:{bg};color:{color};padding:6px 16px;border-radius:20px;font-weight:600;font-size:14px;">{status}</span>
-'''
-        impulse = market.get('impulse_tag')
-        if impulse:
-            imp_bg, imp_color = IMPULSE_COLORS.get(impulse, ('#e9ecef', '#868e96'))
-            status_html += f'<span style="background:{imp_bg};color:{imp_color};padding:6px 16px;border-radius:20px;font-weight:600;font-size:14px;">{impulse}</span>'
-        
-        status_html += f'''
-<span style="font-size:24px;font-weight:700;margin-left:auto;">{market["current_price"]*100:.0f}%</span>
-<span style="color:#868e96;font-size:14px;">{market["category"]} · {format_volume(market["volume_24h"])}</span>
-</div>'''
-        st.markdown(status_html, unsafe_allow_html=True)
-        
-        # ==================== Market Profile Evolution ====================
-        st.markdown("#### Market Profile Evolution")
-        
-        # 图例（包含所有标识）
-        st.markdown("""
-<div style="display:flex;gap:20px;justify-content:center;align-items:center;margin:12px 0;font-size:13px;flex-wrap:wrap;">
-    <div style="display:flex;align-items:center;gap:6px;">
-        <div style="width:14px;height:14px;background:rgba(34,197,94,0.8);border-radius:2px;"></div>
-        <span>Buy</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:6px;">
-        <div style="width:14px;height:14px;background:rgba(239,68,68,0.8);border-radius:2px;"></div>
-        <span>Sell</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:6px;">
-        <div style="width:14px;height:14px;background:rgba(59,130,246,1.0);border-radius:2px;"></div>
-        <span>POC</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:6px;">
-        <span style="color:#8b5cf6;font-size:16px;">★</span>
-        <span>POMD</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:6px;">
-        <div style="width:14px;height:2px;border-top:2px dashed #22c55e;"></div>
-        <span>Current</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:6px;">
-        <div style="width:14px;height:2px;border-top:2px dotted rgba(59,130,246,0.6);"></div>
-        <span>VAH/VAL</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:6px;">
-        <div style="width:14px;height:14px;background:rgba(239,68,68,0.4);border-radius:2px;"></div>
-        <span>Tail</span>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-        
-        # 获取 Phase Histogram 数据
-        phase_histograms = get_phase_histograms(token_id)
-        lifecycle_phases = get_lifecycle_phases(token_id)
-        
-        current_price = market.get('current_price')
-        
-        if phase_histograms:
-            # 构建 phase_metadata（从 lifecycle_phases 读取 POC/POMD/VAH/VAL）
-            phase_metadata = {}
-            current_phase = 4  # 默认最后一个
-            now = datetime.now()
-            
-            for lp in lifecycle_phases:
-                phase_num = lp.get('phase_number')
-                if phase_num:
-                    phase_metadata[phase_num] = {
-                        'poc': lp.get('poc'),
-                        'pomd': lp.get('pomd'),
-                        'vah': lp.get('va_high'),
-                        'val': lp.get('va_low'),
-                        'status': lp.get('status'),
-                        'is_valid': lp.get('is_valid')
-                    }
-                    
-                    # 判断当前 phase
-                    if lp.get('phase_start') and lp.get('phase_end'):
-                        try:
-                            start = lp['phase_start']
-                            end = lp['phase_end']
-                            if isinstance(start, str):
-                                start = datetime.fromisoformat(start.replace('Z', '+00:00')).replace(tzinfo=None)
-                            if isinstance(end, str):
-                                end = datetime.fromisoformat(end.replace('Z', '+00:00')).replace(tzinfo=None)
-                            if start <= now < end:
-                                current_phase = phase_num
-                        except:
-                            pass
-            
-            # 尝试导入可视化组件
-            try:
-                from app.components.market_profile_evolution import create_market_profile_evolution
-                
-                fig = create_market_profile_evolution(
-                    phase_histograms=phase_histograms,
-                    phase_metadata=phase_metadata,
-                    current_price=current_price,
-                    current_phase=current_phase,
-                    title=""
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-            except ImportError:
-                # Fallback: 手动绘制
-                st.warning("Market Profile Evolution component not available. Using fallback view.")
-                _render_fallback_profile_evolution(phase_histograms, current_price)
-        else:
-            # 没有 phase_histogram 数据，显示提示
-            st.info("📊 No phase histogram data available. Run `lifecycle_sync.py` with `--save-histogram` to collect data.")
-            
-            # 显示旧的 Consensus Band Evolution 作为备选
-            if lifecycle_phases:
-                _render_legacy_band_evolution(lifecycle_phases, current_price, market)
-        
-        st.markdown("")
-        
-        # === Key Metrics ===
-        st.markdown("#### Key Metrics")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        ui = market.get('ui')
-        cer = market.get('cer')
-        cs = market.get('cs')
-        
-        # UI 指标解读
-        if ui is not None:
-            if ui < 0.30:
-                ui_label, ui_icon, ui_desc = "Low Uncertainty", "✅", "低不确定性"
-            elif ui < 0.50:
-                ui_label, ui_icon, ui_desc = "Moderate", "➖", "中等不确定性"
-            else:
-                ui_label, ui_icon, ui_desc = "High Uncertainty", "⚠️", "高不确定性"
-        else:
-            ui_label, ui_icon, ui_desc = "—", "—", ""
-        
-        # CER 指标解读
-        if cer is not None:
-            if cer >= 0.80:
-                cer_label, cer_icon, cer_desc = "Fast Convergence", "✅", "快速收敛"
-            elif cer >= 0.40:
-                cer_label, cer_icon, cer_desc = "Normal", "➖", "正常收敛"
-            else:
-                cer_label, cer_icon, cer_desc = "Slow/Diverging", "⚠️", "缓慢/发散"
-        else:
-            cer_label, cer_icon, cer_desc = "—", "—", ""
-        
-        # CS 指标解读
-        if cs is not None:
-            if cs >= 0.50:
-                cs_label, cs_icon, cs_desc = "Strong Conviction", "✅", "强信念"
-            elif cs >= 0.25:
-                cs_label, cs_icon, cs_desc = "Moderate", "➖", "中等信念"
-            else:
-                cs_label, cs_icon, cs_desc = "Weak", "⚠️", "弱信念"
-        else:
-            cs_label, cs_icon, cs_desc = "—", "—", ""
-        
-        with col1:
-            with st.container(border=True):
-                st.markdown(f'''
-<div style="padding:8px;">
-<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-<span style="color:#3b82f6;font-weight:700;font-size:16px;">UI</span>
-<span style="color:#495057;">Uncertainty Index:</span>
-<span style="font-weight:700;font-size:18px;">{f"{ui:.2f}" if ui is not None else "—"}</span>
-</div>
-<div style="display:flex;align-items:center;gap:6px;">
-<span>{ui_icon}</span>
-<span style="color:#6b7280;font-size:13px;">{ui_label}</span>
-</div>
-</div>
-''', unsafe_allow_html=True)
-        
-        with col2:
-            with st.container(border=True):
-                st.markdown(f'''
-<div style="padding:8px;">
-<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-<span style="color:#8b5cf6;font-weight:700;font-size:16px;">CER</span>
-<span style="color:#495057;">Convergence Rate:</span>
-<span style="font-weight:700;font-size:18px;">{f"{cer:.2f}" if cer is not None else "—"}</span>
-</div>
-<div style="display:flex;align-items:center;gap:6px;">
-<span>{cer_icon}</span>
-<span style="color:#6b7280;font-size:13px;">{cer_label}</span>
-</div>
-</div>
-''', unsafe_allow_html=True)
-        
-        with col3:
-            with st.container(border=True):
-                st.markdown(f'''
-<div style="padding:8px;">
-<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-<span style="color:#f59e0b;font-weight:700;font-size:16px;">CS</span>
-<span style="color:#495057;">Conviction Score:</span>
-<span style="font-weight:700;font-size:18px;">{f"{cs:.2f}" if cs is not None else "—"}</span>
-</div>
-<div style="display:flex;align-items:center;gap:6px;">
-<span>{cs_icon}</span>
-<span style="color:#6b7280;font-size:13px;">{cs_label}</span>
-</div>
-</div>
-''', unsafe_allow_html=True)
-        
-        # === 附加信息 ===
-        st.markdown("")
-        with st.expander("📊 Additional Details", expanded=False):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**Band Information**")
-                va_high = market.get('va_high')
-                va_low = market.get('va_low')
-                bw = market.get('band_width')
-                pomd = market.get('pomd')
-                
-                st.write(f"• VAH (Value Area High): {f'{va_high*100:.1f}%' if va_high else '—'}")
-                st.write(f"• VAL (Value Area Low): {f'{va_low*100:.1f}%' if va_low else '—'}")
-                st.write(f"• Band Width: {f'{bw*100:.1f}%' if bw else '—'}")
-                st.write(f"• POMD: {f'{pomd*100:.1f}%' if pomd else '—'}")
-            
-            with col2:
-                st.markdown("**Market Info**")
-                st.write(f"• Current Price: {market['current_price']*100:.1f}%")
-                st.write(f"• 24h Volume: {format_volume(market['volume_24h'])}")
-                st.write(f"• Category: {market['category']}")
-                st.write(f"• Token ID: `{token_id[:20]}...`")
-        
-    else:
-        st.error("Market not found")
-        if st.button("← Back to Markets"):
-            st.query_params.clear()
-            st.rerun()
 
-else:
-    # ==================== 主页模式 ====================
-    
-    # 顶部 Logo
-    st.markdown("### 📊 Market Sensemaking")
-    
-    # 加载数据
-    markets = get_all_markets()
-    categories = get_categories()
-    stats = get_status_stats(markets)
-    
-    # === 统计卡片 ===
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        with st.container(border=True):
-            st.markdown(f"<div style='text-align:center;'><span style='font-size:28px;font-weight:700;color:#2b8a3e;'>{stats['Informed']}</span><br><span style='font-size:13px;color:#868e96;'>🟢 Informed</span></div>", unsafe_allow_html=True)
-    
-    with col2:
-        with st.container(border=True):
-            st.markdown(f"<div style='text-align:center;'><span style='font-size:28px;font-weight:700;color:#e67700;'>{stats['Fragmented']}</span><br><span style='font-size:13px;color:#868e96;'>🟡 Fragmented</span></div>", unsafe_allow_html=True)
-    
-    with col3:
-        with st.container(border=True):
-            st.markdown(f"<div style='text-align:center;'><span style='font-size:28px;font-weight:700;color:#c92a2a;'>{stats['Noisy']}</span><br><span style='font-size:13px;color:#868e96;'>🔴 Noisy</span></div>", unsafe_allow_html=True)
-    
-    with col4:
-        with st.container(border=True):
-            st.markdown(f"<div style='text-align:center;'><span style='font-size:28px;font-weight:700;color:#1a1a2e;'>{len(markets)}</span><br><span style='font-size:13px;color:#868e96;'>Total Markets</span></div>", unsafe_allow_html=True)
-    
-    st.markdown("")
-    
-    # === 分类标签 ===
-    if 'selected_category' not in st.session_state:
-        st.session_state.selected_category = 'All'
-    if 'show_filters' not in st.session_state:
-        st.session_state.show_filters = False
-    
-    category_names = ['All'] + [c['name'] for c in categories[:10]]
-    
-    # 分类按钮行
-    cat_cols = st.columns(len(category_names) + 1)
-    
-    for i, cat in enumerate(category_names):
-        with cat_cols[i]:
-            is_active = st.session_state.selected_category == cat
-            if st.button(cat, key=f"cat_{cat}", type="primary" if is_active else "secondary", use_container_width=True):
-                st.session_state.selected_category = cat
-                st.session_state.current_page = 1
-                st.rerun()
-    
-    with cat_cols[-1]:
-        if st.button("⚙️", key="filter_toggle", help="Filters"):
-            st.session_state.show_filters = not st.session_state.show_filters
-            st.rerun()
-    
-    # === 筛选面板 ===
-    if st.session_state.show_filters:
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            search_query = st.text_input("🔍 Search", placeholder="Search markets...", key="search", label_visibility="collapsed")
-        with col2:
-            sort_option = st.selectbox("Sort by", ["Volume (High to Low)", "Volume (Low to High)", "Price (High to Low)", "Price (Low to High)"], key="sort", label_visibility="collapsed")
-        with col3:
-            status_filter = st.selectbox("Status", ["All", "Informed", "Fragmented", "Noisy"], key="status_filter", label_visibility="collapsed")
-    else:
-        search_query = ""
-        sort_option = "Volume (High to Low)"
-        status_filter = "All"
-    
-    # === 筛选逻辑 ===
-    filtered_markets = markets.copy()
-    
-    if st.session_state.selected_category != 'All':
-        filtered_markets = [m for m in filtered_markets if m['category'] == st.session_state.selected_category]
-    
-    if search_query:
-        search_lower = search_query.lower()
-        filtered_markets = [m for m in filtered_markets if search_lower in m['title'].lower()]
-    
-    if status_filter != "All":
-        filtered_markets = [m for m in filtered_markets if clean_status(m.get('status')) == status_filter]
-    
-    # 排序
-    if sort_option == "Volume (High to Low)":
-        filtered_markets.sort(key=lambda x: x['volume_24h'], reverse=True)
-    elif sort_option == "Volume (Low to High)":
-        filtered_markets.sort(key=lambda x: x['volume_24h'])
-    elif sort_option == "Price (High to Low)":
-        filtered_markets.sort(key=lambda x: x['current_price'], reverse=True)
-    elif sort_option == "Price (Low to High)":
-        filtered_markets.sort(key=lambda x: x['current_price'])
-    
-    # 显示数量
-    st.markdown(f"**Showing {len(filtered_markets)} markets**")
-    
-    # === 分页 ===
-    CARDS_PER_PAGE = 20
-    total_pages = max(1, (len(filtered_markets) + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE)
-    
-    if 'current_page' not in st.session_state:
-        st.session_state.current_page = 1
-    
-    start_idx = (st.session_state.current_page - 1) * CARDS_PER_PAGE
-    end_idx = start_idx + CARDS_PER_PAGE
-    page_markets = filtered_markets[start_idx:end_idx]
-    
-    # === 市场卡片 ===
-    for row_start in range(0, len(page_markets), 4):
-        row_markets = page_markets[row_start:row_start + 4]
-        cols = st.columns(4)
-        
-        for i, market in enumerate(row_markets):
-            with cols[i]:
-                status = clean_status(market.get('status'))
-                bg, color = STATUS_COLORS.get(status, STATUS_COLORS['Unknown'])
-                
-                impulse = market.get('impulse_tag')
-                title_short = market['title'][:50] + '...' if len(market['title']) > 50 else market['title']
-                
-                with st.container(border=True):
-                    st.markdown(f"<div style='height:48px;overflow:hidden;font-weight:600;font-size:14px;line-height:1.4;'>{title_short}</div>", unsafe_allow_html=True)
-                    
-                    tags = f'<span style="background:{bg};color:{color};padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;display:inline-block;margin-right:4px;">{status}</span>'
-                    if impulse:
-                        imp_bg, imp_color = IMPULSE_COLORS.get(impulse, ('#e9ecef', '#868e96'))
-                        tags += f'<span style="background:{imp_bg};color:{imp_color};padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;display:inline-block;">{impulse}</span>'
-                    st.markdown(f"<div style='margin:8px 0;'>{tags}</div>", unsafe_allow_html=True)
-                    
-                    st.markdown(f"""
-<div style='display:flex;justify-content:space-between;align-items:center;margin:8px 0;'>
-<span style='font-size:22px;font-weight:700;'>{market['current_price']*100:.0f}%</span>
-<span style='color:#868e96;font-size:13px;'>{format_volume(market['volume_24h'])}</span>
-</div>
-""", unsafe_allow_html=True)
-                    
-                    st.markdown(f"<span style='background:#f1f3f5;color:#868e96;padding:3px 8px;border-radius:6px;font-size:11px;'>{market['category']}</span>", unsafe_allow_html=True)
-                    
-                    if st.button("View →", key=f"view_{market['token_id']}", use_container_width=True):
-                        st.query_params['market'] = market['token_id']
-                        st.rerun()
-    
-    # === 分页控制 ===
-    if total_pages > 1:
-        st.markdown("")
-        col1, col2, col3 = st.columns([1, 2, 1])
-        
-        with col1:
-            if st.session_state.current_page > 1:
-                if st.button("← Previous"):
-                    st.session_state.current_page -= 1
-                    st.rerun()
-        
-        with col2:
-            st.markdown(f"<div style='text-align:center;color:#868e96;'>Page {st.session_state.current_page} of {total_pages}</div>", unsafe_allow_html=True)
-        
-        with col3:
-            if st.session_state.current_page < total_pages:
-                if st.button("Next →"):
-                    st.session_state.current_page += 1
-                    st.rerun()
-
-
-# ==================== Helper Functions ====================
+# ==================== Helper Functions (defined before use) ====================
 
 def _render_fallback_profile_evolution(phase_histograms, current_price):
-    """Fallback: 使用基础 Plotly 绘制 4 个 Phase"""
+    """Fallback: Use basic Plotly to render 4 Phases"""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     
@@ -874,7 +476,7 @@ def _render_fallback_profile_evolution(phase_histograms, current_price):
 
 
 def _render_legacy_band_evolution(lifecycle_phases, current_price, market):
-    """Legacy: 旧的 Consensus Band Evolution 椭圆图"""
+    """Legacy: Old Consensus Band Evolution ellipse chart"""
     import plotly.graph_objects as go
     
     fig = go.Figure()
@@ -957,3 +559,441 @@ def _render_legacy_band_evolution(lifecycle_phases, current_price, market):
     )
     
     st.plotly_chart(fig, use_container_width=True)
+
+
+# === Check if detail page mode ===
+query_params = st.query_params
+if 'market' in query_params:
+    # ==================== Detail Page Mode ====================
+    token_id = query_params['market']
+    
+    markets = get_all_markets()
+    market = next((m for m in markets if m['token_id'] == token_id), None)
+    
+    if market:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        
+        # Back button
+        if st.button("← Back to Markets"):
+            st.query_params.clear()
+            st.rerun()
+        
+        # === Header: Market Title + Status ===
+        status = clean_status(market.get('status'))
+        bg, color = STATUS_COLORS.get(status, STATUS_COLORS['Unknown'])
+        
+        st.markdown(f"### {market['title']}")
+        
+        # Status row
+        status_html = f'''
+<div style="display:flex;align-items:center;gap:12px;margin:8px 0 20px 0;">
+<span style="background:{bg};color:{color};padding:6px 16px;border-radius:20px;font-weight:600;font-size:14px;">{status}</span>
+'''
+        impulse = market.get('impulse_tag')
+        if impulse:
+            imp_bg, imp_color = IMPULSE_COLORS.get(impulse, ('#e9ecef', '#868e96'))
+            status_html += f'<span style="background:{imp_bg};color:{imp_color};padding:6px 16px;border-radius:20px;font-weight:600;font-size:14px;">{impulse}</span>'
+        
+        status_html += f'''
+<span style="font-size:24px;font-weight:700;margin-left:auto;">{market["current_price"]*100:.0f}%</span>
+<span style="color:#868e96;font-size:14px;">{market["category"]} · {format_volume(market["volume_24h"])}</span>
+</div>'''
+        st.markdown(status_html, unsafe_allow_html=True)
+        
+        # ==================== Market Profile Evolution ====================
+        st.markdown("#### Market Profile Evolution")
+        
+        # Legend
+        st.markdown("""
+<div style="display:flex;gap:20px;justify-content:center;align-items:center;margin:12px 0;font-size:13px;flex-wrap:wrap;">
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:14px;background:rgba(34,197,94,0.8);border-radius:2px;"></div>
+        <span>Buy</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:14px;background:rgba(239,68,68,0.8);border-radius:2px;"></div>
+        <span>Sell</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:14px;background:rgba(59,130,246,1.0);border-radius:2px;"></div>
+        <span>POC</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <span style="color:#8b5cf6;font-size:16px;">★</span>
+        <span>POMD</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:2px;border-top:2px dashed #22c55e;"></div>
+        <span>Current</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:2px;border-top:2px dotted rgba(59,130,246,0.6);"></div>
+        <span>VAH/VAL</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+        
+        # Get Phase Histogram data
+        phase_histograms = get_phase_histograms(token_id)
+        lifecycle_phases = get_lifecycle_phases(token_id)
+        
+        current_price = market.get('current_price')
+        
+        if phase_histograms:
+            # Build phase_metadata from lifecycle_phases
+            phase_metadata = {}
+            current_phase = 4  # Default to last
+            now = datetime.now()
+            
+            for lp in lifecycle_phases:
+                phase_num = lp.get('phase_number')
+                if phase_num:
+                    phase_metadata[phase_num] = {
+                        'poc': lp.get('poc'),
+                        'pomd': lp.get('pomd'),
+                        'vah': lp.get('va_high'),
+                        'val': lp.get('va_low'),
+                        'status': lp.get('status'),
+                        'is_valid': lp.get('is_valid')
+                    }
+                    
+                    # Determine current phase
+                    if lp.get('phase_start') and lp.get('phase_end'):
+                        try:
+                            start = lp['phase_start']
+                            end = lp['phase_end']
+                            if isinstance(start, str):
+                                start = datetime.fromisoformat(start.replace('Z', '+00:00')).replace(tzinfo=None)
+                            if isinstance(end, str):
+                                end = datetime.fromisoformat(end.replace('Z', '+00:00')).replace(tzinfo=None)
+                            if start <= now < end:
+                                current_phase = phase_num
+                        except:
+                            pass
+            
+            # Try to import visualization component
+            try:
+                from app.components.market_profile_evolution import create_market_profile_evolution
+                
+                fig = create_market_profile_evolution(
+                    phase_histograms=phase_histograms,
+                    phase_metadata=phase_metadata,
+                    current_price=current_price,
+                    current_phase=current_phase,
+                    title=""
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+            except ImportError:
+                # Fallback: manual rendering
+                st.warning("Market Profile Evolution component not available. Using fallback view.")
+                _render_fallback_profile_evolution(phase_histograms, current_price)
+        else:
+            # No phase_histogram data
+            st.info("📊 No phase histogram data available. Run `lifecycle_sync.py` with `--save-histogram` to collect data.")
+            
+            # Show legacy Consensus Band Evolution as fallback
+            if lifecycle_phases:
+                _render_legacy_band_evolution(lifecycle_phases, current_price, market)
+        
+        st.markdown("")
+        
+        # === Key Metrics ===
+        st.markdown("#### Key Metrics")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        ui = market.get('ui')
+        cer = market.get('cer')
+        cs = market.get('cs')
+        
+        # UI interpretation
+        if ui is not None:
+            if ui < 0.30:
+                ui_label = "Low"
+            elif ui < 0.50:
+                ui_label = "Moderate"
+            else:
+                ui_label = "High"
+        else:
+            ui_label = "—"
+        
+        # CER interpretation
+        if cer is not None:
+            if cer >= 0.80:
+                cer_label = "Fast"
+            elif cer >= 0.40:
+                cer_label = "Normal"
+            else:
+                cer_label = "Slow"
+        else:
+            cer_label = "—"
+        
+        # CS interpretation
+        if cs is not None:
+            if cs >= 0.50:
+                cs_label = "Strong"
+            elif cs >= 0.25:
+                cs_label = "Moderate"
+            else:
+                cs_label = "Weak"
+        else:
+            cs_label = "—"
+        
+        with col1:
+            with st.container(border=True):
+                st.markdown(f"""
+**UI** (Uncertainty Index)  
+**{format_metric(ui)}** · {ui_label}
+""")
+        
+        with col2:
+            with st.container(border=True):
+                st.markdown(f"""
+**CER** (Convergence Efficiency)  
+**{format_metric(cer)}** · {cer_label}
+""")
+        
+        with col3:
+            with st.container(border=True):
+                st.markdown(f"""
+**CS** (Conviction Score)  
+**{format_metric(cs)}** · {cs_label}
+""")
+        
+        # === Profile Details ===
+        st.markdown("#### Profile Details")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            with st.container(border=True):
+                st.markdown(f"""
+**Band Width**  
+{format_metric(market.get('band_width'), 3)}
+""")
+        
+        with col2:
+            with st.container(border=True):
+                poc = market.get('poc')
+                poc_display = f"{poc*100:.1f}%" if poc is not None else "—"
+                st.markdown(f"""
+**POC**  
+{poc_display}
+""")
+        
+        with col3:
+            with st.container(border=True):
+                pomd = market.get('pomd')
+                pomd_display = f"{pomd*100:.1f}%" if pomd is not None else "—"
+                st.markdown(f"""
+**POMD**  
+{pomd_display}
+""")
+        
+        with col4:
+            with st.container(border=True):
+                vah = market.get('va_high')
+                val = market.get('va_low')
+                va_display = f"{val*100:.0f}% - {vah*100:.0f}%" if vah and val else "—"
+                st.markdown(f"""
+**Value Area**  
+{va_display}
+""")
+        
+        # === Conviction Details (if available) ===
+        if market.get('ar') is not None or market.get('volume_delta') is not None:
+            st.markdown("#### Conviction Details")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                with st.container(border=True):
+                    st.markdown(f"""
+**AR** (Activity Ratio)  
+{format_metric(market.get('ar'), 3)}
+""")
+            
+            with col2:
+                with st.container(border=True):
+                    vd = market.get('volume_delta')
+                    vd_display = f"${vd:,.0f}" if vd is not None else "—"
+                    st.markdown(f"""
+**Volume Delta**  
+{vd_display}
+""")
+            
+            with col3:
+                with st.container(border=True):
+                    tc = market.get('trade_count')
+                    tc_display = f"{tc:,}" if tc is not None else "—"
+                    st.markdown(f"""
+**Trade Count**  
+{tc_display}
+""")
+    
+    else:
+        st.error("Market not found")
+        if st.button("← Back to Markets"):
+            st.query_params.clear()
+            st.rerun()
+
+else:
+    # ==================== Market List Mode ====================
+    
+    # Load data
+    markets = get_all_markets()
+    categories = get_categories()
+    status_stats = get_status_stats(markets)
+    
+    # === Header ===
+    st.markdown("## 📊 Market Sensemaking")
+    
+    # === Statistics Cards ===
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.markdown(f"""
+<div class="stat-card">
+<div style="font-size:28px;font-weight:700;color:#1a1a2e;">{len(markets)}</div>
+<div style="color:#868e96;font-size:13px;">Active Markets</div>
+</div>
+""", unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+<div class="stat-card">
+<div style="font-size:28px;font-weight:700;color:#2b8a3e;">{status_stats['Informed']}</div>
+<div style="color:#868e96;font-size:13px;">Informed</div>
+</div>
+""", unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+<div class="stat-card">
+<div style="font-size:28px;font-weight:700;color:#e67700;">{status_stats['Fragmented']}</div>
+<div style="color:#868e96;font-size:13px;">Fragmented</div>
+</div>
+""", unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown(f"""
+<div class="stat-card">
+<div style="font-size:28px;font-weight:700;color:#c92a2a;">{status_stats['Noisy']}</div>
+<div style="color:#868e96;font-size:13px;">Noisy</div>
+</div>
+""", unsafe_allow_html=True)
+    
+    with col5:
+        total_volume = sum(m['volume_24h'] for m in markets)
+        st.markdown(f"""
+<div class="stat-card">
+<div style="font-size:28px;font-weight:700;color:#1a1a2e;">{format_volume(total_volume)}</div>
+<div style="color:#868e96;font-size:13px;">24h Volume</div>
+</div>
+""", unsafe_allow_html=True)
+    
+    st.markdown("")
+    
+    # === Filters ===
+    col1, col2, col3 = st.columns([2, 2, 1])
+    
+    with col1:
+        search_query = st.text_input("🔍 Search", placeholder="Search markets...", label_visibility="collapsed")
+    
+    with col2:
+        category_options = ["All Categories"] + [c['name'] for c in categories]
+        selected_category = st.selectbox("Category", category_options, label_visibility="collapsed")
+    
+    with col3:
+        sort_option = st.selectbox("Sort", ["Volume (High to Low)", "Volume (Low to High)", "Price (High to Low)", "Price (Low to High)"], label_visibility="collapsed")
+    
+    # Apply filters
+    filtered_markets = markets
+    
+    if search_query:
+        filtered_markets = [m for m in filtered_markets if search_query.lower() in m['title'].lower()]
+    
+    if selected_category != "All Categories":
+        filtered_markets = [m for m in filtered_markets if m['category'] == selected_category or selected_category in m.get('categories', [])]
+    
+    # Apply sorting
+    if sort_option == "Volume (High to Low)":
+        filtered_markets.sort(key=lambda x: x['volume_24h'], reverse=True)
+    elif sort_option == "Volume (Low to High)":
+        filtered_markets.sort(key=lambda x: x['volume_24h'])
+    elif sort_option == "Price (High to Low)":
+        filtered_markets.sort(key=lambda x: x['current_price'], reverse=True)
+    elif sort_option == "Price (Low to High)":
+        filtered_markets.sort(key=lambda x: x['current_price'])
+    
+    # Display count
+    st.markdown(f"**Showing {len(filtered_markets)} markets**")
+    
+    # === Pagination ===
+    CARDS_PER_PAGE = 20
+    total_pages = max(1, (len(filtered_markets) + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE)
+    
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = 1
+    
+    start_idx = (st.session_state.current_page - 1) * CARDS_PER_PAGE
+    end_idx = start_idx + CARDS_PER_PAGE
+    page_markets = filtered_markets[start_idx:end_idx]
+    
+    # === Market Cards ===
+    for row_start in range(0, len(page_markets), 4):
+        row_markets = page_markets[row_start:row_start + 4]
+        cols = st.columns(4)
+        
+        for i, market in enumerate(row_markets):
+            with cols[i]:
+                status = clean_status(market.get('status'))
+                bg, color = STATUS_COLORS.get(status, STATUS_COLORS['Unknown'])
+                
+                impulse = market.get('impulse_tag')
+                title_short = market['title'][:50] + '...' if len(market['title']) > 50 else market['title']
+                
+                with st.container(border=True):
+                    st.markdown(f"<div style='height:48px;overflow:hidden;font-weight:600;font-size:14px;line-height:1.4;'>{title_short}</div>", unsafe_allow_html=True)
+                    
+                    tags = f'<span style="background:{bg};color:{color};padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;display:inline-block;margin-right:4px;">{status}</span>'
+                    if impulse:
+                        imp_bg, imp_color = IMPULSE_COLORS.get(impulse, ('#e9ecef', '#868e96'))
+                        tags += f'<span style="background:{imp_bg};color:{imp_color};padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;display:inline-block;">{impulse}</span>'
+                    st.markdown(f"<div style='margin:8px 0;'>{tags}</div>", unsafe_allow_html=True)
+                    
+                    st.markdown(f"""
+<div style='display:flex;justify-content:space-between;align-items:center;margin:8px 0;'>
+<span style='font-size:22px;font-weight:700;'>{market['current_price']*100:.0f}%</span>
+<span style='color:#868e96;font-size:13px;'>{format_volume(market['volume_24h'])}</span>
+</div>
+""", unsafe_allow_html=True)
+                    
+                    st.markdown(f"<span style='background:#f1f3f5;color:#868e96;padding:3px 8px;border-radius:6px;font-size:11px;'>{market['category']}</span>", unsafe_allow_html=True)
+                    
+                    if st.button("View →", key=f"view_{market['token_id']}", use_container_width=True):
+                        st.query_params['market'] = market['token_id']
+                        st.rerun()
+    
+    # === Pagination Controls ===
+    if total_pages > 1:
+        st.markdown("")
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col1:
+            if st.session_state.current_page > 1:
+                if st.button("← Previous"):
+                    st.session_state.current_page -= 1
+                    st.rerun()
+        
+        with col2:
+            st.markdown(f"<div style='text-align:center;color:#868e96;'>Page {st.session_state.current_page} of {total_pages}</div>", unsafe_allow_html=True)
+        
+        with col3:
+            if st.session_state.current_page < total_pages:
+                if st.button("Next →"):
+                    st.session_state.current_page += 1
+                    st.rerun()

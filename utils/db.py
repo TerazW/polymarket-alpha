@@ -1,6 +1,6 @@
 """
-数据库配置模块
-支持 SQLite (本地) 和 PostgreSQL (生产环境)
+Database Configuration Module
+Supports SQLite (local) and PostgreSQL (production)
 """
 from pathlib import Path
 import os
@@ -8,13 +8,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
-# 加载环境变量
+# Load environment variables
 load_dotenv()
 
-# 获取数据库 URL
+# Get database URL
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# 如果没有设置环境变量，使用本地 SQLite
+# If no environment variable, use local SQLite
 if not DATABASE_URL:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DB_DIR = PROJECT_ROOT / "data"
@@ -23,40 +23,40 @@ if not DATABASE_URL:
     DATABASE_URL = f"sqlite:///{DB_FILE}"
     print(f"[DB Config] Using local SQLite: {DB_FILE}")
 else:
-    # Render 的 PostgreSQL URL 可能以 postgres:// 开头，需要改成 postgresql://
+    # Render's PostgreSQL URL may start with postgres://, need to change to postgresql://
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     print(f"[DB Config] Using PostgreSQL (production)")
 
-# 判断数据库类型
+# Determine database type
 IS_POSTGRES = "postgresql" in DATABASE_URL
 IS_SQLITE = "sqlite" in DATABASE_URL
 
-# 创建引擎
+# Create engine
 engine_kwargs = {}
 if IS_SQLITE:
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 
 engine = create_engine(DATABASE_URL, echo=False, **engine_kwargs)
 
-# 创建 Session 工厂
+# Create Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# 创建 Base 类
+# Create Base class
 Base = declarative_base()
 
 
 def get_session():
-    """获取数据库会话"""
+    """Get database session"""
     return SessionLocal()
 
 
 def init_db():
-    """初始化数据库（创建所有表）"""
+    """Initialize database (create all tables)"""
     from sqlalchemy import text
     
     with engine.connect() as conn:
-        # Markets 表 - 包含 closed, active, categories 字段
+        # Markets table - includes closed, active, categories fields
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS markets (
                 token_id VARCHAR(100) PRIMARY KEY,
@@ -75,28 +75,48 @@ def init_db():
             )
         """))
         
-        # Daily metrics 表
+        # Daily metrics table - COMPLETE SCHEMA with all fields
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS daily_metrics (
                 id SERIAL PRIMARY KEY,
                 token_id VARCHAR(100),
                 date DATE,
+                
+                -- Profile metrics
+                va_high DECIMAL(10,4),
+                va_low DECIMAL(10,4),
+                band_width DECIMAL(10,6),
+                poc DECIMAL(10,4),
+                pomd DECIMAL(10,4),
+                
+                -- Uncertainty metrics
                 ui DECIMAL(10,4),
+                ecr DECIMAL(10,6),
+                acr DECIMAL(10,6),
                 cer DECIMAL(10,4),
+                edge_zone BOOLEAN DEFAULT FALSE,
+                
+                -- Conviction metrics
                 cs DECIMAL(10,4),
+                ar DECIMAL(10,6),
+                volume_delta DECIMAL(20,8),
+                total_volume DECIMAL(20,8),
+                trade_count INTEGER,
+                
+                -- Status
                 status VARCHAR(50),
                 impulse_tag VARCHAR(50),
-                edge_zone BOOLEAN DEFAULT FALSE,
-                current_price DECIMAL(10,2),
+                
+                -- Context
+                current_price DECIMAL(10,4),
                 days_to_expiry INTEGER,
-                va_high DECIMAL(10,2),
-                va_low DECIMAL(10,2),
+                
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(token_id, date)
             )
         """))
         
-        # Trade histogram 表 (旧版，保留兼容)
+        # Trade histogram table (legacy, kept for compatibility)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS trade_histogram (
                 id SERIAL PRIMARY KEY,
@@ -109,7 +129,7 @@ def init_db():
             )
         """))
         
-        # Daily histogram 表 (新版，包含 aggressor 数据，用于 Market Profile)
+        # Daily histogram table (new, includes aggressor data for Market Profile)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS daily_histogram (
                 id SERIAL PRIMARY KEY,
@@ -125,7 +145,7 @@ def init_db():
             )
         """))
         
-        # Status changes 表
+        # Status changes table
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS status_changes (
                 id SERIAL PRIMARY KEY,
@@ -143,9 +163,8 @@ def init_db():
 
 def migrate_schema():
     """
-    迁移数据库 schema
-    为现有数据库添加新字段：closed, active, categories
-    并创建 daily_histogram 表和 phase_histogram 表
+    Migrate database schema
+    Add new fields to existing database and create new tables
     """
     from sqlalchemy import text
     
@@ -153,24 +172,41 @@ def migrate_schema():
     
     with engine.connect() as conn:
         if IS_POSTGRES:
-            # PostgreSQL: 使用 ADD COLUMN IF NOT EXISTS
+            # PostgreSQL: Use ADD COLUMN IF NOT EXISTS
             migrations = [
-                ("closed", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS closed BOOLEAN DEFAULT FALSE"),
-                ("active", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE"),
-                ("categories", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS categories TEXT"),
-                # v5.3 新字段
-                ("impulse_tag", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS impulse_tag VARCHAR(50)"),
-                ("edge_zone", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS edge_zone BOOLEAN DEFAULT FALSE"),
+                # Markets table fields
+                ("markets.closed", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS closed BOOLEAN DEFAULT FALSE"),
+                ("markets.active", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE"),
+                ("markets.categories", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS categories TEXT"),
+                
+                # Daily metrics - Profile fields
+                ("daily_metrics.band_width", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS band_width DECIMAL(10,6)"),
+                ("daily_metrics.poc", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS poc DECIMAL(10,4)"),
+                ("daily_metrics.pomd", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS pomd DECIMAL(10,4)"),
+                
+                # Daily metrics - Uncertainty fields
+                ("daily_metrics.ecr", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS ecr DECIMAL(10,6)"),
+                ("daily_metrics.acr", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS acr DECIMAL(10,6)"),
+                ("daily_metrics.edge_zone", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS edge_zone BOOLEAN DEFAULT FALSE"),
+                
+                # Daily metrics - Conviction fields
+                ("daily_metrics.ar", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS ar DECIMAL(10,6)"),
+                ("daily_metrics.volume_delta", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS volume_delta DECIMAL(20,8)"),
+                ("daily_metrics.total_volume", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS total_volume DECIMAL(20,8)"),
+                ("daily_metrics.trade_count", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS trade_count INTEGER"),
+                
+                # Daily metrics - Status fields
+                ("daily_metrics.impulse_tag", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS impulse_tag VARCHAR(50)"),
             ]
             
             for col_name, sql in migrations:
                 try:
                     conn.execute(text(sql))
-                    print(f"[DB Migration] ✅ {col_name} column ready")
+                    print(f"[DB Migration] ✅ {col_name} ready")
                 except Exception as e:
                     print(f"[DB Migration] ⚠️ {col_name}: {e}")
             
-            # 创建 daily_histogram 表（如果不存在）
+            # Create daily_histogram table
             try:
                 conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS daily_histogram (
@@ -190,7 +226,7 @@ def migrate_schema():
             except Exception as e:
                 print(f"[DB Migration] ⚠️ daily_histogram: {e}")
             
-            # 创建索引
+            # Create index for daily_histogram
             try:
                 conn.execute(text("""
                     CREATE INDEX IF NOT EXISTS idx_daily_histogram_token_date 
@@ -200,7 +236,7 @@ def migrate_schema():
             except Exception as e:
                 print(f"[DB Migration] ⚠️ daily_histogram index: {e}")
             
-            # ============ 新增：phase_histogram 表（用于 Market Profile Evolution）============
+            # Create phase_histogram table (for Market Profile Evolution)
             try:
                 conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS phase_histogram (
@@ -229,8 +265,61 @@ def migrate_schema():
             except Exception as e:
                 print(f"[DB Migration] ⚠️ phase_histogram index: {e}")
             
+            # Create WebSocket data tables
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS ws_trades_hourly (
+                        id SERIAL PRIMARY KEY,
+                        token_id VARCHAR(100),
+                        hour TIMESTAMP,
+                        aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                        aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                        volume_delta DECIMAL(20,8) DEFAULT 0,
+                        total_volume DECIMAL(20,8) DEFAULT 0,
+                        trade_count INTEGER DEFAULT 0,
+                        poc DECIMAL(10,4),
+                        pomd DECIMAL(10,4),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(token_id, hour)
+                    )
+                """))
+                print("[DB Migration] ✅ ws_trades_hourly table ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ ws_trades_hourly: {e}")
+            
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS ws_price_bins (
+                        id SERIAL PRIMARY KEY,
+                        token_id VARCHAR(100),
+                        hour TIMESTAMP,
+                        price_bin DECIMAL(10,4),
+                        aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                        aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                        trade_count INTEGER DEFAULT 0,
+                        UNIQUE(token_id, hour, price_bin)
+                    )
+                """))
+                print("[DB Migration] ✅ ws_price_bins table ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ ws_price_bins: {e}")
+            
+            # Create indexes for WebSocket tables
+            try:
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_ws_trades_token_hour 
+                    ON ws_trades_hourly(token_id, hour)
+                """))
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_ws_bins_token_hour 
+                    ON ws_price_bins(token_id, hour)
+                """))
+                print("[DB Migration] ✅ WebSocket indexes ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ WebSocket indexes: {e}")
+            
         else:
-            # SQLite: 需要检查列是否存在
+            # SQLite: Need to check if columns exist
             result = conn.execute(text("PRAGMA table_info(markets)")).fetchall()
             markets_columns = [row[1] for row in result]
             
@@ -238,12 +327,29 @@ def migrate_schema():
             metrics_columns = [row[1] for row in result2]
             
             new_columns = [
+                # Markets table
                 ("markets", "closed", "ALTER TABLE markets ADD COLUMN closed BOOLEAN DEFAULT FALSE"),
                 ("markets", "active", "ALTER TABLE markets ADD COLUMN active BOOLEAN DEFAULT TRUE"),
                 ("markets", "categories", "ALTER TABLE markets ADD COLUMN categories TEXT"),
-                # v5.3 新字段
-                ("daily_metrics", "impulse_tag", "ALTER TABLE daily_metrics ADD COLUMN impulse_tag VARCHAR(50)"),
+                
+                # Daily metrics - Profile
+                ("daily_metrics", "band_width", "ALTER TABLE daily_metrics ADD COLUMN band_width DECIMAL(10,6)"),
+                ("daily_metrics", "poc", "ALTER TABLE daily_metrics ADD COLUMN poc DECIMAL(10,4)"),
+                ("daily_metrics", "pomd", "ALTER TABLE daily_metrics ADD COLUMN pomd DECIMAL(10,4)"),
+                
+                # Daily metrics - Uncertainty
+                ("daily_metrics", "ecr", "ALTER TABLE daily_metrics ADD COLUMN ecr DECIMAL(10,6)"),
+                ("daily_metrics", "acr", "ALTER TABLE daily_metrics ADD COLUMN acr DECIMAL(10,6)"),
                 ("daily_metrics", "edge_zone", "ALTER TABLE daily_metrics ADD COLUMN edge_zone BOOLEAN DEFAULT FALSE"),
+                
+                # Daily metrics - Conviction
+                ("daily_metrics", "ar", "ALTER TABLE daily_metrics ADD COLUMN ar DECIMAL(10,6)"),
+                ("daily_metrics", "volume_delta", "ALTER TABLE daily_metrics ADD COLUMN volume_delta DECIMAL(20,8)"),
+                ("daily_metrics", "total_volume", "ALTER TABLE daily_metrics ADD COLUMN total_volume DECIMAL(20,8)"),
+                ("daily_metrics", "trade_count", "ALTER TABLE daily_metrics ADD COLUMN trade_count INTEGER"),
+                
+                # Daily metrics - Status
+                ("daily_metrics", "impulse_tag", "ALTER TABLE daily_metrics ADD COLUMN impulse_tag VARCHAR(50)"),
             ]
             
             for table, col_name, sql in new_columns:
@@ -251,13 +357,13 @@ def migrate_schema():
                 if col_name not in existing:
                     try:
                         conn.execute(text(sql))
-                        print(f"[DB Migration] ✅ Added {table}.{col_name} column")
+                        print(f"[DB Migration] ✅ Added {table}.{col_name}")
                     except Exception as e:
                         print(f"[DB Migration] ⚠️ {col_name}: {e}")
                 else:
-                    print(f"[DB Migration] ✅ {col_name} column exists")
+                    print(f"[DB Migration] ✅ {col_name} exists")
             
-            # SQLite: 创建 daily_histogram 表
+            # SQLite: Create daily_histogram table
             try:
                 conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS daily_histogram (
@@ -277,7 +383,7 @@ def migrate_schema():
             except Exception as e:
                 print(f"[DB Migration] ⚠️ daily_histogram: {e}")
             
-            # ============ 新增：SQLite phase_histogram 表 ============
+            # SQLite: Create phase_histogram table
             try:
                 conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS phase_histogram (
@@ -312,7 +418,7 @@ def migrate_schema():
 
 
 def get_date_7_days_ago_sql():
-    """返回兼容 PostgreSQL 和 SQLite 的 7 天前日期 SQL"""
+    """Return SQL for date 7 days ago, compatible with PostgreSQL and SQLite"""
     if IS_POSTGRES:
         return "(CURRENT_DATE - INTERVAL '7 days')::date"
     else:
@@ -320,7 +426,7 @@ def get_date_7_days_ago_sql():
 
 
 def get_interval_hours_sql(hours: int = 24):
-    """返回兼容 PostgreSQL 和 SQLite 的时间间隔 SQL"""
+    """Return SQL for time interval, compatible with PostgreSQL and SQLite"""
     if IS_POSTGRES:
         return f"(NOW() - INTERVAL '{hours} hours')"
     else:
