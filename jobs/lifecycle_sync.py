@@ -1,14 +1,16 @@
 """
-Lifecycle Phases 同步脚本 v2
+Lifecycle Phases 同步脚本 v3
 
 功能：
 1. 回填历史 phases（用 Data API）
 2. 更新当前 phase（用 WebSocket 数据如果有）
 3. 门槛检查：不达标标记为 insufficient
+4. 【新增】保存每个 Phase 的 histogram 到 phase_histogram 表
 
 运行方式：
     python jobs/lifecycle_sync.py --markets 100
     python jobs/lifecycle_sync.py --markets 100 --backfill
+    python jobs/lifecycle_sync.py --markets 100 --backfill --save-histogram
 """
 
 import os
@@ -17,10 +19,13 @@ import time
 import argparse
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+from pathlib import Path
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+# 获取项目根目录并添加到 sys.path
+current_file = Path(__file__).resolve()
+project_root = current_file.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from sqlalchemy import text
 from utils.db import get_session, init_db, DATABASE_URL, IS_POSTGRES, get_interval_hours_sql
@@ -38,6 +43,68 @@ from utils.lifecycle import (
     create_lifecycle_table,
     migrate_lifecycle_table,
 )
+
+# 新增：导入 phase_histogram 相关函数
+try:
+    from utils.phase_histogram import (
+        save_phase_histogram,
+        aggregate_trades_to_phase_histogram
+    )
+    HISTOGRAM_AVAILABLE = True
+except ImportError:
+    HISTOGRAM_AVAILABLE = False
+    print("⚠️ phase_histogram module not found. Histogram saving disabled.")
+
+
+def ensure_phase_histogram_table(session):
+    """确保 phase_histogram 表存在"""
+    try:
+        if IS_POSTGRES:
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS phase_histogram (
+                    id SERIAL PRIMARY KEY,
+                    token_id VARCHAR(100) NOT NULL,
+                    phase_number INTEGER NOT NULL,
+                    price_bin DECIMAL(10,4) NOT NULL,
+                    volume DECIMAL(20,8) DEFAULT 0,
+                    aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                    aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                    trade_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(token_id, phase_number, price_bin)
+                )
+            """))
+            session.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_phase_histogram_token_phase 
+                ON phase_histogram(token_id, phase_number)
+            """))
+        else:
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS phase_histogram (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_id VARCHAR(100) NOT NULL,
+                    phase_number INTEGER NOT NULL,
+                    price_bin DECIMAL(10,4) NOT NULL,
+                    volume DECIMAL(20,8) DEFAULT 0,
+                    aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                    aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                    trade_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(token_id, phase_number, price_bin)
+                )
+            """))
+            session.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_phase_histogram_token_phase 
+                ON phase_histogram(token_id, phase_number)
+            """))
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        print(f"⚠️ Error creating phase_histogram table: {e}")
+        return False
 
 
 def get_price_bins_for_phase(
@@ -134,6 +201,7 @@ def sync_market_lifecycle(
     api: PolymarketAPI,
     market: Dict,
     backfill: bool = True,
+    save_histogram: bool = True,
     verbose: bool = True
 ) -> Dict:
     """
@@ -144,10 +212,11 @@ def sync_market_lifecycle(
         api: Polymarket API
         market: 市场信息
         backfill: 是否回填历史 phases
+        save_histogram: 是否保存 histogram
         verbose: 是否打印详细日志
     
     Returns:
-        {'phases_synced': int, 'phases_valid': int, 'success': bool}
+        {'phases_synced': int, 'phases_valid': int, 'histograms_saved': int, 'success': bool}
     """
     token_id = market['token_id']
     condition_id = market['condition_id']
@@ -160,14 +229,14 @@ def sync_market_lifecycle(
     if not end_date_str:
         if verbose:
             print(f"  ⚠️ No end_date, skipping")
-        return {'phases_synced': 0, 'phases_valid': 0, 'success': False}
+        return {'phases_synced': 0, 'phases_valid': 0, 'histograms_saved': 0, 'success': False}
     
     try:
         end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).replace(tzinfo=None)
     except:
         if verbose:
             print(f"  ⚠️ Invalid end_date, skipping")
-        return {'phases_synced': 0, 'phases_valid': 0, 'success': False}
+        return {'phases_synced': 0, 'phases_valid': 0, 'histograms_saved': 0, 'success': False}
     
     # created_at：如果没有，估算为 end_date - 90 天
     if created_at_str:
@@ -204,6 +273,7 @@ def sync_market_lifecycle(
     
     phases_synced = 0
     phases_valid = 0
+    histograms_saved = 0
     previous_band_width = None
     
     for phase_num, phase_start, phase_end in phases:
@@ -233,8 +303,26 @@ def sync_market_lifecycle(
         # 获取该 phase 结束时的价格（取最后一笔 trade 的价格）
         price_at_end = 0.5
         if phase_trades:
-            phase_trades_sorted = sorted(phase_trades, key=lambda x: x.get('timestamp', 0))
-            price_at_end = float(phase_trades_sorted[-1].get('price', 0.5))
+            # 辅助函数：安全获取 timestamp
+            def safe_get_timestamp(t):
+                ts = t.get('timestamp', 0)
+                if isinstance(ts, tuple):
+                    ts = ts[0] if ts else 0
+                try:
+                    return float(ts)
+                except:
+                    return 0
+            
+            phase_trades_sorted = sorted(phase_trades, key=safe_get_timestamp)
+            
+            # 安全获取 price
+            last_price = phase_trades_sorted[-1].get('price', 0.5)
+            if isinstance(last_price, tuple):
+                last_price = last_price[0] if last_price else 0.5
+            try:
+                price_at_end = float(last_price)
+            except:
+                price_at_end = 0.5
         
         # 计算剩余天数（该 phase 结束时）
         days_remaining = max(1, (end_date - phase_end).days)
@@ -266,7 +354,21 @@ def sync_market_lifecycle(
             aggressive_sell=aggressive_sell,
         )
         
-        # 保存
+        # === 保存 Phase Histogram（新增）===
+        if save_histogram and HISTOGRAM_AVAILABLE and phase_trades:
+            phase_histogram = aggregate_trades_to_phase_histogram(phase_trades)
+            if phase_histogram:
+                bins_saved = save_phase_histogram(
+                    session=session,
+                    token_id=token_id,
+                    phase_number=phase_num,
+                    histogram=phase_histogram
+                )
+                histograms_saved += bins_saved
+                if verbose:
+                    print(f"       📊 Histogram: {bins_saved} bins saved")
+        
+        # 保存 metrics
         if metrics.get('has_data') or not phase_trades:
             success = save_phase_metrics(
                 session=session,
@@ -299,6 +401,7 @@ def sync_market_lifecycle(
     return {
         'phases_synced': phases_synced,
         'phases_valid': phases_valid,
+        'histograms_saved': histograms_saved,
         'success': True
     }
 
@@ -307,6 +410,7 @@ def sync_all_lifecycles(
     api: PolymarketAPI,
     top_n: int = 100,
     backfill: bool = True,
+    save_histogram: bool = True,
     verbose: bool = True
 ):
     """
@@ -320,13 +424,15 @@ def sync_all_lifecycles(
         'failed': 0,
         'total_phases': 0,
         'valid_phases': 0,
+        'total_histogram_bins': 0,
     }
     
     try:
         print(f"\n{'='*60}")
-        print(f"Lifecycle Phases Sync v2")
+        print(f"Lifecycle Phases Sync v3")
         print(f"Database: {'PostgreSQL' if IS_POSTGRES else 'SQLite'}")
         print(f"Backfill: {backfill}")
+        print(f"Save Histogram: {save_histogram}")
         print(f"Min Trades: {MIN_TRADES_THRESHOLD}")
         print(f"Min Volume: ${MIN_VOLUME_THRESHOLD}")
         print(f"{'='*60}\n")
@@ -334,6 +440,9 @@ def sync_all_lifecycles(
         # 确保表存在并迁移
         create_lifecycle_table(session)
         migrate_lifecycle_table(session)
+        
+        if save_histogram:
+            ensure_phase_histogram_table(session)
         
         # 获取市场
         print(f"📊 Fetching markets...")
@@ -361,6 +470,7 @@ def sync_all_lifecycles(
                     api=api,
                     market=market,
                     backfill=backfill,
+                    save_histogram=save_histogram,
                     verbose=verbose
                 )
                 
@@ -368,6 +478,7 @@ def sync_all_lifecycles(
                     stats['success'] += 1
                     stats['total_phases'] += result['phases_synced']
                     stats['valid_phases'] += result['phases_valid']
+                    stats['total_histogram_bins'] += result['histograms_saved']
                 else:
                     stats['failed'] += 1
                 
@@ -388,6 +499,7 @@ def sync_all_lifecycles(
         print(f"Failed: {stats['failed']}")
         print(f"Total phases synced: {stats['total_phases']}")
         print(f"Valid phases: {stats['valid_phases']}")
+        print(f"Histogram bins saved: {stats['total_histogram_bins']}")
         
         if stats['total_phases'] > 0:
             valid_rate = stats['valid_phases'] / stats['total_phases'] * 100
@@ -405,15 +517,21 @@ def sync_all_lifecycles(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Sync lifecycle phases v2')
+    parser = argparse.ArgumentParser(description='Sync lifecycle phases v3')
     parser.add_argument('--markets', type=int, default=100,
                        help='Number of markets (default: 100)')
     parser.add_argument('--backfill', action='store_true',
                        help='Backfill historical phases')
+    parser.add_argument('--save-histogram', action='store_true', default=True,
+                       help='Save phase histograms (default: True)')
+    parser.add_argument('--no-histogram', action='store_true',
+                       help='Disable histogram saving')
     parser.add_argument('--quiet', action='store_true',
                        help='Reduce logging')
     
     args = parser.parse_args()
+    
+    save_histogram = not args.no_histogram and args.save_histogram
     
     print("Initializing...")
     init_db()
@@ -424,5 +542,6 @@ if __name__ == "__main__":
         api=api,
         top_n=args.markets,
         backfill=args.backfill,
+        save_histogram=save_histogram,
         verbose=not args.quiet
     )

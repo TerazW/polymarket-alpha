@@ -100,15 +100,24 @@ def calculate_histogram(trades: List[Dict], tick_size: float = 0.01) -> Dict[flo
     
     for trade in trades:
         try:
-            price = float(trade.get('price', 0))
-            size = float(trade.get('size', 0))
+            # 获取 price，处理 tuple 类型
+            price = trade.get('price', 0)
+            if isinstance(price, tuple):
+                price = price[0] if price else 0
+            price = float(price)
+            
+            # 获取 size，处理 tuple 类型
+            size = trade.get('size', 0)
+            if isinstance(size, tuple):
+                size = size[0] if size else 0
+            size = float(size)
             
             bin_price = round(price / tick_size) * tick_size
             bin_price = round(bin_price, 4)
             
             histogram[bin_price] += size
             
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, IndexError):
             continue
     
     return dict(histogram)

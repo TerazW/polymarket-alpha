@@ -145,7 +145,7 @@ def migrate_schema():
     """
     迁移数据库 schema
     为现有数据库添加新字段：closed, active, categories
-    并创建 daily_histogram 表
+    并创建 daily_histogram 表和 phase_histogram 表
     """
     from sqlalchemy import text
     
@@ -200,6 +200,35 @@ def migrate_schema():
             except Exception as e:
                 print(f"[DB Migration] ⚠️ daily_histogram index: {e}")
             
+            # ============ 新增：phase_histogram 表（用于 Market Profile Evolution）============
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS phase_histogram (
+                        id SERIAL PRIMARY KEY,
+                        token_id VARCHAR(100) NOT NULL,
+                        phase_number INTEGER NOT NULL,
+                        price_bin DECIMAL(10,4) NOT NULL,
+                        volume DECIMAL(20,8) DEFAULT 0,
+                        aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                        aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                        trade_count INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(token_id, phase_number, price_bin)
+                    )
+                """))
+                print("[DB Migration] ✅ phase_histogram table ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ phase_histogram: {e}")
+            
+            try:
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_phase_histogram_token_phase 
+                    ON phase_histogram(token_id, phase_number)
+                """))
+                print("[DB Migration] ✅ phase_histogram index ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ phase_histogram index: {e}")
+            
         else:
             # SQLite: 需要检查列是否存在
             result = conn.execute(text("PRAGMA table_info(markets)")).fetchall()
@@ -247,7 +276,36 @@ def migrate_schema():
                 print("[DB Migration] ✅ daily_histogram table ready")
             except Exception as e:
                 print(f"[DB Migration] ⚠️ daily_histogram: {e}")
-        
+            
+            # ============ 新增：SQLite phase_histogram 表 ============
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS phase_histogram (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        token_id VARCHAR(100) NOT NULL,
+                        phase_number INTEGER NOT NULL,
+                        price_bin DECIMAL(10,4) NOT NULL,
+                        volume DECIMAL(20,8) DEFAULT 0,
+                        aggressive_buy DECIMAL(20,8) DEFAULT 0,
+                        aggressive_sell DECIMAL(20,8) DEFAULT 0,
+                        trade_count INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(token_id, phase_number, price_bin)
+                    )
+                """))
+                print("[DB Migration] ✅ phase_histogram table ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ phase_histogram: {e}")
+            
+            try:
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_phase_histogram_token_phase 
+                    ON phase_histogram(token_id, phase_number)
+                """))
+                print("[DB Migration] ✅ phase_histogram index ready")
+            except Exception as e:
+                print(f"[DB Migration] ⚠️ phase_histogram index: {e}")
+
         conn.commit()
     
     print("[DB Migration] Migration completed\n")

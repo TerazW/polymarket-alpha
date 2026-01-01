@@ -153,17 +153,43 @@ def filter_trades_by_phase(
     筛选某个 phase 内的 trades
     
     Args:
-        trades: 交易列表（timestamp 是秒）
+        trades: 交易列表
         phase_start: phase 开始时间
         phase_end: phase 结束时间
     """
     start_ts = int(phase_start.timestamp())
     end_ts = int(phase_end.timestamp())
     
-    return [
-        t for t in trades
-        if start_ts <= t.get('timestamp', 0) < end_ts
-    ]
+    filtered = []
+    for t in trades:
+        ts = t.get('timestamp', 0)
+        
+        # 处理各种 timestamp 格式
+        if ts is None:
+            continue
+        
+        try:
+            # 如果是 tuple，取第一个元素
+            if isinstance(ts, tuple):
+                ts = ts[0] if ts else 0
+            
+            # 如果是字符串，转换为数字
+            if isinstance(ts, str):
+                ts = float(ts)
+            
+            # 如果是毫秒，转换为秒
+            if ts > 1e12:
+                ts = ts / 1000
+            
+            ts = int(ts)
+            
+            if start_ts <= ts < end_ts:
+                filtered.append(t)
+                
+        except (ValueError, TypeError, IndexError):
+            continue
+    
+    return filtered
 
 
 def check_phase_validity(
@@ -186,7 +212,17 @@ def check_phase_validity(
         return False, "no_trades"
     
     trade_count = len(trades)
-    total_volume = sum(float(t.get('size', 0)) for t in trades)
+    
+    # 计算 total_volume，处理 tuple 类型
+    total_volume = 0.0
+    for t in trades:
+        size = t.get('size', 0)
+        if isinstance(size, tuple):
+            size = size[0] if size else 0
+        try:
+            total_volume += float(size)
+        except (ValueError, TypeError):
+            pass
     
     if trade_count < min_trades:
         return False, f"insufficient_trades ({trade_count} < {min_trades})"
@@ -234,7 +270,18 @@ def calculate_phase_metrics(
     is_valid, validity_reason = check_phase_validity(trades, min_trades, min_volume)
     
     trade_count = len(trades) if trades else 0
-    total_volume = sum(float(t.get('size', 0)) for t in trades) if trades else 0
+    
+    # 计算 total_volume，处理 tuple 类型
+    total_volume = 0.0
+    if trades:
+        for t in trades:
+            size = t.get('size', 0)
+            if isinstance(size, tuple):
+                size = size[0] if size else 0
+            try:
+                total_volume += float(size)
+            except (ValueError, TypeError):
+                pass
     
     # 基础返回结构
     result = {
@@ -268,8 +315,8 @@ def calculate_phase_metrics(
     if aggressor_histogram:
         pomd = calculate_pomd(aggressor_histogram)
     
-    # Uncertainty
-    ui = calculate_ui(histogram)
+    # Uncertainty - 注意 calculate_ui 返回 (ui_value, edge_zone) 元组
+    ui, edge_zone = calculate_ui(histogram)
     ecr = calculate_ecr(current_price, days_remaining) if days_remaining > 0 else None
     acr = calculate_acr(band_width, previous_band_width) if previous_band_width else None
     cer = calculate_cer(band_width, previous_band_width, current_price, days_remaining) if previous_band_width and days_remaining > 0 else None
@@ -286,8 +333,8 @@ def calculate_phase_metrics(
             cs = calculate_cs(aggressive_buy, aggressive_sell, total_vol)
             volume_delta = calculate_volume_delta(aggressive_buy, aggressive_sell)
     
-    # 状态
-    status = determine_status(ui, cer, cs)
+    # 状态 - 传入 edge_zone 参数
+    status = determine_status(ui, cer, cs, total_volume=total_volume, edge_zone=edge_zone)
     
     # 更新结果
     result.update({
@@ -493,44 +540,84 @@ def get_band_evolution(session, token_id: str) -> List[Dict]:
 
 
 def create_lifecycle_table(session):
-    """创建 lifecycle_phases 表（带 is_valid 字段）"""
+    """创建 lifecycle_phases 表（兼容 PostgreSQL / SQLite）"""
+    from utils.db import IS_POSTGRES
     try:
-        session.execute(text("""
-            CREATE TABLE IF NOT EXISTS lifecycle_phases (
-                id SERIAL PRIMARY KEY,
-                token_id VARCHAR(100),
-                phase_number INTEGER,
-                phase_start TIMESTAMP,
-                phase_end TIMESTAMP,
-                
-                is_valid BOOLEAN DEFAULT FALSE,
-                validity_reason VARCHAR(100),
-                
-                va_high DECIMAL(10,4),
-                va_low DECIMAL(10,4),
-                band_width DECIMAL(10,4),
-                poc DECIMAL(10,4),
-                pomd DECIMAL(10,4),
-                
-                ui DECIMAL(10,4),
-                ecr DECIMAL(10,6),
-                acr DECIMAL(10,6),
-                cer DECIMAL(10,4),
-                
-                ar DECIMAL(10,4),
-                cs DECIMAL(10,4),
-                volume_delta DECIMAL(20,8),
-                
-                status VARCHAR(50),
-                total_volume DECIMAL(20,8),
-                trade_count INTEGER,
-                price_at_end DECIMAL(10,4),
-                
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                
-                UNIQUE(token_id, phase_number)
-            )
-        """))
+        if IS_POSTGRES:
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS lifecycle_phases (
+                    id SERIAL PRIMARY KEY,
+                    token_id VARCHAR(100),
+                    phase_number INTEGER,
+                    phase_start TIMESTAMP,
+                    phase_end TIMESTAMP,
+                    
+                    is_valid BOOLEAN DEFAULT FALSE,
+                    validity_reason VARCHAR(100),
+                    
+                    va_high DECIMAL(10,4),
+                    va_low DECIMAL(10,4),
+                    band_width DECIMAL(10,4),
+                    poc DECIMAL(10,4),
+                    pomd DECIMAL(10,4),
+                    
+                    ui DECIMAL(10,4),
+                    ecr DECIMAL(10,6),
+                    acr DECIMAL(10,6),
+                    cer DECIMAL(10,4),
+                    
+                    ar DECIMAL(10,4),
+                    cs DECIMAL(10,4),
+                    volume_delta DECIMAL(20,8),
+                    
+                    status VARCHAR(50),
+                    total_volume DECIMAL(20,8),
+                    trade_count INTEGER,
+                    price_at_end DECIMAL(10,4),
+                    
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    UNIQUE(token_id, phase_number)
+                )
+            """))
+        else:
+            # SQLite
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS lifecycle_phases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_id TEXT,
+                    phase_number INTEGER,
+                    phase_start TIMESTAMP,
+                    phase_end TIMESTAMP,
+                    
+                    is_valid BOOLEAN DEFAULT 0,
+                    validity_reason TEXT,
+                    
+                    va_high REAL,
+                    va_low REAL,
+                    band_width REAL,
+                    poc REAL,
+                    pomd REAL,
+                    
+                    ui REAL,
+                    ecr REAL,
+                    acr REAL,
+                    cer REAL,
+                    
+                    ar REAL,
+                    cs REAL,
+                    volume_delta REAL,
+                    
+                    status TEXT,
+                    total_volume REAL,
+                    trade_count INTEGER,
+                    price_at_end REAL,
+                    
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    UNIQUE(token_id, phase_number)
+                )
+            """))
         
         session.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_lifecycle_token
@@ -547,18 +634,35 @@ def create_lifecycle_table(session):
         return False
 
 
-def migrate_lifecycle_table(session):
-    """迁移：添加 is_valid 和 validity_reason 字段"""
+def _sqlite_has_column(session, table: str, col: str) -> bool:
+    """检查 SQLite 表是否有某列"""
     try:
-        # PostgreSQL
-        session.execute(text("""
-            ALTER TABLE lifecycle_phases 
-            ADD COLUMN IF NOT EXISTS is_valid BOOLEAN DEFAULT FALSE
-        """))
-        session.execute(text("""
-            ALTER TABLE lifecycle_phases 
-            ADD COLUMN IF NOT EXISTS validity_reason VARCHAR(100)
-        """))
+        rows = session.execute(text(f"PRAGMA table_info({table})")).fetchall()
+        return any(r[1] == col for r in rows)
+    except:
+        return False
+
+
+def migrate_lifecycle_table(session):
+    """迁移：添加 is_valid 和 validity_reason 字段（兼容 PostgreSQL / SQLite）"""
+    from utils.db import IS_POSTGRES
+    try:
+        if IS_POSTGRES:
+            session.execute(text("""
+                ALTER TABLE lifecycle_phases 
+                ADD COLUMN IF NOT EXISTS is_valid BOOLEAN DEFAULT FALSE
+            """))
+            session.execute(text("""
+                ALTER TABLE lifecycle_phases 
+                ADD COLUMN IF NOT EXISTS validity_reason VARCHAR(100)
+            """))
+        else:
+            # SQLite：用 PRAGMA 检查再加
+            if not _sqlite_has_column(session, "lifecycle_phases", "is_valid"):
+                session.execute(text("ALTER TABLE lifecycle_phases ADD COLUMN is_valid BOOLEAN DEFAULT 0"))
+            if not _sqlite_has_column(session, "lifecycle_phases", "validity_reason"):
+                session.execute(text("ALTER TABLE lifecycle_phases ADD COLUMN validity_reason TEXT"))
+        
         session.commit()
         print("✅ Migrated lifecycle_phases table")
         return True

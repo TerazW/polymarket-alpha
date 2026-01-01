@@ -1,11 +1,11 @@
 """
-Market Sensemaking - 主页面 v2.1
-修复 HTML 渲染和空白问题
+Market Sensemaking - 主页面 v3.0
+新增：Market Profile Evolution（4 Phase 并排显示）
 """
 
 import streamlit as st
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import text
 import sys
 import os
@@ -122,39 +122,25 @@ header {visibility: hidden;}
     display: inline-block;
 }
 
-/* 详情页指标卡片 */
-.metric-card {
-    background: white;
-    padding: 20px;
-    border-radius: 12px;
-    border: 1px solid #e9ecef;
-    text-align: center;
-}
-
-.metric-label {
+/* 图例样式 */
+.profile-legend {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    margin: 10px 0;
     font-size: 13px;
-    color: #868e96;
 }
 
-.metric-value {
-    font-size: 28px;
-    font-weight: 700;
-    color: #1a1a2e;
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 
-/* 生命周期卡片 */
-.phase-card {
-    background: white;
-    padding: 16px;
-    border-radius: 12px;
-    border: 1px solid #e9ecef;
-}
-
-.phase-card-inactive {
-    background: #f8f9fa;
-    padding: 16px;
-    border-radius: 12px;
-    border: 1px solid #e9ecef;
+.legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -241,13 +227,89 @@ def get_categories():
     finally:
         session.close()
 
+
+@st.cache_data(ttl=120)
+def get_phase_histograms(token_id: str):
+    """
+    从 phase_histogram 表获取所有 Phase 的 histogram 数据
+    
+    Returns:
+        {phase_number: {price_bin: {'volume', 'buy', 'sell'}}}
+    """
+    session = get_session()
+    try:
+        result = session.execute(text("""
+            SELECT phase_number, price_bin, volume, aggressive_buy, aggressive_sell
+            FROM phase_histogram
+            WHERE token_id = :token_id
+            ORDER BY phase_number, price_bin
+        """), {"token_id": token_id}).fetchall()
+        
+        if not result:
+            return {}
+        
+        from collections import defaultdict
+        histograms = defaultdict(dict)
+        
+        for row in result:
+            phase_num = int(row[0])
+            price_bin = float(row[1])
+            histograms[phase_num][price_bin] = {
+                'volume': float(row[2] or 0),
+                'buy': float(row[3] or 0),
+                'sell': float(row[4] or 0)
+            }
+        
+        return dict(histograms)
+        
+    except Exception as e:
+        # 表可能不存在
+        return {}
+    finally:
+        session.close()
+
+
+@st.cache_data(ttl=120)
+def get_lifecycle_phases(token_id: str):
+    """获取 lifecycle phases 元数据"""
+    session = get_session()
+    try:
+        result = session.execute(text("""
+            SELECT phase_number, phase_start, phase_end, is_valid, 
+                   va_high, va_low, poc, ui, cer, cs, status
+            FROM lifecycle_phases
+            WHERE token_id = :tid
+            ORDER BY phase_number
+        """), {'tid': token_id}).fetchall()
+        
+        phases = []
+        for row in result:
+            phases.append({
+                'phase_number': row[0],
+                'phase_start': row[1],
+                'phase_end': row[2],
+                'is_valid': row[3],
+                'va_high': float(row[4]) if row[4] else None,
+                'va_low': float(row[5]) if row[5] else None,
+                'poc': float(row[6]) if row[6] else None,
+                'ui': row[7],
+                'cer': row[8],
+                'cs': row[9],
+                'status': row[10]
+            })
+        return phases
+    except:
+        return []
+    finally:
+        session.close()
+
+
 def get_status_stats(markets):
     """计算状态统计"""
     stats = {'Informed': 0, 'Fragmented': 0, 'Noisy': 0}
     for m in markets:
         status = m.get('status', '')
         if status:
-            # 处理带 emoji 的状态值（如 "🟡 Fragmented"）
             status_lower = status.lower()
             if 'informed' in status_lower:
                 stats['Informed'] += 1
@@ -304,6 +366,7 @@ if 'market' in query_params:
     
     if market:
         import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
         
         # 返回按钮
         if st.button("← Back to Markets"):
@@ -314,12 +377,11 @@ if 'market' in query_params:
         status = clean_status(market.get('status'))
         bg, color = STATUS_COLORS.get(status, STATUS_COLORS['Unknown'])
         
-        st.markdown(f"### Market: **{market['title']}**")
+        st.markdown(f"### {market['title']}")
         
         # 状态行
         status_html = f'''
 <div style="display:flex;align-items:center;gap:12px;margin:8px 0 20px 0;">
-<span style="font-size:15px;color:#495057;">Status:</span>
 <span style="background:{bg};color:{color};padding:6px 16px;border-radius:20px;font-weight:600;font-size:14px;">{status}</span>
 '''
         impulse = market.get('impulse_tag')
@@ -327,186 +389,114 @@ if 'market' in query_params:
             imp_bg, imp_color = IMPULSE_COLORS.get(impulse, ('#e9ecef', '#868e96'))
             status_html += f'<span style="background:{imp_bg};color:{imp_color};padding:6px 16px;border-radius:20px;font-weight:600;font-size:14px;">{impulse}</span>'
         
-        status_html += f'<span style="color:#868e96;font-size:14px;margin-left:auto;">{market["category"]} · {format_volume(market["volume_24h"])} Vol</span></div>'
+        status_html += f'''
+<span style="font-size:24px;font-weight:700;margin-left:auto;">{market["current_price"]*100:.0f}%</span>
+<span style="color:#868e96;font-size:14px;">{market["category"]} · {format_volume(market["volume_24h"])}</span>
+</div>'''
         st.markdown(status_html, unsafe_allow_html=True)
         
-        # === Consensus Band Evolution 图表 ===
-        st.markdown("#### Consensus Band Evolution")
+        # ==================== Market Profile Evolution ====================
+        st.markdown("#### Market Profile Evolution")
         
-        # 获取生命周期数据
-        session = get_session()
-        try:
-            lifecycle_query = text("""
-                SELECT phase_number, is_valid, va_high, va_low, band_width, poc, ui, cer, cs, status
-                FROM lifecycle_phases
-                WHERE token_id = :tid
-                ORDER BY phase_number
-            """)
-            lifecycle_data = session.execute(lifecycle_query, {'tid': token_id}).fetchall()
-        finally:
-            session.close()
+        # 图例（包含所有标识）
+        st.markdown("""
+<div style="display:flex;gap:20px;justify-content:center;align-items:center;margin:12px 0;font-size:13px;flex-wrap:wrap;">
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:14px;background:rgba(34,197,94,0.8);border-radius:2px;"></div>
+        <span>Buy</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:14px;background:rgba(239,68,68,0.8);border-radius:2px;"></div>
+        <span>Sell</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:14px;background:rgba(59,130,246,1.0);border-radius:2px;"></div>
+        <span>POC</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <span style="color:#8b5cf6;font-size:16px;">★</span>
+        <span>POMD</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:2px;border-top:2px dashed #22c55e;"></div>
+        <span>Current</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:2px;border-top:2px dotted rgba(59,130,246,0.6);"></div>
+        <span>VAH/VAL</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+        <div style="width:14px;height:14px;background:rgba(239,68,68,0.4);border-radius:2px;"></div>
+        <span>Tail</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
         
-        # 创建 Evolution Band 图表
-        fig = go.Figure()
+        # 获取 Phase Histogram 数据
+        phase_histograms = get_phase_histograms(token_id)
+        lifecycle_phases = get_lifecycle_phases(token_id)
         
-        # 定义每个阶段的位置
-        phase_positions = [10, 30, 50, 70]  # Phase 1-4 的 x 位置
-        phase_width = 12  # 每个阶段的宽度
-        
-        # 添加阶段数据
-        valid_phases = []
-        for phase in lifecycle_data if lifecycle_data else []:
-            phase_num = phase[0]
-            is_valid = phase[1]
-            if is_valid and phase_num <= 4:
-                va_h = float(phase[2]) if phase[2] else None
-                va_l = float(phase[3]) if phase[3] else None
-                poc = float(phase[5]) if phase[5] else None
-                if va_h is not None and va_l is not None:
-                    valid_phases.append({
-                        'num': phase_num,
-                        'va_high': va_h,
-                        'va_low': va_l,
-                        'poc': poc,
-                        'ui': phase[6],
-                        'status': phase[9]
-                    })
-        
-        # 如果没有生命周期数据，使用当前数据作为单个阶段
-        if not valid_phases:
-            va_h = market.get('va_high')
-            va_l = market.get('va_low')
-            if va_h is not None and va_l is not None:
-                valid_phases = [{
-                    'num': 1,
-                    'va_high': float(va_h),
-                    'va_low': float(va_l),
-                    'poc': None,
-                    'ui': market.get('ui'),
-                    'status': status
-                }]
-        
-        # 绘制每个阶段的 band
-        for p in valid_phases:
-            idx = p['num'] - 1
-            if idx < len(phase_positions):
-                x_center = phase_positions[idx]
-                va_h = p['va_high'] * 100
-                va_l = p['va_low'] * 100
-                mid = (va_h + va_l) / 2
-                
-                # 绘制类似小提琴的形状（菱形/椭圆形）
-                # 使用多边形近似椭圆
-                shape_x = []
-                shape_y = []
-                
-                # 从底部到顶部，宽度变化
-                steps = 20
-                for i in range(steps + 1):
-                    t = i / steps
-                    y = va_l + (va_h - va_l) * t
-                    # 椭圆宽度：中间最宽，两端最窄
-                    width_factor = 1 - (2 * t - 1) ** 2  # 在中点最大
-                    width = phase_width * 0.5 * (0.3 + 0.7 * width_factor)
-                    shape_x.append(x_center - width)
-                    shape_y.append(y)
-                
-                for i in range(steps, -1, -1):
-                    t = i / steps
-                    y = va_l + (va_h - va_l) * t
-                    width_factor = 1 - (2 * t - 1) ** 2
-                    width = phase_width * 0.5 * (0.3 + 0.7 * width_factor)
-                    shape_x.append(x_center + width)
-                    shape_y.append(y)
-                
-                # 获取状态颜色
-                p_status = clean_status(p.get('status'))
-                _, p_color = STATUS_COLORS.get(p_status, STATUS_COLORS['Unknown'])
-                
-                fig.add_trace(go.Scatter(
-                    x=shape_x,
-                    y=shape_y,
-                    fill='toself',
-                    fillcolor=f'rgba(59, 130, 246, 0.3)',
-                    line=dict(color='rgba(59, 130, 246, 0.8)', width=2),
-                    name=f'Phase {p["num"]}',
-                    hoverinfo='text',
-                    hovertext=f'Phase {p["num"]}<br>Band: {va_l:.0f}% - {va_h:.0f}%<br>Width: {va_h-va_l:.1f}%'
-                ))
-                
-                # 添加 POC 线（深色中心线）
-                if p.get('poc'):
-                    poc_y = p['poc'] * 100
-                    fig.add_shape(
-                        type="line",
-                        x0=x_center - phase_width * 0.4,
-                        x1=x_center + phase_width * 0.4,
-                        y0=poc_y, y1=poc_y,
-                        line=dict(color='rgba(30, 64, 175, 0.9)', width=3)
-                    )
-        
-        # 添加当前价格线（如果存在）
         current_price = market.get('current_price')
-        if current_price and valid_phases:
-            fig.add_hline(
-                y=current_price * 100,
-                line_dash="dash",
-                line_color="#22c55e",
-                line_width=2,
-                annotation_text=f"Current: {current_price*100:.0f}%",
-                annotation_position="right"
-            )
         
-        # 添加 Resolution 区域（如果价格接近确定性）
-        if current_price and current_price > 0.9:
-            fig.add_shape(
-                type="rect",
-                x0=85, x1=100,
-                y0=90, y1=100,
-                fillcolor="rgba(34, 197, 94, 0.4)",
-                line=dict(color="rgba(34, 197, 94, 0.8)", width=2),
-            )
-            fig.add_annotation(x=92.5, y=95, text="Resolution", showarrow=False, font=dict(size=11))
-        elif current_price and current_price < 0.1:
-            fig.add_shape(
-                type="rect",
-                x0=85, x1=100,
-                y0=0, y1=10,
-                fillcolor="rgba(239, 68, 68, 0.4)",
-                line=dict(color="rgba(239, 68, 68, 0.8)", width=2),
-            )
-            fig.add_annotation(x=92.5, y=5, text="Resolution", showarrow=False, font=dict(size=11))
+        if phase_histograms:
+            # 构建 phase_metadata（从 lifecycle_phases 读取 POC/POMD/VAH/VAL）
+            phase_metadata = {}
+            current_phase = 4  # 默认最后一个
+            now = datetime.now()
+            
+            for lp in lifecycle_phases:
+                phase_num = lp.get('phase_number')
+                if phase_num:
+                    phase_metadata[phase_num] = {
+                        'poc': lp.get('poc'),
+                        'pomd': lp.get('pomd'),
+                        'vah': lp.get('va_high'),
+                        'val': lp.get('va_low'),
+                        'status': lp.get('status'),
+                        'is_valid': lp.get('is_valid')
+                    }
+                    
+                    # 判断当前 phase
+                    if lp.get('phase_start') and lp.get('phase_end'):
+                        try:
+                            start = lp['phase_start']
+                            end = lp['phase_end']
+                            if isinstance(start, str):
+                                start = datetime.fromisoformat(start.replace('Z', '+00:00')).replace(tzinfo=None)
+                            if isinstance(end, str):
+                                end = datetime.fromisoformat(end.replace('Z', '+00:00')).replace(tzinfo=None)
+                            if start <= now < end:
+                                current_phase = phase_num
+                        except:
+                            pass
+            
+            # 尝试导入可视化组件
+            try:
+                from app.components.market_profile_evolution import create_market_profile_evolution
+                
+                fig = create_market_profile_evolution(
+                    phase_histograms=phase_histograms,
+                    phase_metadata=phase_metadata,
+                    current_price=current_price,
+                    current_phase=current_phase,
+                    title=""
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+            except ImportError:
+                # Fallback: 手动绘制
+                st.warning("Market Profile Evolution component not available. Using fallback view.")
+                _render_fallback_profile_evolution(phase_histograms, current_price)
+        else:
+            # 没有 phase_histogram 数据，显示提示
+            st.info("📊 No phase histogram data available. Run `lifecycle_sync.py` with `--save-histogram` to collect data.")
+            
+            # 显示旧的 Consensus Band Evolution 作为备选
+            if lifecycle_phases:
+                _render_legacy_band_evolution(lifecycle_phases, current_price, market)
         
-        # 添加阶段标签
-        for i, pos in enumerate(phase_positions):
-            fig.add_annotation(
-                x=pos, y=-8,
-                text=f"Phase {i+1}",
-                showarrow=False,
-                font=dict(size=12, color='#495057')
-            )
-        
-        # 布局
-        fig.update_layout(
-            xaxis=dict(
-                range=[0, 100],
-                showticklabels=False,
-                showgrid=False,
-                zeroline=False
-            ),
-            yaxis=dict(
-                title="Probability %",
-                range=[-15, 105],
-                ticksuffix="%",
-                gridcolor='rgba(0,0,0,0.1)'
-            ),
-            height=350,
-            showlegend=False,
-            margin=dict(l=50, r=50, t=20, b=50),
-            plot_bgcolor='#f8fafc'
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+        st.markdown("")
         
         # === Key Metrics ===
         st.markdown("#### Key Metrics")
@@ -520,59 +510,35 @@ if 'market' in query_params:
         # UI 指标解读
         if ui is not None:
             if ui < 0.30:
-                ui_label = "Low Uncertainty"
-                ui_icon = "✅"
-                ui_desc = "低不确定性"
+                ui_label, ui_icon, ui_desc = "Low Uncertainty", "✅", "低不确定性"
             elif ui < 0.50:
-                ui_label = "Moderate"
-                ui_icon = "➖"
-                ui_desc = "中等不确定性"
+                ui_label, ui_icon, ui_desc = "Moderate", "➖", "中等不确定性"
             else:
-                ui_label = "High Uncertainty"
-                ui_icon = "⚠️"
-                ui_desc = "高不确定性"
+                ui_label, ui_icon, ui_desc = "High Uncertainty", "⚠️", "高不确定性"
         else:
-            ui_label = "—"
-            ui_icon = "—"
-            ui_desc = ""
+            ui_label, ui_icon, ui_desc = "—", "—", ""
         
         # CER 指标解读
         if cer is not None:
             if cer >= 0.80:
-                cer_label = "Fast Convergence"
-                cer_icon = "✅"
-                cer_desc = "快速收敛"
+                cer_label, cer_icon, cer_desc = "Fast Convergence", "✅", "快速收敛"
             elif cer >= 0.40:
-                cer_label = "Normal"
-                cer_icon = "➖"
-                cer_desc = "正常收敛"
+                cer_label, cer_icon, cer_desc = "Normal", "➖", "正常收敛"
             else:
-                cer_label = "Slow/Diverging"
-                cer_icon = "⚠️"
-                cer_desc = "缓慢/发散"
+                cer_label, cer_icon, cer_desc = "Slow/Diverging", "⚠️", "缓慢/发散"
         else:
-            cer_label = "—"
-            cer_icon = "—"
-            cer_desc = ""
+            cer_label, cer_icon, cer_desc = "—", "—", ""
         
         # CS 指标解读
         if cs is not None:
             if cs >= 0.50:
-                cs_label = "Strong Conviction"
-                cs_icon = "✅"
-                cs_desc = "强信念"
+                cs_label, cs_icon, cs_desc = "Strong Conviction", "✅", "强信念"
             elif cs >= 0.25:
-                cs_label = "Moderate"
-                cs_icon = "➖"
-                cs_desc = "中等信念"
+                cs_label, cs_icon, cs_desc = "Moderate", "➖", "中等信念"
             else:
-                cs_label = "Weak"
-                cs_icon = "⚠️"
-                cs_desc = "弱信念"
+                cs_label, cs_icon, cs_desc = "Weak", "⚠️", "弱信念"
         else:
-            cs_label = "—"
-            cs_icon = "—"
-            cs_desc = ""
+            cs_label, cs_icon, cs_desc = "—", "—", ""
         
         with col1:
             with st.container(border=True):
@@ -582,7 +548,6 @@ if 'market' in query_params:
 <span style="color:#3b82f6;font-weight:700;font-size:16px;">UI</span>
 <span style="color:#495057;">Uncertainty Index:</span>
 <span style="font-weight:700;font-size:18px;">{f"{ui:.2f}" if ui is not None else "—"}</span>
-<span style="color:#868e96;font-size:13px;">{ui_desc}</span>
 </div>
 <div style="display:flex;align-items:center;gap:6px;">
 <span>{ui_icon}</span>
@@ -599,7 +564,6 @@ if 'market' in query_params:
 <span style="color:#8b5cf6;font-weight:700;font-size:16px;">CER</span>
 <span style="color:#495057;">Convergence Rate:</span>
 <span style="font-weight:700;font-size:18px;">{f"{cer:.2f}" if cer is not None else "—"}</span>
-<span style="color:#868e96;font-size:13px;">{cer_desc}</span>
 </div>
 <div style="display:flex;align-items:center;gap:6px;">
 <span>{cer_icon}</span>
@@ -616,7 +580,6 @@ if 'market' in query_params:
 <span style="color:#f59e0b;font-weight:700;font-size:16px;">CS</span>
 <span style="color:#495057;">Conviction Score:</span>
 <span style="font-weight:700;font-size:18px;">{f"{cs:.2f}" if cs is not None else "—"}</span>
-<span style="color:#868e96;font-size:13px;">{cs_desc}</span>
 </div>
 <div style="display:flex;align-items:center;gap:6px;">
 <span>{cs_icon}</span>
@@ -748,22 +711,8 @@ else:
     elif sort_option == "Price (Low to High)":
         filtered_markets.sort(key=lambda x: x['current_price'])
     
-    # 显示数量 + 调试信息
+    # 显示数量
     st.markdown(f"**Showing {len(filtered_markets)} markets**")
-    
-    # 调试：显示实际状态分布
-    status_dist = {}
-    impulse_dist = {}
-    for m in markets:
-        s = m.get('status') or 'NULL'
-        imp = m.get('impulse_tag') or 'None'
-        status_dist[s] = status_dist.get(s, 0) + 1
-        if imp != 'None':
-            impulse_dist[imp] = impulse_dist.get(imp, 0) + 1
-    
-    with st.expander("🔍 Debug: Data Distribution", expanded=False):
-        st.write("**Status values in database:**", status_dist)
-        st.write("**Impulse tags in database:**", impulse_dist if impulse_dist else "No impulse tags found")
     
     # === 分页 ===
     CARDS_PER_PAGE = 20
@@ -783,26 +732,21 @@ else:
         
         for i, market in enumerate(row_markets):
             with cols[i]:
-                # 清理状态值
                 status = clean_status(market.get('status'))
                 bg, color = STATUS_COLORS.get(status, STATUS_COLORS['Unknown'])
                 
                 impulse = market.get('impulse_tag')
                 title_short = market['title'][:50] + '...' if len(market['title']) > 50 else market['title']
                 
-                # 用 st.container 加边框
                 with st.container(border=True):
-                    # 标题 - 固定两行高度
                     st.markdown(f"<div style='height:48px;overflow:hidden;font-weight:600;font-size:14px;line-height:1.4;'>{title_short}</div>", unsafe_allow_html=True)
                     
-                    # 状态标签行
                     tags = f'<span style="background:{bg};color:{color};padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;display:inline-block;margin-right:4px;">{status}</span>'
                     if impulse:
                         imp_bg, imp_color = IMPULSE_COLORS.get(impulse, ('#e9ecef', '#868e96'))
                         tags += f'<span style="background:{imp_bg};color:{imp_color};padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;display:inline-block;">{impulse}</span>'
                     st.markdown(f"<div style='margin:8px 0;'>{tags}</div>", unsafe_allow_html=True)
                     
-                    # 价格和交易量
                     st.markdown(f"""
 <div style='display:flex;justify-content:space-between;align-items:center;margin:8px 0;'>
 <span style='font-size:22px;font-weight:700;'>{market['current_price']*100:.0f}%</span>
@@ -810,10 +754,8 @@ else:
 </div>
 """, unsafe_allow_html=True)
                     
-                    # 分类
                     st.markdown(f"<span style='background:#f1f3f5;color:#868e96;padding:3px 8px;border-radius:6px;font-size:11px;'>{market['category']}</span>", unsafe_allow_html=True)
                     
-                    # View 按钮
                     if st.button("View →", key=f"view_{market['token_id']}", use_container_width=True):
                         st.query_params['market'] = market['token_id']
                         st.rerun()
@@ -837,3 +779,181 @@ else:
                 if st.button("Next →"):
                     st.session_state.current_page += 1
                     st.rerun()
+
+
+# ==================== Helper Functions ====================
+
+def _render_fallback_profile_evolution(phase_histograms, current_price):
+    """Fallback: 使用基础 Plotly 绘制 4 个 Phase"""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    
+    fig = make_subplots(
+        rows=1, cols=4,
+        subplot_titles=['Phase 1', 'Phase 2', 'Phase 3', 'Phase 4'],
+        shared_yaxes=True,
+        horizontal_spacing=0.02
+    )
+    
+    all_prices = []
+    for histogram in phase_histograms.values():
+        if histogram:
+            all_prices.extend(histogram.keys())
+    if current_price:
+        all_prices.append(current_price)
+    
+    if all_prices:
+        y_min, y_max = min(all_prices) - 0.02, max(all_prices) + 0.02
+    else:
+        y_min, y_max = 0, 1
+    
+    for phase_num in range(1, 5):
+        histogram = phase_histograms.get(phase_num, {})
+        
+        if not histogram:
+            fig.add_annotation(
+                text="No Data",
+                xref=f"x{phase_num}" if phase_num > 1 else "x",
+                yref="y",
+                x=0.5, y=(y_min + y_max) / 2,
+                showarrow=False,
+                font=dict(size=14, color='#9ca3af')
+            )
+            continue
+        
+        sorted_prices = sorted(histogram.keys())
+        buy_vols = [histogram[p].get('buy', 0) for p in sorted_prices]
+        sell_vols = [histogram[p].get('sell', 0) for p in sorted_prices]
+        total_vols = [histogram[p].get('volume', 0) or (histogram[p].get('buy', 0) + histogram[p].get('sell', 0)) for p in sorted_prices]
+        
+        # POC
+        poc_idx = total_vols.index(max(total_vols)) if total_vols else 0
+        poc_price = sorted_prices[poc_idx] if sorted_prices else None
+        
+        # Buy bars (green)
+        fig.add_trace(go.Bar(
+            y=sorted_prices, x=buy_vols, orientation='h',
+            marker_color='rgba(34, 197, 94, 0.8)',
+            showlegend=False
+        ), row=1, col=phase_num)
+        
+        # Sell bars (red)
+        fig.add_trace(go.Bar(
+            y=sorted_prices, x=sell_vols, orientation='h',
+            marker_color='rgba(239, 68, 68, 0.8)',
+            showlegend=False
+        ), row=1, col=phase_num)
+        
+        # POC bar (blue)
+        if poc_price:
+            fig.add_trace(go.Bar(
+                y=[poc_price], x=[max(total_vols)], orientation='h',
+                marker_color='rgba(59, 130, 246, 1.0)',
+                showlegend=False
+            ), row=1, col=phase_num)
+    
+    # Current price line
+    if current_price:
+        for col in range(1, 5):
+            fig.add_hline(y=current_price, line_dash="dash", line_color="#22c55e", line_width=2, row=1, col=col)
+    
+    fig.update_layout(
+        height=450, barmode='overlay', showlegend=False,
+        margin=dict(l=60, r=40, t=60, b=40),
+        plot_bgcolor='#fafafa'
+    )
+    
+    fig.update_yaxes(range=[y_min, y_max], tickformat='.0%', row=1, col=1)
+    for col in range(2, 5):
+        fig.update_yaxes(range=[y_min, y_max], showticklabels=False, row=1, col=col)
+    
+    for col in range(1, 5):
+        fig.update_xaxes(showticklabels=False, showgrid=False, row=1, col=col)
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_legacy_band_evolution(lifecycle_phases, current_price, market):
+    """Legacy: 旧的 Consensus Band Evolution 椭圆图"""
+    import plotly.graph_objects as go
+    
+    fig = go.Figure()
+    phase_positions = [10, 30, 50, 70]
+    phase_width = 12
+    
+    valid_phases = []
+    for phase in lifecycle_phases:
+        if phase.get('is_valid') and phase['phase_number'] <= 4:
+            va_h = phase.get('va_high')
+            va_l = phase.get('va_low')
+            if va_h is not None and va_l is not None:
+                valid_phases.append({
+                    'num': phase['phase_number'],
+                    'va_high': va_h,
+                    'va_low': va_l,
+                    'poc': phase.get('poc'),
+                    'status': phase.get('status')
+                })
+    
+    if not valid_phases:
+        va_h = market.get('va_high')
+        va_l = market.get('va_low')
+        if va_h is not None and va_l is not None:
+            valid_phases = [{'num': 1, 'va_high': float(va_h), 'va_low': float(va_l), 'poc': None, 'status': market.get('status')}]
+    
+    for p in valid_phases:
+        idx = p['num'] - 1
+        if idx < len(phase_positions):
+            x_center = phase_positions[idx]
+            va_h = p['va_high'] * 100
+            va_l = p['va_low'] * 100
+            
+            shape_x, shape_y = [], []
+            steps = 20
+            for i in range(steps + 1):
+                t = i / steps
+                y = va_l + (va_h - va_l) * t
+                width_factor = 1 - (2 * t - 1) ** 2
+                width = phase_width * 0.5 * (0.3 + 0.7 * width_factor)
+                shape_x.append(x_center - width)
+                shape_y.append(y)
+            for i in range(steps, -1, -1):
+                t = i / steps
+                y = va_l + (va_h - va_l) * t
+                width_factor = 1 - (2 * t - 1) ** 2
+                width = phase_width * 0.5 * (0.3 + 0.7 * width_factor)
+                shape_x.append(x_center + width)
+                shape_y.append(y)
+            
+            fig.add_trace(go.Scatter(
+                x=shape_x, y=shape_y, fill='toself',
+                fillcolor='rgba(59, 130, 246, 0.3)',
+                line=dict(color='rgba(59, 130, 246, 0.8)', width=2),
+                name=f'Phase {p["num"]}',
+                hoverinfo='text',
+                hovertext=f'Phase {p["num"]}<br>Band: {va_l:.0f}% - {va_h:.0f}%'
+            ))
+            
+            if p.get('poc'):
+                poc_y = p['poc'] * 100
+                fig.add_shape(
+                    type="line",
+                    x0=x_center - phase_width * 0.4, x1=x_center + phase_width * 0.4,
+                    y0=poc_y, y1=poc_y,
+                    line=dict(color='rgba(30, 64, 175, 0.9)', width=3)
+                )
+    
+    if current_price and valid_phases:
+        fig.add_hline(y=current_price * 100, line_dash="dash", line_color="#22c55e", line_width=2,
+                      annotation_text=f"Current: {current_price*100:.0f}%", annotation_position="right")
+    
+    for i, pos in enumerate(phase_positions):
+        fig.add_annotation(x=pos, y=-8, text=f"Phase {i+1}", showarrow=False, font=dict(size=12, color='#495057'))
+    
+    fig.update_layout(
+        xaxis=dict(range=[0, 100], showticklabels=False, showgrid=False, zeroline=False),
+        yaxis=dict(title="Probability %", range=[-15, 105], ticksuffix="%", gridcolor='rgba(0,0,0,0.1)'),
+        height=350, showlegend=False, margin=dict(l=50, r=50, t=20, b=50), plot_bgcolor='#f8fafc'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
