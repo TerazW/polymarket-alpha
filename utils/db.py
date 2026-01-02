@@ -56,7 +56,7 @@ def init_db():
     from sqlalchemy import text
     
     with engine.connect() as conn:
-        # Markets table - includes closed, active, categories fields
+        # Markets table - includes closed, active, categories, event info fields
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS markets (
                 token_id VARCHAR(100) PRIMARY KEY,
@@ -65,6 +65,8 @@ def init_db():
                 description TEXT,
                 category VARCHAR(50),
                 categories TEXT,
+                event_id VARCHAR(100),
+                event_title TEXT,
                 current_price DECIMAL(10,4),
                 volume_24h DECIMAL(20,8),
                 resolution_date TIMESTAMP,
@@ -178,6 +180,8 @@ def migrate_schema():
                 ("markets.closed", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS closed BOOLEAN DEFAULT FALSE"),
                 ("markets.active", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE"),
                 ("markets.categories", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS categories TEXT"),
+                ("markets.event_id", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS event_id VARCHAR(100)"),
+                ("markets.event_title", "ALTER TABLE markets ADD COLUMN IF NOT EXISTS event_title TEXT"),
                 
                 # Daily metrics - Profile fields
                 ("daily_metrics.band_width", "ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS band_width DECIMAL(10,6)"),
@@ -331,6 +335,8 @@ def migrate_schema():
                 ("markets", "closed", "ALTER TABLE markets ADD COLUMN closed BOOLEAN DEFAULT FALSE"),
                 ("markets", "active", "ALTER TABLE markets ADD COLUMN active BOOLEAN DEFAULT TRUE"),
                 ("markets", "categories", "ALTER TABLE markets ADD COLUMN categories TEXT"),
+                ("markets", "event_id", "ALTER TABLE markets ADD COLUMN event_id VARCHAR(100)"),
+                ("markets", "event_title", "ALTER TABLE markets ADD COLUMN event_title TEXT"),
                 
                 # Daily metrics - Profile
                 ("daily_metrics", "band_width", "ALTER TABLE daily_metrics ADD COLUMN band_width DECIMAL(10,6)"),
