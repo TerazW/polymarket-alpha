@@ -46,37 +46,37 @@ header {visibility: hidden;}
     background: #f8f9fa;
 }
 
-/* Stat cards */
+/* Stat cards (static, for volume card) */
 .stat-card {
     background: white;
     border-radius: 12px;
     padding: 16px 20px;
     border: 1px solid #e9ecef;
     text-align: center;
-    transition: all 0.2s;
 }
 
-.stat-card:hover {
-    border-color: #228be6;
-    box-shadow: 0 2px 8px rgba(34,139,230,0.15);
-}
-
-/* Filter buttons under stat cards */
-.stColumn [data-testid="stButton"] button {
+/* Clickable stat card buttons */
+.stat-btn button {
     width: 100% !important;
-    background: transparent !important;
-    border: 1px dashed #dee2e6 !important;
-    color: #868e96 !important;
-    font-size: 11px !important;
-    padding: 2px 8px !important;
-    min-height: 24px !important;
-    height: 24px !important;
-    border-radius: 6px !important;
+    background: white !important;
+    border: 1px solid #e9ecef !important;
+    border-radius: 12px !important;
+    padding: 16px 20px !important;
+    min-height: 80px !important;
+    transition: all 0.2s !important;
 }
-.stColumn [data-testid="stButton"] button:hover {
-    background: #e7f5ff !important;
+.stat-btn button:hover {
     border-color: #228be6 !important;
-    color: #228be6 !important;
+    box-shadow: 0 2px 8px rgba(34,139,230,0.15) !important;
+}
+.stat-btn-selected button {
+    width: 100% !important;
+    background: white !important;
+    border: 2px solid #228be6 !important;
+    border-radius: 12px !important;
+    padding: 16px 20px !important;
+    min-height: 80px !important;
+    box-shadow: 0 2px 8px rgba(34,139,230,0.2) !important;
 }
 
 /* Market cards */
@@ -890,55 +890,43 @@ else:
 
     with col1:
         selected = st.session_state.status_filter is None
-        st.markdown(f"""
-<div class="stat-card" style="{get_card_style(selected)}">
-<div style="font-size:28px;font-weight:700;color:#1a1a2e;">{len(markets)}</div>
-<div style="color:#868e96;font-size:13px;">Active Markets</div>
-</div>
-""", unsafe_allow_html=True)
-        if st.button("✓ Show All" if selected else "Show All", key="filter_all", use_container_width=True):
+        btn_class = "stat-btn-selected" if selected else "stat-btn"
+        st.markdown(f'<div class="{btn_class}">', unsafe_allow_html=True)
+        if st.button(f"**{len(markets)}**\n\nActive Markets", key="filter_all", use_container_width=True):
             st.session_state.status_filter = None
             st.session_state.current_page = 1
             st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with col2:
         selected = st.session_state.status_filter == 'Informed'
-        st.markdown(f"""
-<div class="stat-card" style="{get_card_style(selected)}">
-<div style="font-size:28px;font-weight:700;color:#2b8a3e;">{status_stats['Informed']}</div>
-<div style="color:#868e96;font-size:13px;">Informed</div>
-</div>
-""", unsafe_allow_html=True)
-        if st.button("✓ Filter" if selected else "Filter", key="filter_informed", use_container_width=True):
+        btn_class = "stat-btn-selected" if selected else "stat-btn"
+        st.markdown(f'<div class="{btn_class}">', unsafe_allow_html=True)
+        if st.button(f"🟢 **{status_stats['Informed']}**\n\nInformed", key="filter_informed", use_container_width=True):
             st.session_state.status_filter = 'Informed'
             st.session_state.current_page = 1
             st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with col3:
         selected = st.session_state.status_filter == 'Fragmented'
-        st.markdown(f"""
-<div class="stat-card" style="{get_card_style(selected)}">
-<div style="font-size:28px;font-weight:700;color:#e67700;">{status_stats['Fragmented']}</div>
-<div style="color:#868e96;font-size:13px;">Fragmented</div>
-</div>
-""", unsafe_allow_html=True)
-        if st.button("✓ Filter" if selected else "Filter", key="filter_fragmented", use_container_width=True):
+        btn_class = "stat-btn-selected" if selected else "stat-btn"
+        st.markdown(f'<div class="{btn_class}">', unsafe_allow_html=True)
+        if st.button(f"🟡 **{status_stats['Fragmented']}**\n\nFragmented", key="filter_fragmented", use_container_width=True):
             st.session_state.status_filter = 'Fragmented'
             st.session_state.current_page = 1
             st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with col4:
         selected = st.session_state.status_filter == 'Noisy'
-        st.markdown(f"""
-<div class="stat-card" style="{get_card_style(selected)}">
-<div style="font-size:28px;font-weight:700;color:#c92a2a;">{status_stats['Noisy']}</div>
-<div style="color:#868e96;font-size:13px;">Noisy</div>
-</div>
-""", unsafe_allow_html=True)
-        if st.button("✓ Filter" if selected else "Filter", key="filter_noisy", use_container_width=True):
+        btn_class = "stat-btn-selected" if selected else "stat-btn"
+        st.markdown(f'<div class="{btn_class}">', unsafe_allow_html=True)
+        if st.button(f"🔴 **{status_stats['Noisy']}**\n\nNoisy", key="filter_noisy", use_container_width=True):
             st.session_state.status_filter = 'Noisy'
             st.session_state.current_page = 1
             st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with col5:
         total_volume = sum(m['volume_24h'] for m in markets)
