@@ -53,6 +53,23 @@ header {visibility: hidden;}
     padding: 16px 20px;
     border: 1px solid #e9ecef;
     text-align: center;
+    transition: all 0.2s;
+}
+
+.stat-card:hover {
+    border-color: #228be6;
+    box-shadow: 0 2px 8px rgba(34,139,230,0.15);
+}
+
+/* Hide filter button text, make clickable area */
+[data-testid="stButton"] button[kind="secondary"] {
+    height: 6px !important;
+    min-height: 6px !important;
+    padding: 0 !important;
+    font-size: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    margin-top: -8px !important;
 }
 
 /* Market cards */
@@ -851,41 +868,71 @@ else:
     # === Header ===
     st.markdown("## 📊 Market Sensemaking")
     
-    # === Statistics Cards ===
+    # === Status Filter State ===
+    if 'status_filter' not in st.session_state:
+        st.session_state.status_filter = None
+
+    # === Statistics Cards (Clickable) ===
     col1, col2, col3, col4, col5 = st.columns(5)
-    
+
+    # Helper function for card style
+    def get_card_style(is_selected):
+        if is_selected:
+            return "border: 2px solid #228be6; box-shadow: 0 2px 8px rgba(34,139,230,0.2);"
+        return ""
+
     with col1:
+        selected = st.session_state.status_filter is None
         st.markdown(f"""
-<div class="stat-card">
+<div class="stat-card" style="cursor:pointer;{get_card_style(selected)}">
 <div style="font-size:28px;font-weight:700;color:#1a1a2e;">{len(markets)}</div>
 <div style="color:#868e96;font-size:13px;">Active Markets</div>
 </div>
 """, unsafe_allow_html=True)
-    
+        if st.button("All", key="filter_all", use_container_width=True, type="secondary"):
+            st.session_state.status_filter = None
+            st.session_state.current_page = 1
+            st.rerun()
+
     with col2:
+        selected = st.session_state.status_filter == 'Informed'
         st.markdown(f"""
-<div class="stat-card">
+<div class="stat-card" style="cursor:pointer;{get_card_style(selected)}">
 <div style="font-size:28px;font-weight:700;color:#2b8a3e;">{status_stats['Informed']}</div>
 <div style="color:#868e96;font-size:13px;">Informed</div>
 </div>
 """, unsafe_allow_html=True)
-    
+        if st.button("Informed", key="filter_informed", use_container_width=True, type="secondary"):
+            st.session_state.status_filter = 'Informed'
+            st.session_state.current_page = 1
+            st.rerun()
+
     with col3:
+        selected = st.session_state.status_filter == 'Fragmented'
         st.markdown(f"""
-<div class="stat-card">
+<div class="stat-card" style="cursor:pointer;{get_card_style(selected)}">
 <div style="font-size:28px;font-weight:700;color:#e67700;">{status_stats['Fragmented']}</div>
 <div style="color:#868e96;font-size:13px;">Fragmented</div>
 </div>
 """, unsafe_allow_html=True)
-    
+        if st.button("Fragmented", key="filter_fragmented", use_container_width=True, type="secondary"):
+            st.session_state.status_filter = 'Fragmented'
+            st.session_state.current_page = 1
+            st.rerun()
+
     with col4:
+        selected = st.session_state.status_filter == 'Noisy'
         st.markdown(f"""
-<div class="stat-card">
+<div class="stat-card" style="cursor:pointer;{get_card_style(selected)}">
 <div style="font-size:28px;font-weight:700;color:#c92a2a;">{status_stats['Noisy']}</div>
 <div style="color:#868e96;font-size:13px;">Noisy</div>
 </div>
 """, unsafe_allow_html=True)
-    
+        if st.button("Noisy", key="filter_noisy", use_container_width=True, type="secondary"):
+            st.session_state.status_filter = 'Noisy'
+            st.session_state.current_page = 1
+            st.rerun()
+
     with col5:
         total_volume = sum(m['volume_24h'] for m in markets)
         st.markdown(f"""
@@ -912,13 +959,17 @@ else:
     
     # Apply filters
     filtered_markets = markets
-    
+
+    # Status filter (from stat cards)
+    if st.session_state.status_filter:
+        filtered_markets = [m for m in filtered_markets if clean_status(m.get('status')) == st.session_state.status_filter]
+
     if search_query:
         filtered_markets = [m for m in filtered_markets if search_query.lower() in m['title'].lower()]
-    
+
     if selected_category != "All Categories":
         filtered_markets = [m for m in filtered_markets if m['category'] == selected_category or selected_category in m.get('categories', [])]
-    
+
     # Apply sorting
     if sort_option == "Volume (High to Low)":
         filtered_markets.sort(key=lambda x: x['volume_24h'], reverse=True)
@@ -929,8 +980,9 @@ else:
     elif sort_option == "Price (Low to High)":
         filtered_markets.sort(key=lambda x: x['current_price'])
     
-    # Display count
-    st.markdown(f"**Showing {len(filtered_markets)} markets**")
+    # Display count with filter indicator
+    filter_text = f" ({st.session_state.status_filter})" if st.session_state.status_filter else ""
+    st.markdown(f"**Showing {len(filtered_markets)} markets{filter_text}**")
     
     # === Pagination ===
     CARDS_PER_PAGE = 20
