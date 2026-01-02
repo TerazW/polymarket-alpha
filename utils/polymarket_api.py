@@ -187,21 +187,25 @@ class PolymarketAPI:
                     break
                 
                 events_fetched += len(events)
-                
+
                 # Extract markets from events.
                 for event in events:
                     if 'markets' in event and event['markets']:
+                        # Get event info for all markets in this event.
+                        evt_id = event.get('id')
+                        evt_title = event.get('title')
+
                         for market_raw in event['markets']:
                             # Check volume.
                             volume = float(market_raw.get('volume24hr', 0))
                             if volume < min_volume_24h:
                                 continue
-                            
-                            # Extract market data.
-                            market = self._extract_market_from_event(market_raw)
+
+                            # Extract market data with event info.
+                            market = self._extract_market_from_event(market_raw, event_id=evt_id, event_title=evt_title)
                             if market:
                                 markets.append(market)
-                
+
                 # Stop if event limit reached.
                 if max_events and events_fetched >= max_events:
                     break
@@ -276,21 +280,25 @@ class PolymarketAPI:
                 
                 if not events:
                     break
-                
+
                 # Extract markets from events.
                 for event in events:
                     if 'markets' in event and event['markets']:
+                        # Get event info for all markets in this event.
+                        evt_id = event.get('id')
+                        evt_title = event.get('title')
+
                         for market_raw in event['markets']:
                             # Check volume.
                             volume = float(market_raw.get('volume24hr', 0))
                             if volume < min_volume_24h:
                                 continue
-                            
-                            # Extract market data.
-                            market = self._extract_market_from_event(market_raw)
+
+                            # Extract market data with event info.
+                            market = self._extract_market_from_event(market_raw, event_id=evt_id, event_title=evt_title)
                             if market:
                                 markets.append(market)
-                
+
                 # Stop if limit reached.
                 if limit and len(markets) >= limit:
                     markets = markets[:limit]
@@ -308,7 +316,7 @@ class PolymarketAPI:
         
         return markets
     
-    def _extract_market_from_event(self, market: Dict) -> Optional[Dict]:
+    def _extract_market_from_event(self, market: Dict, event_id: str = None, event_title: str = None) -> Optional[Dict]:
         """Extract standard fields from an event market."""
         try:
             condition_id = market.get('conditionId', '')
@@ -375,6 +383,8 @@ class PolymarketAPI:
                 'closed': market.get('closed', False),
                 'category': 'Other',  # Overridden later.
                 'categories': [],     # Filled later.
+                'event_id': event_id,
+                'event_title': event_title,
             }
             
         except Exception as e:

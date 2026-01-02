@@ -177,7 +177,7 @@ def get_all_markets():
     session = get_session()
     try:
         query = text("""
-            SELECT 
+            SELECT
                 m.token_id,
                 m.market_id,
                 m.title,
@@ -201,9 +201,10 @@ def get_all_markets():
                 d.trade_count,
                 d.ecr,
                 d.acr,
-                d.edge_zone
+                d.edge_zone,
+                m.event_title
             FROM markets m
-            LEFT JOIN daily_metrics d ON m.token_id = d.token_id 
+            LEFT JOIN daily_metrics d ON m.token_id = d.token_id
                 AND d.date = (SELECT MAX(date) FROM daily_metrics WHERE token_id = m.token_id)
             WHERE m.closed = false OR m.closed IS NULL
             ORDER BY m.volume_24h DESC
@@ -244,6 +245,7 @@ def get_all_markets():
                 'ecr': float(row[21]) if row[21] is not None else None,
                 'acr': float(row[22]) if row[22] is not None else None,
                 'edge_zone': bool(row[23]) if row[23] is not None else False,
+                'event_title': row[24] if len(row) > 24 else None,
             })
         
         return markets
@@ -606,7 +608,12 @@ if 'market' in query_params:
         # === Header: Market Title + Status ===
         status = clean_status(market.get('status'))
         bg, color = STATUS_COLORS.get(status, STATUS_COLORS['Unknown'])
-        
+
+        # Show event_title if exists and different from market title
+        event_title = market.get('event_title')
+        if event_title and event_title.lower() != market['title'].lower():
+            st.markdown(f"<div style='font-size:13px;color:#868e96;margin-bottom:4px;'>📌 {event_title}</div>", unsafe_allow_html=True)
+
         st.markdown(f"### {market['title']}")
         
         # Status row
@@ -999,12 +1006,22 @@ else:
             with cols[i]:
                 status = clean_status(market.get('status'))
                 bg, color = STATUS_COLORS.get(status, STATUS_COLORS['Unknown'])
-                
+
                 impulse = market.get('impulse_tag')
                 title_short = market['title'][:50] + '...' if len(market['title']) > 50 else market['title']
-                
+
+                # Show event_title if exists and different from market title
+                event_title = market.get('event_title')
+                show_event_title = event_title and event_title.lower() != market['title'].lower()
+
                 with st.container(border=True):
-                    st.markdown(f"<div style='height:48px;overflow:hidden;font-weight:600;font-size:14px;line-height:1.4;'>{title_short}</div>", unsafe_allow_html=True)
+                    # Event title (small, gray, above market title)
+                    if show_event_title:
+                        event_title_short = event_title[:45] + '...' if len(event_title) > 45 else event_title
+                        st.markdown(f"<div style='font-size:11px;color:#868e96;margin-bottom:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;'>📌 {event_title_short}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div style='height:40px;overflow:hidden;font-weight:600;font-size:14px;line-height:1.4;'>{title_short}</div>", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"<div style='height:48px;overflow:hidden;font-weight:600;font-size:14px;line-height:1.4;'>{title_short}</div>", unsafe_allow_html=True)
                     
                     tags = f'<span style="background:{bg};color:{color};padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;display:inline-block;margin-right:4px;">{status}</span>'
                     if impulse:

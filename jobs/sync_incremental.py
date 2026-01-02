@@ -280,6 +280,8 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
         volume_24h = market['volume_24h']
         category = market.get('category', 'Other')
         categories = market.get('categories', [category])
+        event_id = market.get('event_id')
+        event_title = market.get('event_title')
         
         # Categories to JSON string
         categories_json = json.dumps(categories) if categories else json.dumps([category])
@@ -301,7 +303,8 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
         if not market_trades:
             # No trades - save basic info only
             save_market_basic(session, token_id, condition_id, question,
-                            current_price, volume_24h, category, categories_json)
+                            current_price, volume_24h, category, categories_json,
+                            event_id, event_title)
             return True
         
         trades_24h = filter_trades_by_time(market_trades, hours=24)
@@ -311,7 +314,8 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
         
         if not histogram_all:
             save_market_basic(session, token_id, condition_id, question,
-                            current_price, volume_24h, category, categories_json)
+                            current_price, volume_24h, category, categories_json,
+                            event_id, event_title)
             return True
         
         # === Calculate Profile Metrics ===
@@ -392,11 +396,11 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
         
         # Update markets table (DO NOT hardcode closed/active!)
         session.execute(text("""
-            INSERT INTO markets 
-            (token_id, market_id, title, current_price, volume_24h, 
-             category, categories, updated_at)
-            VALUES (:tid, :mid, :title, :price, :vol, 
-                    :cat, :cats, :now)
+            INSERT INTO markets
+            (token_id, market_id, title, current_price, volume_24h,
+             category, categories, event_id, event_title, updated_at)
+            VALUES (:tid, :mid, :title, :price, :vol,
+                    :cat, :cats, :eid, :etitle, :now)
             ON CONFLICT (token_id) DO UPDATE SET
                 market_id = EXCLUDED.market_id,
                 title = EXCLUDED.title,
@@ -404,6 +408,8 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
                 volume_24h = EXCLUDED.volume_24h,
                 category = EXCLUDED.category,
                 categories = EXCLUDED.categories,
+                event_id = EXCLUDED.event_id,
+                event_title = EXCLUDED.event_title,
                 updated_at = EXCLUDED.updated_at
         """), {
             'tid': token_id,
@@ -413,6 +419,8 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
             'vol': volume_24h,
             'cat': category,
             'cats': categories_json,
+            'eid': event_id,
+            'etitle': event_title,
             'now': datetime.now()
         })
         
@@ -486,15 +494,16 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
 
 
 def save_market_basic(session, token_id, condition_id, question,
-                      current_price, volume_24h, category, categories_json):
+                      current_price, volume_24h, category, categories_json,
+                      event_id=None, event_title=None):
     """Save basic market info (when no trade data available)"""
     try:
         session.execute(text("""
-            INSERT INTO markets 
-            (token_id, market_id, title, current_price, volume_24h, 
-             category, categories, updated_at)
-            VALUES (:tid, :mid, :title, :price, :vol, 
-                    :cat, :cats, :now)
+            INSERT INTO markets
+            (token_id, market_id, title, current_price, volume_24h,
+             category, categories, event_id, event_title, updated_at)
+            VALUES (:tid, :mid, :title, :price, :vol,
+                    :cat, :cats, :eid, :etitle, :now)
             ON CONFLICT (token_id) DO UPDATE SET
                 market_id = EXCLUDED.market_id,
                 title = EXCLUDED.title,
@@ -502,6 +511,8 @@ def save_market_basic(session, token_id, condition_id, question,
                 volume_24h = EXCLUDED.volume_24h,
                 category = EXCLUDED.category,
                 categories = EXCLUDED.categories,
+                event_id = EXCLUDED.event_id,
+                event_title = EXCLUDED.event_title,
                 updated_at = EXCLUDED.updated_at
         """), {
             'tid': token_id,
@@ -511,6 +522,8 @@ def save_market_basic(session, token_id, condition_id, question,
             'vol': volume_24h,
             'cat': category,
             'cats': categories_json,
+            'eid': event_id,
+            'etitle': event_title,
             'now': datetime.now()
         })
         session.commit()
