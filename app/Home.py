@@ -61,15 +61,22 @@ header {visibility: hidden;}
     box-shadow: 0 2px 8px rgba(34,139,230,0.15);
 }
 
-/* Hide filter button text, make clickable area */
-[data-testid="stButton"] button[kind="secondary"] {
-    height: 6px !important;
-    min-height: 6px !important;
-    padding: 0 !important;
-    font-size: 0 !important;
+/* Filter buttons under stat cards */
+.stColumn [data-testid="stButton"] button {
+    width: 100% !important;
     background: transparent !important;
-    border: none !important;
-    margin-top: -8px !important;
+    border: 1px dashed #dee2e6 !important;
+    color: #868e96 !important;
+    font-size: 11px !important;
+    padding: 2px 8px !important;
+    min-height: 24px !important;
+    height: 24px !important;
+    border-radius: 6px !important;
+}
+.stColumn [data-testid="stButton"] button:hover {
+    background: #e7f5ff !important;
+    border-color: #228be6 !important;
+    color: #228be6 !important;
 }
 
 /* Market cards */
@@ -884,12 +891,12 @@ else:
     with col1:
         selected = st.session_state.status_filter is None
         st.markdown(f"""
-<div class="stat-card" style="cursor:pointer;{get_card_style(selected)}">
+<div class="stat-card" style="{get_card_style(selected)}">
 <div style="font-size:28px;font-weight:700;color:#1a1a2e;">{len(markets)}</div>
 <div style="color:#868e96;font-size:13px;">Active Markets</div>
 </div>
 """, unsafe_allow_html=True)
-        if st.button("All", key="filter_all", use_container_width=True, type="secondary"):
+        if st.button("✓ Show All" if selected else "Show All", key="filter_all", use_container_width=True):
             st.session_state.status_filter = None
             st.session_state.current_page = 1
             st.rerun()
@@ -897,12 +904,12 @@ else:
     with col2:
         selected = st.session_state.status_filter == 'Informed'
         st.markdown(f"""
-<div class="stat-card" style="cursor:pointer;{get_card_style(selected)}">
+<div class="stat-card" style="{get_card_style(selected)}">
 <div style="font-size:28px;font-weight:700;color:#2b8a3e;">{status_stats['Informed']}</div>
 <div style="color:#868e96;font-size:13px;">Informed</div>
 </div>
 """, unsafe_allow_html=True)
-        if st.button("Informed", key="filter_informed", use_container_width=True, type="secondary"):
+        if st.button("✓ Filter" if selected else "Filter", key="filter_informed", use_container_width=True):
             st.session_state.status_filter = 'Informed'
             st.session_state.current_page = 1
             st.rerun()
@@ -910,12 +917,12 @@ else:
     with col3:
         selected = st.session_state.status_filter == 'Fragmented'
         st.markdown(f"""
-<div class="stat-card" style="cursor:pointer;{get_card_style(selected)}">
+<div class="stat-card" style="{get_card_style(selected)}">
 <div style="font-size:28px;font-weight:700;color:#e67700;">{status_stats['Fragmented']}</div>
 <div style="color:#868e96;font-size:13px;">Fragmented</div>
 </div>
 """, unsafe_allow_html=True)
-        if st.button("Fragmented", key="filter_fragmented", use_container_width=True, type="secondary"):
+        if st.button("✓ Filter" if selected else "Filter", key="filter_fragmented", use_container_width=True):
             st.session_state.status_filter = 'Fragmented'
             st.session_state.current_page = 1
             st.rerun()
@@ -923,12 +930,12 @@ else:
     with col4:
         selected = st.session_state.status_filter == 'Noisy'
         st.markdown(f"""
-<div class="stat-card" style="cursor:pointer;{get_card_style(selected)}">
+<div class="stat-card" style="{get_card_style(selected)}">
 <div style="font-size:28px;font-weight:700;color:#c92a2a;">{status_stats['Noisy']}</div>
 <div style="color:#868e96;font-size:13px;">Noisy</div>
 </div>
 """, unsafe_allow_html=True)
-        if st.button("Noisy", key="filter_noisy", use_container_width=True, type="secondary"):
+        if st.button("✓ Filter" if selected else "Filter", key="filter_noisy", use_container_width=True):
             st.session_state.status_filter = 'Noisy'
             st.session_state.current_page = 1
             st.rerun()
