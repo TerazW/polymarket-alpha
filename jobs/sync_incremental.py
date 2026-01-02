@@ -261,7 +261,7 @@ def mark_markets_as_closed(session, market_ids: list) -> int:
         session.commit()
         return result.rowcount
     except Exception as e:
-        print(f"  ⚠️ Could not mark as closed: {e}")
+        print(f"  Could not mark as closed: {e}")
         session.rollback()
         return 0
 
@@ -481,7 +481,7 @@ def sync_market(session, api: PolymarketAPI, market: dict) -> bool:
         
     except Exception as e:
         session.rollback()
-        print(f"  ❌ Error: {e}")
+        print(f"  Error: {e}")
         return False
 
 
@@ -516,7 +516,7 @@ def save_market_basic(session, token_id, condition_id, question,
         session.commit()
     except Exception as e:
         session.rollback()
-        print(f"  ⚠️ Basic save error: {e}")
+        print(f"  Basic save error: {e}")
 
 
 def incremental_sync(
@@ -547,17 +547,17 @@ def incremental_sync(
     
     try:
         print(f"\n{'='*70}")
-        print(f"🔄 Intelligent Incremental Sync v3")
+        print("Intelligent Incremental Sync v3")
         print(f"   Database: {'PostgreSQL' if IS_POSTGRES else 'SQLite'}")
         print(f"   Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*70}\n")
         
         # Step 0: Ensure schema is up to date
-        print("🔧 Step 0: Ensuring database schema...")
+        print("Step 0: Ensuring database schema...")
         migrate_schema()
         
         # Step 1: Fetch all active markets from API
-        print("📡 Step 1: Fetching all active markets from API...")
+        print("Step 1: Fetching all active markets from API...")
         
         if use_categories:
             api_markets = api.get_markets_by_categories(
@@ -573,22 +573,22 @@ def incremental_sync(
         print(f"   Found {len(api_markets)} active markets (volume > ${min_volume_24h})\n")
         
         # Step 2: Load markets from database
-        print("💾 Step 2: Loading markets from database...")
+        print("Step 2: Loading markets from database...")
         db_markets = get_active_markets_from_db(session)
         print(f"   Database has {len(db_markets)} active markets\n")
         
         # Step 3: Detect new markets
-        print("🆕 Step 3: Detecting new markets...")
+        print("Step 3: Detecting new markets...")
         new_markets = detect_new_markets(api_markets, db_markets)
         print(f"   Found {len(new_markets)} new markets\n")
         
         # Step 4: Detect closed/settled markets
-        print("🔚 Step 4: Detecting closed markets...")
+        print("Step 4: Detecting closed markets...")
         closed_market_ids = detect_closed_markets(api_markets, db_markets)
         print(f"   Found {len(closed_market_ids)} closed markets\n")
         
         # Step 5: Detect changed markets
-        print("🔄 Step 5: Detecting changed markets...")
+        print("Step 5: Detecting changed markets...")
         changed_markets = detect_changed_markets(
             api_markets, db_markets,
             volume_change_threshold, price_change_threshold
@@ -597,14 +597,14 @@ def incremental_sync(
         
         # Step 6: Mark closed markets
         if closed_market_ids:
-            print("📝 Step 6: Marking closed markets...")
+            print("Step 6: Marking closed markets...")
             marked = mark_markets_as_closed(session, closed_market_ids)
             stats['closed'] = marked
             print(f"   Marked {marked} markets as closed\n")
         
         # Step 7: Sync new markets
         if new_markets:
-            print(f"🆕 Step 7: Syncing {len(new_markets)} new markets...")
+            print(f"Step 7: Syncing {len(new_markets)} new markets...")
             for idx, market in enumerate(new_markets, 1):
                 cat = market.get('category', 'Other')
                 cats = market.get('categories', [])
@@ -613,10 +613,10 @@ def incremental_sync(
                 
                 if sync_market(session, api, market):
                     stats['new'] += 1
-                    print(f"    ✅ Synced")
+                    print("    Synced")
                 else:
                     stats['failed'] += 1
-                    print(f"    ❌ Failed")
+                    print("    Failed")
                 
                 if idx % 10 == 0:
                     time.sleep(2)
@@ -624,17 +624,17 @@ def incremental_sync(
         
         # Step 8: Update changed markets
         if changed_markets:
-            print(f"🔄 Step 8: Updating {len(changed_markets)} changed markets...")
+            print(f"Step 8: Updating {len(changed_markets)} changed markets...")
             for idx, market in enumerate(changed_markets, 1):
                 cat = market.get('category', 'Other')
                 print(f"  [{idx}/{len(changed_markets)}] [{cat}] {market['question'][:40]}...")
                 
                 if sync_market(session, api, market):
                     stats['updated'] += 1
-                    print(f"    ✅ Updated")
+                    print("    Updated")
                 else:
                     stats['failed'] += 1
-                    print(f"    ❌ Failed")
+                    print("    Failed")
                 
                 if idx % 10 == 0:
                     time.sleep(2)
@@ -645,13 +645,13 @@ def incremental_sync(
         
         # Print statistics
         print(f"\n{'='*70}")
-        print(f"📊 Sync Statistics:")
+        print("Sync Statistics:")
         print(f"{'='*70}")
-        print(f"🆕 New markets added: {stats['new']}")
-        print(f"🔄 Markets updated: {stats['updated']}")
-        print(f"🔚 Markets closed: {stats['closed']}")
-        print(f"✅ Markets unchanged: {stats['unchanged']}")
-        print(f"❌ Failed: {stats['failed']}")
+        print(f"New markets added: {stats['new']}")
+        print(f"Markets updated: {stats['updated']}")
+        print(f"Markets closed: {stats['closed']}")
+        print(f"Markets unchanged: {stats['unchanged']}")
+        print(f"Failed: {stats['failed']}")
         print(f"{'='*70}")
         
         # Category statistics
@@ -665,7 +665,7 @@ def incremental_sync(
             """)).fetchall()
             
             if cat_stats:
-                print(f"\n📂 Category Distribution (primary):")
+                print("\nCategory Distribution (primary):")
                 for cat, count in cat_stats:
                     print(f"   {cat or 'Other'}: {count}")
         except:
@@ -679,20 +679,20 @@ def incremental_sync(
                 AND categories != '[]'
                 AND (closed = false OR closed IS NULL)
             """)).scalar()
-            print(f"\n📊 Markets with category data: {result}")
+            print(f"\nMarkets with category data: {result}")
         except:
             pass
         
         total_active = session.execute(
             text("SELECT COUNT(*) FROM markets WHERE closed = false OR closed IS NULL")
         ).scalar()
-        print(f"\n📈 Total active markets in DB: {total_active}")
-        print(f"⏱️  Sync completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        print(f"\nTotal active markets in DB: {total_active}")
+        print(f"Sync completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         
         return stats
         
     except Exception as e:
-        print(f"\n❌ Sync failed: {e}")
+        print(f"\nSync failed: {e}")
         import traceback
         traceback.print_exc()
         session.rollback()

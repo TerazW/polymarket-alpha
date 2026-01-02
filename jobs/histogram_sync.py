@@ -1,17 +1,17 @@
 """
 Daily Histogram Sync Job
 
-将每日交易数据聚合为 histogram 存入数据库
-用于 Market Profile 可视化和历史对比
+Aggregate daily trades into a histogram and store it in the database.
+Used for Market Profile visualization and historical comparison.
 
-数据结构：
-- token_id: 市场 ID
-- date: 日期
-- price_bin: 价格档位
-- volume: 总成交量
-- aggressive_buy: 主动买入量
-- aggressive_sell: 主动卖出量
-- trade_count: 成交笔数
+Schema:
+- token_id: market ID
+- date: date
+- price_bin: price bucket
+- volume: total volume
+- aggressive_buy: aggressive buy volume
+- aggressive_sell: aggressive sell volume
+- trade_count: trade count
 """
 
 import sys
@@ -20,7 +20,7 @@ import argparse
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-# 添加项目根目录到 path
+# Add project root to path.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.db import engine, migrate_schema, IS_POSTGRES
@@ -29,7 +29,7 @@ from sqlalchemy import text
 
 
 def get_active_markets(limit: int = 100) -> list:
-    """获取活跃市场列表"""
+    """Get active markets."""
     with engine.connect() as conn:
         result = conn.execute(text("""
             SELECT token_id, market_id, title 
@@ -46,8 +46,8 @@ def aggregate_trades_to_histogram(
     tick_size: float = 0.01
 ) -> dict:
     """
-    将交易聚合为 histogram
-    
+    Aggregate trades into a histogram.
+
     Returns:
         {price_bin: {'volume': x, 'buy': y, 'sell': z, 'count': n}}
     """
@@ -64,20 +64,20 @@ def aggregate_trades_to_histogram(
             size = float(trade.get('size', 0))
             side = trade.get('side', '').upper()
             
-            # 价格分档
+            # Price binning.
             bin_price = round(price / tick_size) * tick_size
             bin_price = round(bin_price, 4)
             
             histogram[bin_price]['volume'] += size
             histogram[bin_price]['trade_count'] += 1
             
-            # 区分主动买卖
+            # Split aggressive buy/sell.
             if side == 'BUY':
                 histogram[bin_price]['aggressive_buy'] += size
             elif side == 'SELL':
                 histogram[bin_price]['aggressive_sell'] += size
             else:
-                # 如果没有 side，平均分配
+                # If side is missing, split evenly.
                 histogram[bin_price]['aggressive_buy'] += size / 2
                 histogram[bin_price]['aggressive_sell'] += size / 2
                 
@@ -88,11 +88,11 @@ def aggregate_trades_to_histogram(
 
 
 def save_histogram(
-    token_id: str, 
-    date: datetime.date, 
+    token_id: str,
+    date: datetime.date,
     histogram: dict
 ):
-    """保存 histogram 到数据库"""
+    """Save histogram to the database."""
     if not histogram:
         return 0
     
@@ -138,7 +138,7 @@ def save_histogram(
                     })
                 saved += 1
             except Exception as e:
-                print(f"    ⚠️ Error saving bin {price_bin}: {e}")
+                print(f"    Error saving bin {price_bin}: {e}")
         
         conn.commit()
     
@@ -147,8 +147,8 @@ def save_histogram(
 
 def get_histogram_from_db(token_id: str, date: datetime.date = None) -> dict:
     """
-    从数据库获取 histogram
-    
+    Fetch histogram from the database.
+
     Returns:
         {price_bin: {'volume': x, 'buy': y, 'sell': z, 'count': n}}
     """
@@ -182,9 +182,9 @@ def get_histogram_daterange(
     end_date: datetime.date
 ) -> dict:
     """
-    获取日期范围内的累积 histogram
-    
-    用于计算多天合并的 Market Profile
+    Fetch an aggregated histogram for a date range.
+
+    Used for multi-day Market Profile.
     """
     histogram = defaultdict(lambda: {
         'volume': 0.0,
@@ -230,40 +230,40 @@ def sync_market_histogram(
     date: datetime.date = None
 ) -> dict:
     """
-    同步单个市场的 histogram
-    
+    Sync histogram for a single market.
+
     Args:
-        api: PolymarketAPI 实例
-        token_id: 用于存储的 token ID
-        market_id: 用于 API 查询的 condition ID（如果为 None，使用 token_id）
-        date: 日期
-    
+        api: PolymarketAPI instance
+        token_id: token ID to store
+        market_id: condition ID for API (defaults to token_id)
+        date: date to sync
+
     Returns:
         {'bins': n, 'volume': x, 'trades': y}
     """
     if date is None:
         date = datetime.now().date()
     
-    # 用于 API 查询的 ID
+    # ID used for API query.
     query_id = market_id if market_id else token_id
     
-    # 获取当天的交易
+    # Fetch trades for the day.
     start_ts = int(datetime.combine(date, datetime.min.time()).timestamp() * 1000)
     end_ts = int(datetime.combine(date + timedelta(days=1), datetime.min.time()).timestamp() * 1000)
     
-    # 获取交易数据（使用 condition_id / market_id）
+    # Fetch trades (condition_id / market_id).
     trades = api.get_trades_for_market(query_id, limit=5000)
     
     if not trades:
         return {'bins': 0, 'volume': 0, 'trades': 0}
     
-    # 过滤当天交易
+    # Filter to day trades.
     day_trades = []
     for t in trades:
         ts = t.get('timestamp', 0)
         if isinstance(ts, str):
             ts = int(ts)
-        # 自适应 ms/s
+        # Auto-detect ms vs s.
         if ts < 1e12:
             ts = ts * 1000
         if start_ts <= ts < end_ts:
@@ -272,10 +272,10 @@ def sync_market_histogram(
     if not day_trades:
         return {'bins': 0, 'volume': 0, 'trades': 0}
     
-    # 聚合为 histogram
+    # Aggregate histogram.
     histogram = aggregate_trades_to_histogram(day_trades)
     
-    # 保存到数据库
+    # Save to database.
     bins_saved = save_histogram(token_id, date, histogram)
     
     total_volume = sum(d['volume'] for d in histogram.values())
@@ -295,19 +295,19 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("📊 Daily Histogram Sync")
+    print("Daily Histogram Sync")
     print("=" * 60)
     
-    # 迁移数据库
+    # Migrate database.
     migrate_schema()
     
-    # 解析日期
+    # Parse date.
     if args.date:
         target_date = datetime.strptime(args.date, '%Y-%m-%d').date()
     else:
         target_date = datetime.now().date()
     
-    # 确定要同步的日期范围
+    # Determine dates to sync.
     dates_to_sync = [target_date]
     if args.backfill > 0:
         for i in range(1, args.backfill + 1):
@@ -316,13 +316,13 @@ def main():
     print(f"\nDates to sync: {len(dates_to_sync)}")
     print(f"Markets limit: {args.markets}")
     
-    # 获取活跃市场
+    # Fetch active markets.
     markets = get_active_markets(args.markets)
     print(f"Active markets found: {len(markets)}")
     
     api = PolymarketAPI()
     
-    # 统计
+    # Stats.
     total_bins = 0
     total_volume = 0
     total_trades = 0
@@ -330,7 +330,7 @@ def main():
     error_count = 0
     
     for date in dates_to_sync:
-        print(f"\n📅 Syncing {date}")
+        print(f"\nSyncing {date}")
         print("-" * 40)
         
         for i, market in enumerate(markets):
@@ -342,22 +342,22 @@ def main():
                 result = sync_market_histogram(api, token_id, market_id, date)
                 
                 if result['bins'] > 0:
-                    print(f"  [{i+1}/{len(markets)}] ✅ {title}...")
+                    print(f"  [{i+1}/{len(markets)}] {title}...")
                     print(f"       Bins: {result['bins']}, Volume: ${result['volume']:.0f}, Trades: {result['trades']}")
                     total_bins += result['bins']
                     total_volume += result['volume']
                     total_trades += result['trades']
                     success_count += 1
                 else:
-                    print(f"  [{i+1}/{len(markets)}] ⏭️ {title}... (no trades)")
+                    print(f"  [{i+1}/{len(markets)}] {title}... (no trades)")
                     
             except Exception as e:
-                print(f"  [{i+1}/{len(markets)}] ❌ {title}... Error: {e}")
+                print(f"  [{i+1}/{len(markets)}] {title}... Error: {e}")
                 error_count += 1
     
-    # 总结
+    # Summary.
     print("\n" + "=" * 60)
-    print("📊 Summary")
+    print("Summary")
     print("=" * 60)
     print(f"Dates synced: {len(dates_to_sync)}")
     print(f"Markets processed: {success_count + error_count}")

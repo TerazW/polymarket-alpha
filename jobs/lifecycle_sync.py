@@ -1,13 +1,13 @@
 """
-Lifecycle Phases 同步脚本 v3
+Lifecycle Phases sync job v3.
 
-功能：
-1. 回填历史 phases（用 Data API）
-2. 更新当前 phase（用 WebSocket 数据如果有）
-3. 门槛检查：不达标标记为 insufficient
-4. 【新增】保存每个 Phase 的 histogram 到 phase_histogram 表
+Features:
+1. Backfill historical phases (Data API)
+2. Update current phase (use WebSocket data when available)
+3. Threshold checks: mark insufficient data
+4. Save per-phase histograms to phase_histogram
 
-运行方式：
+Usage:
     python jobs/lifecycle_sync.py --markets 100
     python jobs/lifecycle_sync.py --markets 100 --backfill
     python jobs/lifecycle_sync.py --markets 100 --backfill --save-histogram
@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from pathlib import Path
 
-# 获取项目根目录并添加到 sys.path
+# Add project root to sys.path.
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent
 if str(project_root) not in sys.path:
@@ -44,7 +44,7 @@ from utils.lifecycle import (
     migrate_lifecycle_table,
 )
 
-# 新增：导入 phase_histogram 相关函数
+# Optional: phase_histogram helpers.
 try:
     from utils.phase_histogram import (
         save_phase_histogram,
@@ -53,11 +53,11 @@ try:
     HISTOGRAM_AVAILABLE = True
 except ImportError:
     HISTOGRAM_AVAILABLE = False
-    print("⚠️ phase_histogram module not found. Histogram saving disabled.")
+    print("phase_histogram module not found. Histogram saving disabled.")
 
 
 def ensure_phase_histogram_table(session):
-    """确保 phase_histogram 表存在"""
+    """Ensure phase_histogram table exists."""
     try:
         if IS_POSTGRES:
             session.execute(text("""
@@ -103,7 +103,7 @@ def ensure_phase_histogram_table(session):
         return True
     except Exception as e:
         session.rollback()
-        print(f"⚠️ Error creating phase_histogram table: {e}")
+        print(f"Error creating phase_histogram table: {e}")
         return False
 
 
@@ -113,9 +113,7 @@ def get_price_bins_for_phase(
     phase_start: datetime,
     phase_end: datetime
 ) -> Dict[float, Dict]:
-    """
-    从 ws_price_bins 获取某个 phase 时间段内的 price bins
-    """
+    """Fetch price bins for a phase time window from ws_price_bins."""
     try:
         query = text("""
             SELECT 
@@ -161,9 +159,7 @@ def get_aggressor_stats_for_phase(
     phase_start: datetime,
     phase_end: datetime
 ) -> Dict:
-    """
-    从 ws_trades_hourly 获取某个 phase 时间段内的 aggressor 统计
-    """
+    """Fetch aggressor stats for a phase time window from ws_trades_hourly."""
     try:
         query = text("""
             SELECT 
@@ -205,16 +201,16 @@ def sync_market_lifecycle(
     verbose: bool = True
 ) -> Dict:
     """
-    同步单个市场的 lifecycle phases
-    
+    Sync lifecycle phases for a single market.
+
     Args:
-        session: 数据库会话
+        session: database session
         api: Polymarket API
-        market: 市场信息
-        backfill: 是否回填历史 phases
-        save_histogram: 是否保存 histogram
-        verbose: 是否打印详细日志
-    
+        market: market metadata
+        backfill: whether to backfill historical phases
+        save_histogram: whether to save histograms
+        verbose: whether to log verbosely
+
     Returns:
         {'phases_synced': int, 'phases_valid': int, 'histograms_saved': int, 'success': bool}
     """
@@ -222,23 +218,23 @@ def sync_market_lifecycle(
     condition_id = market['condition_id']
     question = market['question']
     
-    # 获取市场时间范围
+    # Determine market time range.
     created_at_str = market.get('created_at')
     end_date_str = market.get('end_date')
     
     if not end_date_str:
         if verbose:
-            print(f"  ⚠️ No end_date, skipping")
+            print("  No end_date, skipping")
         return {'phases_synced': 0, 'phases_valid': 0, 'histograms_saved': 0, 'success': False}
     
     try:
         end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).replace(tzinfo=None)
     except:
         if verbose:
-            print(f"  ⚠️ Invalid end_date, skipping")
+            print("  Invalid end_date, skipping")
         return {'phases_synced': 0, 'phases_valid': 0, 'histograms_saved': 0, 'success': False}
     
-    # created_at：如果没有，估算为 end_date - 90 天
+    # created_at: estimate as end_date - 90 days if missing.
     if created_at_str:
         try:
             created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00')).replace(tzinfo=None)
@@ -247,29 +243,29 @@ def sync_market_lifecycle(
     else:
         created_at = end_date - timedelta(days=90)
     
-    # 确保 created_at < end_date
+    # Ensure created_at < end_date.
     if created_at >= end_date:
         created_at = end_date - timedelta(days=30)
     
-    # 计算 phases
+    # Compute phases.
     phases = calculate_phase_dates(created_at, end_date)
     
     if verbose:
         duration = (end_date - created_at).days
-        print(f"  📅 Lifecycle: {duration} days ({created_at.date()} → {end_date.date()})")
+        print(f"  Lifecycle: {duration} days ({created_at.date()} -> {end_date.date()})")
     
-    # 获取当前时间和当前 phase
+    # Get current time and phase.
     now = datetime.now()
     current_phase = get_current_phase(created_at, end_date, now)
     
-    # 获取所有 trades（用于历史回填）
+    # Fetch all trades (for backfill).
     all_trades = []
     if backfill:
         if verbose:
-            print(f"  📥 Fetching all trades...")
+            print("  Fetching all trades...")
         all_trades = api.get_trades_for_market(condition_id, limit=10000)
         if verbose:
-            print(f"  📈 Got {len(all_trades)} trades")
+            print(f"  Got {len(all_trades)} trades")
     
     phases_synced = 0
     phases_valid = 0
@@ -277,33 +273,33 @@ def sync_market_lifecycle(
     previous_band_width = None
     
     for phase_num, phase_start, phase_end in phases:
-        # 判断这个 phase 的状态
+        # Determine phase state.
         phase_completed = now >= phase_end
         phase_in_progress = phase_start <= now < phase_end
         phase_future = now < phase_start
         
         if phase_future:
-            # 未来的 phase，跳过
+            # Future phase, skip.
             continue
         
-        # 检查是否已经有数据
+        # Check for existing data.
         existing = get_phase_metrics(session, token_id, phase_num)
         if existing and phase_completed and not backfill:
-            # 已完成的 phase 有数据了，跳过
+            # Completed phase with data, skip.
             previous_band_width = existing.get('band_width')
             continue
         
         if verbose:
-            status_str = "✅" if phase_completed else "🔄" if phase_in_progress else "⏳"
-            print(f"  {status_str} Phase {phase_num}: {phase_start.date()} → {phase_end.date()}")
+            status_str = "DONE" if phase_completed else "IN-PROGRESS" if phase_in_progress else "PENDING"
+            print(f"  {status_str} Phase {phase_num}: {phase_start.date()} -> {phase_end.date()}")
         
-        # 筛选这个 phase 的 trades
+        # Filter trades for this phase.
         phase_trades = filter_trades_by_phase(all_trades, phase_start, phase_end)
         
-        # 获取该 phase 结束时的价格（取最后一笔 trade 的价格）
+        # Get price at phase end (last trade price).
         price_at_end = 0.5
         if phase_trades:
-            # 辅助函数：安全获取 timestamp
+            # Helper: safe timestamp access.
             def safe_get_timestamp(t):
                 ts = t.get('timestamp', 0)
                 if isinstance(ts, tuple):
@@ -315,7 +311,7 @@ def sync_market_lifecycle(
             
             phase_trades_sorted = sorted(phase_trades, key=safe_get_timestamp)
             
-            # 安全获取 price
+            # Safe price parsing.
             last_price = phase_trades_sorted[-1].get('price', 0.5)
             if isinstance(last_price, tuple):
                 last_price = last_price[0] if last_price else 0.5
@@ -324,15 +320,15 @@ def sync_market_lifecycle(
             except:
                 price_at_end = 0.5
         
-        # 计算剩余天数（该 phase 结束时）
+        # Days remaining as of phase end.
         days_remaining = max(1, (end_date - phase_end).days)
         
-        # 获取 WebSocket 数据（如果有）
+        # WebSocket data (if available).
         aggressor_histogram = None
         aggressive_buy = None
         aggressive_sell = None
         
-        # 只有完成的 phase 或当前 phase 才查 WebSocket 数据
+        # Only completed or current phase reads WebSocket data.
         if phase_completed or phase_in_progress:
             price_bins = get_price_bins_for_phase(session, token_id, phase_start, phase_end)
             if price_bins:
@@ -343,7 +339,7 @@ def sync_market_lifecycle(
                 aggressive_buy = agg_stats['aggressive_buy']
                 aggressive_sell = agg_stats['aggressive_sell']
         
-        # 计算指标
+        # Compute metrics.
         metrics = calculate_phase_metrics(
             trades=phase_trades,
             current_price=price_at_end,
@@ -354,7 +350,7 @@ def sync_market_lifecycle(
             aggressive_sell=aggressive_sell,
         )
         
-        # === 保存 Phase Histogram（新增）===
+        # === Save phase histogram ===
         if save_histogram and HISTOGRAM_AVAILABLE and phase_trades:
             phase_histogram = aggregate_trades_to_phase_histogram(phase_trades)
             if phase_histogram:
@@ -366,9 +362,9 @@ def sync_market_lifecycle(
                 )
                 histograms_saved += bins_saved
                 if verbose:
-                    print(f"       📊 Histogram: {bins_saved} bins saved")
+                    print(f"       Histogram: {bins_saved} bins saved")
         
-        # 保存 metrics
+        # Save metrics.
         if metrics.get('has_data') or not phase_trades:
             success = save_phase_metrics(
                 session=session,
@@ -386,7 +382,7 @@ def sync_market_lifecycle(
                 
                 if verbose:
                     is_valid = metrics.get('is_valid', False)
-                    valid_str = "✅" if is_valid else "⚠️"
+                    valid_str = "OK" if is_valid else "WARN"
                     bw = metrics.get('band_width')
                     bw_str = f"{bw:.3f}" if bw else "N/A"
                     trade_count = metrics.get('trade_count', 0)
@@ -394,7 +390,7 @@ def sync_market_lifecycle(
                     
                     print(f"     {valid_str} BW: {bw_str} | Trades: {trade_count} | {reason}")
         
-        # 更新 previous_band_width
+        # Update previous_band_width.
         if metrics.get('band_width'):
             previous_band_width = metrics.get('band_width')
     
@@ -413,9 +409,7 @@ def sync_all_lifecycles(
     save_histogram: bool = True,
     verbose: bool = True
 ):
-    """
-    同步所有市场的 lifecycle phases
-    """
+    """Sync lifecycle phases for all markets."""
     session = get_session()
     
     stats = {
@@ -437,28 +431,28 @@ def sync_all_lifecycles(
         print(f"Min Volume: ${MIN_VOLUME_THRESHOLD}")
         print(f"{'='*60}\n")
         
-        # 确保表存在并迁移
+        # Ensure tables exist and are migrated.
         create_lifecycle_table(session)
         migrate_lifecycle_table(session)
         
         if save_histogram:
             ensure_phase_histogram_table(session)
         
-        # 获取市场
-        print(f"📊 Fetching markets...")
+        # Fetch markets.
+        print("Fetching markets...")
         markets = api.get_markets_by_categories(
             min_volume_24h=100,
             total_limit=top_n
         )
         
         if not markets:
-            print("❌ No markets")
+            print("No markets")
             return stats
         
         markets.sort(key=lambda x: x['volume_24h'], reverse=True)
         stats['total'] = len(markets)
         
-        print(f"✅ Processing {len(markets)} markets\n")
+        print(f"Processing {len(markets)} markets\n")
         
         for idx, market in enumerate(markets, 1):
             question = market['question']
@@ -483,16 +477,16 @@ def sync_all_lifecycles(
                     stats['failed'] += 1
                 
             except Exception as e:
-                print(f"  ❌ Error: {e}")
+                print(f"  Error: {e}")
                 stats['failed'] += 1
             
             # Rate limit
             if idx % 5 == 0:
                 time.sleep(1)
         
-        # 统计
+        # Statistics.
         print(f"\n{'='*60}")
-        print(f"📊 Sync Statistics")
+        print("Sync Statistics")
         print(f"{'='*60}")
         print(f"Total markets: {stats['total']}")
         print(f"Success: {stats['success']}")
@@ -508,7 +502,7 @@ def sync_all_lifecycles(
         return stats
         
     except Exception as e:
-        print(f"❌ Sync failed: {e}")
+        print(f"Sync failed: {e}")
         import traceback
         traceback.print_exc()
         return stats

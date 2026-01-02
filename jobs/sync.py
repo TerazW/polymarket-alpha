@@ -1,13 +1,12 @@
 """
-Market Sensemaking - 数据同步脚本（完整版 v4）
-整合 Data API + WebSocket aggressor + Price Bins
+Market Sensemaking data sync (full v4).
 
-数据来源：
-- Data API: trades → Volume Profile / VAH / VAL / POC
-- ws_trades_hourly: aggressor 汇总 → AR / Delta / CS
-- ws_price_bins: price bin 级别 buy/sell → POMD
+Sources:
+- Data API: trades -> Volume Profile / VAH / VAL / POC
+- ws_trades_hourly: aggressor aggregates -> AR / Delta / CS
+- ws_price_bins: price-bin buy/sell -> POMD
 
-运行方式：
+Usage:
     python jobs/sync.py --markets 100
     python jobs/sync.py --markets 500 --migrate
 """
@@ -24,7 +23,7 @@ import traceback
 import time
 
 from utils.db import DATABASE_URL
-print("🔍 sync.py DATABASE_URL:", DATABASE_URL[:50] if DATABASE_URL else "None")
+print("sync.py DATABASE_URL:", DATABASE_URL[:50] if DATABASE_URL else "None")
 print("=" * 50)
 
 from utils.polymarket_api import PolymarketAPI
@@ -50,13 +49,11 @@ from utils.db import get_session, init_db
 
 
 # ============================================================================
-# 数据库查询函数
+# Database query helpers
 # ============================================================================
 
 def get_aggressor_stats_from_db(session, token_id: str, hours: int = 24) -> dict:
-    """
-    从 ws_trades_hourly 获取 aggressor 汇总统计
-    """
+    """Fetch aggressor aggregates from ws_trades_hourly."""
     try:
         query = text("""
             SELECT 
@@ -104,8 +101,8 @@ def get_aggressor_stats_from_db(session, token_id: str, hours: int = 24) -> dict
 
 def get_price_bins_from_db(session, token_id: str, hours: int = 24) -> dict:
     """
-    从 ws_price_bins 获取 price bin 级别的 buy/sell 数据
-    
+    Fetch price-bin buy/sell data from ws_price_bins.
+
     Returns:
         {price_bin: {'buy': x, 'sell': y, 'total': z, 'min_side': w}}
     """
@@ -146,7 +143,7 @@ def get_price_bins_from_db(session, token_id: str, hours: int = 24) -> dict:
 
 
 def get_band_width_7d_ago(session, token_id: str) -> float:
-    """获取 7 天前的 band width"""
+    """Fetch band width from 7 days ago."""
     try:
         query = text("""
             SELECT band_width, va_high, va_low
@@ -168,17 +165,17 @@ def get_band_width_7d_ago(session, token_id: str) -> float:
 
 
 # ============================================================================
-# 主同步函数
+# Main sync entrypoint
 # ============================================================================
 
 def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True):
     """
-    同步市场数据（完整版 v4）
-    
-    数据流：
-    1. Data API → trades → Profile / VAH / VAL / POC
-    2. ws_trades_hourly → aggressor 汇总 → AR / Delta / CS
-    3. ws_price_bins → price bin buy/sell → POMD
+    Sync market data (full v4).
+
+    Flow:
+    1. Data API -> trades -> Profile / VAH / VAL / POC
+    2. ws_trades_hourly -> aggressor aggregates -> AR / Delta / CS
+    3. ws_price_bins -> price-bin buy/sell -> POMD
     """
     session = get_session()
     
@@ -199,8 +196,8 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
         print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*60}\n")
         
-        # Step 1: 获取市场
-        print(f"📊 Step 1: Fetching markets...")
+        # Step 1: fetch markets
+        print("Step 1: Fetching markets...")
         
         all_markets = api.get_markets_by_categories(
             min_volume_24h=100,
@@ -209,17 +206,17 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
         )
         
         if not all_markets:
-            print("❌ No markets fetched")
+            print("No markets fetched")
             return stats
         
         all_markets.sort(key=lambda x: x['volume_24h'], reverse=True)
         all_markets = all_markets[:top_n]
         
         stats['total'] = len(all_markets)
-        print(f"\n✅ Processing top {len(all_markets)} markets by volume\n")
+        print(f"\nProcessing top {len(all_markets)} markets by volume\n")
         
-        # Step 2: 处理每个市场
-        print(f"🔄 Step 2: Analyzing markets...\n")
+        # Step 2: process markets
+        print("Step 2: Analyzing markets...\n")
         
         for idx, market in enumerate(all_markets, 1):
             try:
@@ -233,7 +230,7 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                 progress = f"[{idx}/{stats['total']}]"
                 print(f"{progress} {question[:50]}...")
                 
-                # 计算剩余天数
+                # Calculate days remaining.
                 days_remaining = 30
                 if market['end_date']:
                     try:
@@ -244,8 +241,8 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                     except:
                         pass
                 
-                # === 1. 获取 Data API trades ===
-                print(f"  📥 Fetching trades (Data API)...")
+                # === 1. Fetch Data API trades ===
+                print("  Fetching trades (Data API)...")
                 market_trades = None
                 for attempt in range(3):
                     try:
@@ -254,34 +251,34 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                             break
                     except Exception as e:
                         if attempt < 2:
-                            print(f"  ⚠️  Retry {attempt + 1}/3...")
+                            print(f"  Retry {attempt + 1}/3...")
                             time.sleep(2)
                         else:
                             raise e
                 
                 if not market_trades:
-                    print(f"  ⚠️  No trades, skipping...\n")
+                    print("  No trades, skipping...\n")
                     stats['skipped'] += 1
                     continue
                 
                 trades_24h = filter_trades_by_time(market_trades, hours=24)
-                print(f"  📈 Trades: {len(market_trades)} total, {len(trades_24h)} in 24h")
+                print(f"  Trades: {len(market_trades)} total, {len(trades_24h)} in 24h")
                 
-                # === 2. 计算 Profile 指标（Data API）===
+                # === 2. Profile metrics (Data API) ===
                 histogram = calculate_histogram(market_trades)
                 
                 if not histogram:
-                    print(f"  ⚠️  No histogram, skipping...\n")
+                    print("  No histogram, skipping...\n")
                     stats['skipped'] += 1
                     continue
                 
                 VAH, VAL, mid_prob = calculate_consensus_band(histogram)
                 band_width = get_band_width(histogram)
-                poc = calculate_poc(histogram)  # 交易集中点
+                poc = calculate_poc(histogram)  # Max-volume price bin.
                 
-                # === 3. 不确定性指标 ===
+                # === 3. Uncertainty metrics ===
                 ui_result = calculate_ui(histogram)
-                # v5.3: calculate_ui 返回 (ui, edge_zone)
+                # v5.3: calculate_ui returns (ui, edge_zone)
                 if isinstance(ui_result, tuple):
                     ui, edge_zone = ui_result
                 else:
@@ -294,7 +291,7 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                 acr = calculate_acr(band_width, band_width_7d_ago)
                 cer = calculate_cer(band_width, band_width_7d_ago, current_price, days_remaining)
                 
-                # === 4. 获取 WebSocket aggressor 数据 ===
+                # === 4. WebSocket aggressor data ===
                 agg_stats = get_aggressor_stats_from_db(session, token_id, hours=24)
                 
                 if agg_stats['has_data']:
@@ -314,45 +311,45 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                     )
                     total_vol = agg_stats['total_volume']
                     stats['with_aggressor'] += 1
-                    agg_str = f"✅ AR: {ar:.3f}" if ar else "✅ AR: N/A"
+                    agg_str = f"AR: {ar:.3f}" if ar else "AR: N/A"
                 else:
                     ar = None
                     volume_delta = None
                     cs = None
                     total_vol = None
-                    agg_str = "🔒 No WS data"
+                    agg_str = "No WS data"
                 
-                # === 5. 获取 Price Bins → 计算 POMD ===
+                # === 5. Price bins -> POMD ===
                 price_bins = get_price_bins_from_db(session, token_id, hours=24)
                 
                 if price_bins:
                     pomd = calculate_pomd(price_bins)
                     stats['with_price_bins'] += 1
-                    pomd_str = f"✅ POMD: {pomd:.2f}" if pomd else "✅ POMD: N/A"
+                    pomd_str = f"POMD: {pomd:.2f}" if pomd else "POMD: N/A"
                 else:
                     pomd = None
-                    pomd_str = "🔒 No bins"
+                    pomd_str = "No bins"
                 
-                # === 6. 状态判定 (v5.3) ===
+                # === 6. Status (v5.3) ===
                 status = determine_status(ui, cer, cs, total_vol, edge_zone)
                 
                 # === 7. Impulse Tag (v5.3) ===
                 impulse_tag = determine_impulse_tag(ui, cer, cs, pomd, current_price)
                 
-                # === 显示结果 ===
+                # === Display ===
                 ui_str = f"{ui:.3f}" if ui is not None else "N/A"
                 cer_str = f"{cer:.3f}" if cer is not None else "N/A"
                 bw_str = f"{band_width:.3f}" if band_width is not None else "N/A"
                 poc_str = f"{poc:.2f}" if poc is not None else "N/A"
                 impulse_str = impulse_tag if impulse_tag else ""
                 
-                print(f"  💰 Price: {current_price*100:.1f}% | Vol: ${volume_24h:,.0f}")
-                print(f"  📊 BW: {bw_str} | UI: {ui_str} | CER: {cer_str}")
-                print(f"  📍 POC: {poc_str} | {pomd_str}")
-                print(f"  🎯 {agg_str}")
-                print(f"  🏷️  {category} | {status} {impulse_str}\n")
+                print(f"  Price: {current_price*100:.1f}% | Vol: ${volume_24h:,.0f}")
+                print(f"  BW: {bw_str} | UI: {ui_str} | CER: {cer_str}")
+                print(f"  POC: {poc_str} | {pomd_str}")
+                print(f"  {agg_str}")
+                print(f"  {category} | {status} {impulse_str}\n")
                 
-                # === 8. 保存到数据库 ===
+                # === 8. Save to database ===
                 success = save_metrics(
                     session=session,
                     token_id=token_id,
@@ -386,11 +383,11 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                 
                 # Rate limit
                 if idx % 10 == 0:
-                    print(f"  ⏸️  Pausing 2s...\n")
+                    print("  Pausing 2s...\n")
                     time.sleep(2)
                 
             except Exception as e:
-                print(f"  ❌ Error: {str(e)}\n")
+                print(f"  Error: {str(e)}\n")
                 stats['failed'] += 1
                 stats['errors'].append({
                     'market': market.get('question', 'Unknown')[:60],
@@ -398,37 +395,37 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
                 })
                 continue
         
-        # 打印统计
+        # Print statistics
         print(f"\n{'='*60}")
-        print(f"📊 Sync Statistics")
+        print("Sync Statistics")
         print(f"{'='*60}")
         print(f"Total: {stats['total']}")
-        print(f"✅ Success: {stats['success']}")
-        print(f"❌ Failed: {stats['failed']}")
-        print(f"⏭️  Skipped: {stats['skipped']}")
-        print(f"🎯 With Aggressor: {stats['with_aggressor']}")
-        print(f"📊 With Price Bins: {stats['with_price_bins']}")
+        print(f"Success: {stats['success']}")
+        print(f"Failed: {stats['failed']}")
+        print(f"Skipped: {stats['skipped']}")
+        print(f"With Aggressor: {stats['with_aggressor']}")
+        print(f"With Price Bins: {stats['with_price_bins']}")
         
         if stats['total'] > 0:
             print(f"\nSuccess Rate: {stats['success']/stats['total']*100:.1f}%")
         
-        print(f"\n📝 Metrics Available:")
+        print("\nMetrics Available:")
         print(f"   Profile: VAH, VAL, BW, POC")
         print(f"   Uncertainty: UI, ECR, ACR, CER")
         if stats['with_aggressor'] > 0:
-            print(f"   ✅ Conviction: AR, Volume Delta, CS")
+            print("   Conviction: AR, Volume Delta, CS")
         if stats['with_price_bins'] > 0:
-            print(f"   ✅ Disagreement: POMD")
+            print("   Disagreement: POMD")
         
         if stats['with_aggressor'] == 0:
-            print(f"\n💡 Run ws_collector.py to enable AR/CS/POMD")
+            print("\nRun ws_collector.py to enable AR/CS/POMD")
         
         print(f"{'='*60}\n")
         
         return stats
         
     except Exception as e:
-        print(f"\n❌ Sync failed: {e}")
+        print(f"\nSync failed: {e}")
         traceback.print_exc()
         session.rollback()
         return stats
@@ -436,17 +433,17 @@ def sync_markets(api: PolymarketAPI, top_n: int = 500, retry_failed: bool = True
         session.close()
 
 
-def save_metrics(session, token_id, condition_id, question, 
+def save_metrics(session, token_id, condition_id, question,
                  current_price, volume_24h, category, days_remaining,
                  va_high, va_low, band_width, poc, pomd,
                  ui, ecr, acr, cer,
                  cs, ar, volume_delta,
                  status, impulse_tag=None, edge_zone=False):
-    """保存所有指标到数据库"""
+    """Save all metrics to the database."""
     today = datetime.now().date()
     
     try:
-        # 更新 markets 表
+        # Update markets table.
         session.execute(text("""
             INSERT INTO markets 
             (token_id, market_id, title, current_price, volume_24h, category, updated_at)
@@ -468,7 +465,7 @@ def save_metrics(session, token_id, condition_id, question,
             'now': datetime.now()
         })
         
-        # 更新 daily_metrics 表 (v5.3: 包含 impulse_tag 和 edge_zone)
+        # Update daily_metrics (v5.3 includes impulse_tag and edge_zone).
         session.execute(text("""
             INSERT INTO daily_metrics 
             (token_id, date, 
@@ -529,13 +526,13 @@ def save_metrics(session, token_id, condition_id, question,
         
     except SQLAlchemyError as e:
         session.rollback()
-        print(f"  ⚠️  DB error: {e}")
+        print(f"  DB error: {e}")
         return False
 
 
 def migrate_database(session):
-    """迁移数据库：添加新字段"""
-    print("🔄 Migrating database schema...")
+    """Database migration: add new fields."""
+    print("Migrating database schema...")
     
     new_columns = [
         ("daily_metrics", "band_width", "DECIMAL(10,6)"),
@@ -552,11 +549,11 @@ def migrate_database(session):
             session.execute(text(f"""
                 ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {dtype}
             """))
-            print(f"  ✅ Added {table}.{column}")
+            print(f"  Added {table}.{column}")
         except Exception as e:
-            print(f"  ⚠️  {table}.{column}: {e}")
+            print(f"  {table}.{column}: {e}")
     
-    # 创建 ws_trades_hourly 表
+    # Create ws_trades_hourly table.
     try:
         session.execute(text("""
             CREATE TABLE IF NOT EXISTS ws_trades_hourly (
@@ -574,11 +571,11 @@ def migrate_database(session):
                 UNIQUE(token_id, hour)
             )
         """))
-        print("  ✅ Created/verified ws_trades_hourly table")
+        print("  Created/verified ws_trades_hourly table")
     except Exception as e:
-        print(f"  ⚠️  ws_trades_hourly: {e}")
+        print(f"  ws_trades_hourly: {e}")
     
-    # 创建 ws_price_bins 表
+    # Create ws_price_bins table.
     try:
         session.execute(text("""
             CREATE TABLE IF NOT EXISTS ws_price_bins (
@@ -592,11 +589,11 @@ def migrate_database(session):
                 UNIQUE(token_id, hour, price_bin)
             )
         """))
-        print("  ✅ Created/verified ws_price_bins table")
+        print("  Created/verified ws_price_bins table")
     except Exception as e:
-        print(f"  ⚠️  ws_price_bins: {e}")
+        print(f"  ws_price_bins: {e}")
     
-    # 创建索引
+    # Create indexes.
     try:
         session.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_ws_trades_token_hour 
@@ -606,12 +603,12 @@ def migrate_database(session):
             CREATE INDEX IF NOT EXISTS idx_ws_bins_token_hour 
             ON ws_price_bins(token_id, hour)
         """))
-        print("  ✅ Created indexes")
+        print("  Created indexes")
     except Exception as e:
-        print(f"  ⚠️  Index creation: {e}")
+        print(f"  Index creation: {e}")
     
     session.commit()
-    print("✅ Migration complete\n")
+    print("Migration complete\n")
 
 
 if __name__ == "__main__":
@@ -642,7 +639,7 @@ if __name__ == "__main__":
         retry_failed=not args.no_retry
     )
     
-    print(f"💡 Next steps:")
+    print("Next steps:")
     print(f"   1. Run 'python jobs/ws_collector.py' to collect aggressor data")
     print(f"   2. Run 'streamlit run app/Home.py' to see results!")
     

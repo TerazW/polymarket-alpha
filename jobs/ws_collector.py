@@ -1,17 +1,17 @@
 """
-WebSocket Trades 收集器 (v3 - Price Bin 版)
-后台服务：收集实时 trades 并按 price bin 存储 buy/sell
+WebSocket Trades Collector (v3 - price-bin).
+Background service: collects live trades and stores buy/sell by price bin.
 
-新功能：
-1. 存储 price bin 级别的 aggressive buy/sell
-2. 支持 POC 和 POMD 计算
-3. last_flush_ts 追踪避免丢数据
+Features:
+1. Store price-bin aggressive buy/sell
+2. Supports POC and POMD calculation
+3. Track last_flush_ts to avoid gaps
 
-运行方式：
+Usage:
     python jobs/ws_collector.py --markets 100
 
-部署方式（Render）：
-    作为 Background Worker 运行
+Deployment (Render):
+    Run as a background worker
 """
 
 import os
@@ -32,9 +32,7 @@ from utils.polymarket_ws import PolymarketWebSocket
 
 
 class WSTradeCollector:
-    """
-    WebSocket Trades 收集器 (v3 - Price Bin 版)
-    """
+    """WebSocket Trades Collector (v3 - price-bin)."""
     
     def __init__(
         self,
@@ -68,8 +66,8 @@ class WSTradeCollector:
             print(f"[{timestamp}] {message}")
     
     def load_markets(self) -> List[str]:
-        """获取活跃市场的 token IDs"""
-        self._log(f"📡 Loading top {self.max_markets} markets...")
+        """Get token IDs for active markets."""
+        self._log(f"Loading top {self.max_markets} markets...")
         
         markets = self.api.get_markets_by_categories(
             min_volume_24h=1000,
@@ -83,11 +81,11 @@ class WSTradeCollector:
                 token_ids.append(token_id)
                 self.markets[token_id] = m
         
-        self._log(f"✅ Loaded {len(token_ids)} markets")
+        self._log(f"Loaded {len(token_ids)} markets")
         return token_ids
     
     def flush_to_db(self):
-        """将聚合数据写入数据库"""
+        """Write aggregated data to the database."""
         if not self.ws:
             return
         
@@ -98,14 +96,14 @@ class WSTradeCollector:
             now = datetime.now()
             current_hour = now.replace(minute=0, second=0, microsecond=0)
             
-            # 获取所有 asset 统计
+            # Get asset-level stats.
             all_stats = aggregator.get_all_stats()
             
-            # 获取所有 price bins
+            # Get price-bin stats.
             all_bins = aggregator.get_all_price_bins()
             
             if not all_stats:
-                self._log("📭 No new trades to flush")
+                self._log("No new trades to flush")
                 return
             
             asset_records = 0
@@ -116,7 +114,7 @@ class WSTradeCollector:
                     continue
                 
                 try:
-                    # 1. 写入 ws_trades_hourly（asset 级别汇总）
+                    # 1. Write ws_trades_hourly (asset-level aggregates).
                     session.execute(text("""
                         INSERT INTO ws_trades_hourly 
                         (token_id, hour, aggressive_buy, aggressive_sell, 
@@ -148,7 +146,7 @@ class WSTradeCollector:
                     })
                     asset_records += 1
                     
-                    # 2. 写入 ws_price_bins（price bin 级别明细）
+                    # 2. Write ws_price_bins (price-bin details).
                     if token_id in all_bins:
                         for price_bin, bin_data in all_bins[token_id].items():
                             if bin_data['count'] == 0:
@@ -174,12 +172,12 @@ class WSTradeCollector:
                             bin_records += 1
                     
                 except Exception as e:
-                    self._log(f"  ⚠️ Error writing {token_id[:20]}...: {e}")
+                    self._log(f"  Error writing {token_id[:20]}...: {e}")
                     continue
             
             session.commit()
             
-            # 成功后清空聚合器
+            # Clear aggregator after successful flush.
             aggregator.clear_and_update_flush_time()
             
             self.stats['total_flushes'] += 1
@@ -187,46 +185,46 @@ class WSTradeCollector:
             self.stats['total_bin_records'] += bin_records
             self.stats['last_flush'] = now
             
-            self._log(f"💾 Flushed: {asset_records} assets, {bin_records} price bins")
+            self._log(f"Flushed: {asset_records} assets, {bin_records} price bins")
             
         except Exception as e:
             session.rollback()
             self.stats['flush_errors'] += 1
-            self._log(f"❌ Flush error: {e}")
+            self._log(f"Flush error: {e}")
         finally:
             session.close()
     
     def run(self):
-        """启动收集器"""
-        self._log("🚀 Starting WebSocket Trade Collector v3 (Price Bin)")
+        """Start collector."""
+        self._log("Starting WebSocket Trade Collector v3 (Price Bin)")
         self._log(f"   Database: {DATABASE_URL[:50]}...")
         self._log(f"   Tick size: {self.tick_size}")
         self.stats['started_at'] = datetime.now()
         
-        # 1. 加载市场
+        # 1. Load markets.
         token_ids = self.load_markets()
         
         if not token_ids:
-            self._log("❌ No markets to subscribe")
+            self._log("No markets to subscribe")
             return
         
-        # 2. 确保数据库表存在
+        # 2. Ensure tables exist.
         self._ensure_tables()
         
-        # 3. 创建 WebSocket
+        # 3. Create WebSocket.
         self.ws = PolymarketWebSocket(
             asset_ids=token_ids,
             tick_size=self.tick_size,
             verbose=False
         )
         
-        # 4. 启动 WebSocket
+        # 4. Start WebSocket.
         ws_thread = self.ws.run_async()
         
-        self._log(f"📡 WebSocket connected, monitoring {len(token_ids)} markets")
-        self._log(f"⏰ Flush interval: {self.flush_interval}s")
+        self._log(f"WebSocket connected, monitoring {len(token_ids)} markets")
+        self._log(f"Flush interval: {self.flush_interval}s")
         
-        # 5. 定期 flush 循环
+        # 5. Periodic flush loop.
         try:
             while True:
                 time.sleep(self.flush_interval)
@@ -234,12 +232,12 @@ class WSTradeCollector:
                 
                 if self.ws:
                     ws_stats = self.ws.get_stats()
-                    self._log(f"📊 WS: {ws_stats['trades_received']} trades | {ws_stats['total_price_bins']} bins")
+                    self._log(f"WS: {ws_stats['trades_received']} trades | {ws_stats['total_price_bins']} bins")
                 
         except KeyboardInterrupt:
-            self._log("👋 Stopping...")
+            self._log("Stopping...")
         finally:
-            self._log("💾 Final flush...")
+            self._log("Final flush...")
             self.flush_to_db()
             
             if self.ws:
@@ -247,12 +245,12 @@ class WSTradeCollector:
             self._print_stats()
     
     def _ensure_tables(self):
-        """确保数据库表存在"""
+        """Ensure database tables exist."""
         session = get_session()
         try:
             is_sqlite = 'sqlite' in DATABASE_URL.lower()
             
-            # 1. ws_trades_hourly 表（添加 poc, pomd 字段）
+            # 1. ws_trades_hourly table (includes poc, pomd).
             if is_sqlite:
                 session.execute(text("""
                     CREATE TABLE IF NOT EXISTS ws_trades_hourly (
@@ -288,14 +286,14 @@ class WSTradeCollector:
                     )
                 """))
                 
-                # 添加 poc, pomd 字段（如果不存在）
+                # Add poc/pomd columns if missing.
                 try:
                     session.execute(text("ALTER TABLE ws_trades_hourly ADD COLUMN IF NOT EXISTS poc DECIMAL(10,4)"))
                     session.execute(text("ALTER TABLE ws_trades_hourly ADD COLUMN IF NOT EXISTS pomd DECIMAL(10,4)"))
                 except:
                     pass
             
-            # 2. ws_price_bins 表（新表）
+            # 2. ws_price_bins table (new).
             if is_sqlite:
                 session.execute(text("""
                     CREATE TABLE IF NOT EXISTS ws_price_bins (
@@ -323,7 +321,7 @@ class WSTradeCollector:
                     )
                 """))
             
-            # 创建索引
+            # Create indexes.
             try:
                 session.execute(text("""
                     CREATE INDEX IF NOT EXISTS idx_ws_trades_token_hour 
@@ -337,18 +335,18 @@ class WSTradeCollector:
                 pass
             
             session.commit()
-            self._log("✅ Database tables ready (ws_trades_hourly + ws_price_bins)")
+            self._log("Database tables ready (ws_trades_hourly + ws_price_bins)")
             
         except Exception as e:
-            self._log(f"⚠️ Table creation warning: {e}")
+            self._log(f"Table creation warning: {e}")
             session.rollback()
         finally:
             session.close()
     
     def _print_stats(self):
-        """打印统计信息"""
+        """Print statistics."""
         print("\n" + "=" * 60)
-        print("📊 Collector Statistics")
+        print("Collector Statistics")
         print("=" * 60)
         
         for k, v in self.stats.items():
@@ -356,21 +354,21 @@ class WSTradeCollector:
         
         if self.ws:
             ws_stats = self.ws.get_stats()
-            print("\n📡 WebSocket Statistics:")
+            print("\nWebSocket Statistics:")
             for k, v in ws_stats.items():
                 print(f"  {k}: {v}")
         
         if self.stats['started_at']:
             duration = datetime.now() - self.stats['started_at']
-            print(f"\n⏱️ Total runtime: {duration}")
+            print(f"\nTotal runtime: {duration}")
 
 
 # ============================================================================
-# 辅助函数：供 sync.py 使用
+# Helper functions for sync.py
 # ============================================================================
 
 def get_aggressor_stats_from_db(session, token_id: str, hours: int = 24) -> Dict:
-    """从数据库获取 aggressor 统计（包含 POC/POMD）"""
+    """Fetch aggressor stats from DB (includes POC/POMD)."""
     try:
         query = text("""
             SELECT 
@@ -418,8 +416,8 @@ def get_aggressor_stats_from_db(session, token_id: str, hours: int = 24) -> Dict
 
 def get_price_bins_from_db(session, token_id: str, hours: int = 24) -> Dict[float, Dict]:
     """
-    从数据库获取 price bin 级别的 buy/sell 数据
-    
+    Fetch price-bin buy/sell data from DB.
+
     Returns:
         {price_bin: {'buy': x, 'sell': y, 'total': z, 'min_side': w}}
     """
@@ -459,7 +457,7 @@ def get_price_bins_from_db(session, token_id: str, hours: int = 24) -> Dict[floa
 
 
 def calculate_poc_from_db(session, token_id: str, hours: int = 24) -> Optional[float]:
-    """从数据库计算 POC（成交量最大的 price bin）"""
+    """Calculate POC from DB (max-volume price bin)."""
     bins = get_price_bins_from_db(session, token_id, hours)
     if not bins:
         return None
@@ -468,10 +466,10 @@ def calculate_poc_from_db(session, token_id: str, hours: int = 24) -> Optional[f
 
 def calculate_pomd_from_db(session, token_id: str, hours: int = 24, min_threshold: float = 0) -> Optional[float]:
     """
-    从数据库计算 POMD（min(buy, sell) 最大的 price bin）
-    
+    Calculate POMD from DB (max min(buy, sell) price bin).
+
     Args:
-        min_threshold: 最小阈值，低于此值不算
+        min_threshold: minimum threshold
     """
     bins = get_price_bins_from_db(session, token_id, hours)
     if not bins:
@@ -485,7 +483,7 @@ def calculate_pomd_from_db(session, token_id: str, hours: int = 24, min_threshol
 
 
 # ============================================================================
-# 命令行入口
+# CLI entrypoint
 # ============================================================================
 
 if __name__ == "__main__":
@@ -502,7 +500,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     print("=" * 60)
-    print("🌐 Polymarket WebSocket Trade Collector v3 (Price Bin)")
+    print("Polymarket WebSocket Trade Collector v3 (Price Bin)")
     print("=" * 60)
     print(f"Markets: {args.markets}")
     print(f"Flush interval: {args.interval}s")

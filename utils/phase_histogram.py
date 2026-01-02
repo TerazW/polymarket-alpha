@@ -1,8 +1,8 @@
 """
-Phase Histogram 数据操作
+Phase histogram data helpers.
 
-提供 phase_histogram 表的读写函数
-用于存储每个 Phase 的完整 histogram 数据，支持 Market Profile Evolution 可视化
+Provides read/write helpers for the phase_histogram table.
+Stores per-phase histogram data for Market Profile Evolution visualization.
 """
 
 from datetime import datetime
@@ -12,9 +12,9 @@ from sqlalchemy import text
 
 
 def create_phase_histogram_table(session) -> bool:
-    """创建 phase_histogram 表"""
+    """Create phase_histogram table."""
     try:
-        # 检测数据库类型
+        # Detect database type.
         from utils.db import IS_POSTGRES
         
         if IS_POSTGRES:
@@ -62,12 +62,12 @@ def create_phase_histogram_table(session) -> bool:
             """))
         
         session.commit()
-        print("✅ phase_histogram table created")
+        print("phase_histogram table created")
         return True
         
     except Exception as e:
         session.rollback()
-        print(f"⚠️ Error creating phase_histogram table: {e}")
+        print(f"Error creating phase_histogram table: {e}")
         return False
 
 
@@ -79,43 +79,43 @@ def save_phase_histogram(
     clear_existing: bool = True
 ) -> int:
     """
-    保存 Phase 的 histogram 到数据库
-    
+    Save a phase histogram to the database.
+
     Args:
-        session: 数据库会话
-        token_id: 市场 token ID
-        phase_number: Phase 编号 (1-4)
+        session: database session
+        token_id: market token ID
+        phase_number: phase number (1-4)
         histogram: {price_bin: {'volume': x, 'buy': y, 'sell': z, 'count': n}}
-        clear_existing: 是否清除该 phase 的旧数据
-    
+        clear_existing: whether to clear existing phase data
+
     Returns:
-        保存的记录数
+        number of records saved
     """
     if not histogram:
         return 0
     
     try:
-        # 清除旧数据
+        # Clear existing data.
         if clear_existing:
             session.execute(text("""
                 DELETE FROM phase_histogram 
                 WHERE token_id = :token_id AND phase_number = :phase_number
             """), {"token_id": token_id, "phase_number": phase_number})
         
-        # 插入新数据
+        # Insert new data.
         saved = 0
         for price_bin, data in histogram.items():
-            # 支持多种字段名
+            # Support multiple field names.
             volume = data.get('volume', 0) or data.get('total', 0)
             buy = data.get('aggressive_buy', 0) or data.get('buy', 0)
             sell = data.get('aggressive_sell', 0) or data.get('sell', 0)
             count = data.get('trade_count', 0) or data.get('count', 0)
             
-            # 如果 volume 为 0，用 buy + sell
+            # If volume is 0, use buy + sell.
             if volume == 0:
                 volume = buy + sell
             
-            # 跳过空数据
+            # Skip empty data.
             if volume == 0 and buy == 0 and sell == 0:
                 continue
             
@@ -149,8 +149,8 @@ def get_phase_histogram(
     phase_number: int
 ) -> Dict[float, Dict]:
     """
-    获取单个 Phase 的 histogram
-    
+    Get histogram for a single phase.
+
     Returns:
         {price_bin: {'volume': x, 'buy': y, 'sell': z}}
     """
@@ -183,8 +183,8 @@ def get_all_phase_histograms(
     token_id: str
 ) -> Dict[int, Dict[float, Dict]]:
     """
-    获取所有 Phase 的 histogram
-    
+    Get histograms for all phases.
+
     Returns:
         {phase_number: {price_bin: {'volume': x, 'buy': y, 'sell': z}}}
     """
@@ -218,12 +218,12 @@ def aggregate_trades_to_phase_histogram(
     tick_size: float = 0.01
 ) -> Dict[float, Dict]:
     """
-    将交易列表聚合为 histogram 格式
-    
+    Aggregate trades into a histogram.
+
     Args:
-        trades: 交易列表，每个交易需要 price, size, side
-        tick_size: 价格分档大小
-    
+        trades: trade list with price, size, side
+        tick_size: price bin size
+
     Returns:
         {price_bin: {'volume': x, 'buy': y, 'sell': z, 'count': n}}
     """
@@ -236,25 +236,25 @@ def aggregate_trades_to_phase_histogram(
     
     for trade in trades:
         try:
-            # 获取 price，处理 tuple 类型
+            # Read price, handling tuple values.
             price = trade.get('price', 0)
             if isinstance(price, tuple):
                 price = price[0] if price else 0
             price = float(price)
             
-            # 获取 size，处理 tuple 类型
+            # Read size, handling tuple values.
             size = trade.get('size', 0)
             if isinstance(size, tuple):
                 size = size[0] if size else 0
             size = float(size)
             
-            # 获取 side，处理 tuple 类型
+            # Read side, handling tuple values.
             side = trade.get('side', '')
             if isinstance(side, tuple):
                 side = side[0] if side else ''
             side = str(side).upper()
             
-            # 价格分档
+            # Price binning.
             bin_price = round(price / tick_size) * tick_size
             bin_price = round(bin_price, 4)
             
@@ -266,7 +266,7 @@ def aggregate_trades_to_phase_histogram(
             elif side == 'SELL':
                 histogram[bin_price]['sell'] += size
             else:
-                # 没有 side 信息，平均分配
+                # No side info, split evenly.
                 histogram[bin_price]['buy'] += size / 2
                 histogram[bin_price]['sell'] += size / 2
                 
