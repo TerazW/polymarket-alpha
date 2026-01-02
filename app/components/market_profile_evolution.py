@@ -312,7 +312,7 @@ def create_market_profile_evolution(
             y=current_price,
             xanchor="left",
             showarrow=False,
-            font=dict(size=11, color='#22c55e', weight='bold')
+            font=dict(size=11, color='#22c55e')
         )
     
     # 更新布局
