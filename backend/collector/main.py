@@ -57,9 +57,9 @@ def get_top_markets(limit: int = 10):
     for m in top_markets:
         question = m.get('question', '')[:40]
         volume = m.get('volume_24h', 0) or 0
-        yes_token = m.get('yes_token_id')
-        if yes_token:
-            token_ids.append(yes_token)
+        token_id = m.get('token_id')  # 老项目用的是 token_id
+        if token_id:
+            token_ids.append(token_id)
             print(f"  ✓ {question}... (${volume:,.0f})")
 
     return token_ids
