@@ -205,6 +205,41 @@ async def get_market_detail(condition_id: str):
 
 
 # ============================================================================
+# 数据库统计
+# ============================================================================
+
+import psycopg2
+
+DB_CONFIG = {
+    'host': '127.0.0.1',
+    'port': 5433,
+    'database': 'belief_reaction',
+    'user': 'postgres',
+    'password': 'postgres'
+}
+
+@app.get("/api/stats")
+def get_stats():
+    """获取数据库统计信息"""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM trade_ticks")
+            trades = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM book_bins")
+            books = cur.fetchone()[0]
+        conn.close()
+
+        return {
+            "trades": trades,
+            "books": books
+        }
+    except Exception as e:
+        return {"trades": 0, "books": 0, "error": str(e)}
+
+
+# ============================================================================
 # 启动信息
 # ============================================================================
 
