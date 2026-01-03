@@ -2,249 +2,67 @@
 Belief Reaction System - Collector
 实时数据收集器：连接 Polymarket WebSocket，收集订单簿数据。
 
-运行: python -m backend.collector.main
+运行: python run_collector.py
 
-功能:
-1. 获取热门市场的 token_ids
-2. 连接 WebSocket
-3. 接收 book / price_change / last_trade_price 消息
-4. (未来) 写入数据库
+直接复用老项目的 PolymarketWebSocket（已验证运行良好）
 """
 
-import json
-import time
-import threading
-import httpx
+import sys
+import os
+
+# 添加项目根目录到 path，以便导入 utils
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from datetime import datetime
-from websocket import WebSocketApp
-from typing import List, Dict, Optional
-
-# WebSocket URL
-WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+from typing import Dict
+from utils.polymarket_ws import PolymarketWebSocket
+from utils.polymarket_api import PolymarketAPI
 
 
-class Collector:
-    """实时数据收集器"""
+def on_trade(trade: Dict):
+    """处理成交消息"""
+    ts = datetime.now().strftime("%H:%M:%S")
+    asset_id = trade.get('asset_id', '')[:8]
+    price = trade.get('price', 0)
+    size = trade.get('size', 0)
+    side = trade.get('side', '?')
 
-    def __init__(self, token_ids: List[str], verbose: bool = True):
-        self.token_ids = token_ids
-        self.verbose = verbose
-        self.ws: Optional[WebSocketApp] = None
-        self.is_running = False
-
-        # 统计
-        self.stats = {
-            "connected_at": None,
-            "books_received": 0,
-            "price_changes_received": 0,
-            "trades_received": 0,
-            "errors": 0,
-        }
-
-    def log(self, msg: str, level: str = "INFO"):
-        """打印日志"""
-        if self.verbose:
-            ts = datetime.now().strftime("%H:%M:%S")
-            print(f"[{ts}] [{level}] {msg}")
-
-    def on_open(self, ws):
-        """连接成功"""
-        self.stats["connected_at"] = datetime.now()
-        self.is_running = True
-
-        self.log(f"已连接到 Polymarket WebSocket")
-        self.log(f"订阅 {len(self.token_ids)} 个 token...")
-
-        # 发送订阅消息
-        subscribe_msg = {
-            "assets_ids": self.token_ids,
-            "type": "market"
-        }
-        ws.send(json.dumps(subscribe_msg))
-
-        # 启动心跳线程
-        threading.Thread(target=self._ping_loop, args=(ws,), daemon=True).start()
-
-        self.log("订阅成功，开始接收数据...")
-        print()
-        print("=" * 60)
-        print("  实时数据流 (按 Ctrl+C 停止)")
-        print("=" * 60)
-        print()
-
-    def on_message(self, ws, message: str):
-        """收到消息"""
-        if message == "PONG":
-            return
-
-        try:
-            data = json.loads(message)
-
-            # 处理数组消息（批量更新）
-            if isinstance(data, list):
-                for item in data:
-                    self._process_single_message(item)
-                return
-
-            self._process_single_message(data)
-
-        except json.JSONDecodeError:
-            self.log(f"JSON 解析错误: {message[:50]}...", "ERROR")
-            self.stats["errors"] += 1
-        except Exception as e:
-            self.log(f"处理消息错误: {e}", "ERROR")
-            self.stats["errors"] += 1
-
-    def _process_single_message(self, data: dict):
-        """处理单条消息"""
-        if not isinstance(data, dict):
-            return
-
-        event_type = data.get("event_type", "")
-
-        if event_type == "book":
-            self._handle_book(data)
-        elif event_type == "price_change":
-            self._handle_price_change(data)
-        elif event_type == "last_trade_price":
-            self._handle_trade(data)
-        elif event_type == "tick_size_change":
-            self._handle_tick_size_change(data)
-
-    def _handle_book(self, data: dict):
-        """处理 book 消息（完整订单簿快照）"""
-        self.stats["books_received"] += 1
-        asset_id = data.get("asset_id", "")[:8]
-        bids = len(data.get("bids", []))
-        asks = len(data.get("asks", []))
-        self.log(f"📚 BOOK    | {asset_id}... | {bids} bids, {asks} asks")
-
-    def _handle_price_change(self, data: dict):
-        """处理 price_change 消息（增量更新）"""
-        self.stats["price_changes_received"] += 1
-        changes = data.get("price_changes", [])
-
-        for c in changes[:1]:  # 只显示第一个变化
-            asset_id = c.get("asset_id", "")[:8]
-            price = c.get("price", "?")
-            size = c.get("size", "?")
-            side = c.get("side", "?")
-            self.log(f"📊 CHANGE  | {asset_id}... | {side} @ {price} = {size}")
-
-    def _handle_trade(self, data: dict):
-        """处理 last_trade_price 消息（成交）"""
-        self.stats["trades_received"] += 1
-        asset_id = data.get("asset_id", "")[:8]
-        price = data.get("price", "?")
-        size = data.get("size", "?")
-        side = data.get("side", "?")
-
-        # 用颜色区分买卖
-        arrow = "🟢" if side == "BUY" else "🔴"
-        self.log(f"{arrow} TRADE   | {asset_id}... | {side} {size} @ {price}")
-
-    def _handle_tick_size_change(self, data: dict):
-        """处理 tick_size_change 消息"""
-        asset_id = data.get("asset_id", "")[:8]
-        old_tick = data.get("old_tick_size", "?")
-        new_tick = data.get("new_tick_size", "?")
-        self.log(f"⚙️ TICK    | {asset_id}... | {old_tick} → {new_tick}")
-
-    def on_error(self, ws, error):
-        """错误处理"""
-        self.log(f"WebSocket 错误: {error}", "ERROR")
-        self.stats["errors"] += 1
-
-    def on_close(self, ws, close_status_code, close_msg):
-        """连接关闭"""
-        self.is_running = False
-        self.log(f"连接关闭: {close_status_code} - {close_msg}")
-
-    def _ping_loop(self, ws):
-        """心跳循环"""
-        while self.is_running:
-            try:
-                ws.send("PING")
-            except:
-                break
-            time.sleep(10)
-
-    def start(self):
-        """启动收集器"""
-        self.log("启动 Collector...")
-
-        self.ws = WebSocketApp(
-            WS_URL,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close,
-        )
-
-        self.ws.run_forever()
-
-    def get_stats(self) -> dict:
-        """获取统计信息"""
-        return {
-            **self.stats,
-            "uptime": str(datetime.now() - self.stats["connected_at"]) if self.stats["connected_at"] else None,
-        }
+    # 用颜色区分买卖
+    arrow = "🟢" if side == "BUY" else "🔴"
+    print(f"[{ts}] {arrow} TRADE | {asset_id}... | {side} {size:.1f} @ {price:.2f}")
 
 
-def get_top_token_ids(limit: int = 10) -> List[str]:
-    """
-    获取热门市场的 token_ids
-    使用 Events API（和老项目一样的逻辑）
-    """
-    print(f"正在从 Events API 获取热门市场...")
+def on_book(book: Dict):
+    """处理订单簿快照"""
+    ts = datetime.now().strftime("%H:%M:%S")
+    asset_id = book.get('asset_id', '')[:8]
+    bids = len(book.get('bids', []))
+    asks = len(book.get('asks', []))
+    print(f"[{ts}] 📚 BOOK  | {asset_id}... | {bids} bids, {asks} asks")
 
-    try:
-        # 用 Events API，和老项目一样
-        response = httpx.get(
-            "https://gamma-api.polymarket.com/events",
-            params={
-                "closed": "false",
-                "active": "true",
-                "limit": 20,  # 获取 20 个 events
-            },
-            timeout=10.0
-        )
 
-        if response.status_code != 200:
-            print(f"API 错误: {response.status_code}")
-            return []
+def get_top_markets(limit: int = 10):
+    """获取热门市场"""
+    print(f"正在获取前 {limit} 个热门市场...")
 
-        events = response.json()
-        token_ids = []
-        count = 0
+    api = PolymarketAPI()
+    markets = api.get_all_markets_from_events(min_volume_24h=1000, max_events=20)
 
-        for event in events:
-            # 每个 event 里有多个 markets
-            markets = event.get("markets", [])
-            for m in markets:
-                if count >= limit:
-                    break
+    # 按交易量排序，取前 limit 个
+    markets_sorted = sorted(markets, key=lambda x: x.get('volume_24h', 0) or 0, reverse=True)
+    top_markets = markets_sorted[:limit]
 
-                # 获取 token IDs
-                tokens = m.get("clobTokenIds") or []
-                question = m.get("question", "")[:40]
-                volume = m.get("volume24hr", 0) or 0
+    print(f"\n选取了 {len(top_markets)} 个活跃市场:")
+    token_ids = []
+    for m in top_markets:
+        question = m.get('question', '')[:40]
+        volume = m.get('volume_24h', 0) or 0
+        yes_token = m.get('yes_token_id')
+        if yes_token:
+            token_ids.append(yes_token)
+            print(f"  ✓ {question}... (${volume:,.0f})")
 
-                # 只取活跃的市场（有交易量的）
-                if tokens and len(tokens) > 0 and volume > 1000:
-                    token_ids.append(tokens[0])  # YES token
-                    print(f"  ✓ {question}... (${volume:,.0f})")
-                    count += 1
-
-            if count >= limit:
-                break
-
-        print(f"\n共获取 {len(token_ids)} 个 token_ids")
-        return token_ids
-
-    except Exception as e:
-        print(f"获取市场失败: {e}")
-        return []
+    return token_ids
 
 
 def main():
@@ -252,32 +70,39 @@ def main():
     print()
     print("=" * 60)
     print("  Belief Reaction System - Collector")
-    print("  实时数据收集器")
+    print("  实时数据收集器（复用老项目 WebSocket）")
     print("=" * 60)
     print()
 
-    # 获取热门市场的 token_ids
-    token_ids = get_top_token_ids(limit=10)
+    # 获取热门市场
+    token_ids = get_top_markets(limit=10)
 
     if not token_ids:
-        print("没有获取到 token_ids，退出")
+        print("没有获取到市场，退出")
         return
 
     print()
+    print("=" * 60)
+    print("  实时数据流 (按 Ctrl+C 停止)")
+    print("=" * 60)
+    print()
 
-    # 创建并启动 Collector
-    collector = Collector(token_ids=token_ids, verbose=True)
+    # 使用老项目的 WebSocket 客户端
+    ws = PolymarketWebSocket(
+        asset_ids=token_ids,
+        on_trade=on_trade,
+        on_book=on_book,
+        verbose=True
+    )
 
     try:
-        collector.start()
+        ws.start()
     except KeyboardInterrupt:
         print("\n\n用户中断")
         print("\n统计信息:")
-        stats = collector.get_stats()
-        print(f"  订单簿快照: {stats['books_received']}")
-        print(f"  价格变化: {stats['price_changes_received']}")
-        print(f"  成交: {stats['trades_received']}")
-        print(f"  错误: {stats['errors']}")
+        print(f"  成交消息: {ws.stats['trades_received']}")
+        print(f"  订单簿: {ws.stats['books_received']}")
+        print(f"  错误: {ws.stats['errors']}")
 
 
 if __name__ == "__main__":
