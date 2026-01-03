@@ -3,8 +3,10 @@ Belief Reaction System - FastAPI Backend
 启动命令: uvicorn backend.api.main:app --reload
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
+from typing import Optional
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -96,6 +98,110 @@ def get_config():
             "key_levels_count": KEY_LEVELS_COUNT,
         }
     }
+
+
+# ============================================================================
+# 真实市场数据
+# ============================================================================
+
+@app.get("/api/markets")
+async def get_markets(
+    limit: int = Query(default=50, le=100, description="返回数量，最多100"),
+    category: Optional[str] = Query(default=None, description="分类筛选")
+):
+    """
+    获取 Polymarket 热门市场列表（按交易量排序）
+
+    - **limit**: 返回数量，默认50，最多100
+    - **category**: 可选分类筛选
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # 调用 Gamma API 获取活跃市场
+            params = {
+                "closed": "false",
+                "active": "true",
+                "limit": limit,
+                "order": "volume24hr",
+                "ascending": "false"
+            }
+
+            response = await client.get(
+                "https://gamma-api.polymarket.com/markets",
+                params=params
+            )
+
+            if response.status_code != 200:
+                return {"error": f"Gamma API error: {response.status_code}", "markets": []}
+
+            raw_markets = response.json()
+
+            # 格式化返回数据
+            markets = []
+            for m in raw_markets:
+                # 获取 token IDs
+                tokens = m.get("clobTokenIds") or []
+                yes_token = tokens[0] if len(tokens) > 0 else None
+                no_token = tokens[1] if len(tokens) > 1 else None
+
+                markets.append({
+                    "condition_id": m.get("conditionId"),
+                    "question": m.get("question"),
+                    "slug": m.get("slug"),
+                    "yes_token_id": yes_token,
+                    "no_token_id": no_token,
+                    "yes_price": m.get("outcomePrices", [None, None])[0],
+                    "no_price": m.get("outcomePrices", [None, None])[1] if len(m.get("outcomePrices", [])) > 1 else None,
+                    "volume_24h": m.get("volume24hr", 0),
+                    "liquidity": m.get("liquidityClob", 0),
+                    "end_date": m.get("endDate"),
+                    "image": m.get("image"),
+                })
+
+            return {
+                "count": len(markets),
+                "markets": markets
+            }
+
+    except httpx.TimeoutException:
+        return {"error": "Request timeout", "markets": []}
+    except Exception as e:
+        return {"error": str(e), "markets": []}
+
+
+@app.get("/api/markets/{condition_id}")
+async def get_market_detail(condition_id: str):
+    """获取单个市场详情"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"https://gamma-api.polymarket.com/markets/{condition_id}"
+            )
+
+            if response.status_code != 200:
+                return {"error": f"Market not found: {condition_id}"}
+
+            m = response.json()
+
+            tokens = m.get("clobTokenIds") or []
+
+            return {
+                "condition_id": m.get("conditionId"),
+                "question": m.get("question"),
+                "description": m.get("description"),
+                "slug": m.get("slug"),
+                "yes_token_id": tokens[0] if len(tokens) > 0 else None,
+                "no_token_id": tokens[1] if len(tokens) > 1 else None,
+                "yes_price": m.get("outcomePrices", [None])[0],
+                "volume_24h": m.get("volume24hr", 0),
+                "liquidity": m.get("liquidityClob", 0),
+                "end_date": m.get("endDate"),
+                "image": m.get("image"),
+                "created_at": m.get("createdAt"),
+            }
+
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ============================================================================
