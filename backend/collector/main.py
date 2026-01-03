@@ -23,7 +23,7 @@ from utils.polymarket_api import PolymarketAPI
 
 # 数据库配置
 DB_CONFIG = {
-    'host': 'localhost',
+    'host': '127.0.0.1',  # 用 IP 而不是 localhost，避免 IPv6 问题
     'port': 5432,
     'database': 'belief_reaction',
     'user': 'postgres',
