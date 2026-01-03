@@ -6,7 +6,7 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: belief-reaction-db
     ports:
-      - "5432:5432"
+      - "5433:5432"  # 用 5433 避免和本机 PostgreSQL 冲突
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
