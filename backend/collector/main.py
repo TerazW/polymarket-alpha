@@ -178,7 +178,7 @@ class Collector:
 
 
 def get_top_token_ids(limit: int = 10) -> List[str]:
-    """获取热门市场的 token_ids"""
+    """获取热门市场的 token_ids（只取 YES token）"""
     print(f"正在获取前 {limit} 个热门市场...")
 
     try:
@@ -204,8 +204,9 @@ def get_top_token_ids(limit: int = 10) -> List[str]:
         for m in markets:
             tokens = m.get("clobTokenIds") or []
             question = m.get("question", "")[:40]
-            if tokens:
-                token_ids.extend(tokens)
+            # 只取第一个 token (YES token)
+            if tokens and len(tokens) > 0:
+                token_ids.append(tokens[0])
                 print(f"  ✓ {question}...")
 
         print(f"\n共获取 {len(token_ids)} 个 token_ids")
