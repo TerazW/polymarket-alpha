@@ -79,16 +79,14 @@ class Collector:
 
         try:
             data = json.loads(message)
-            event_type = data.get("event_type", "")
 
-            if event_type == "book":
-                self._handle_book(data)
-            elif event_type == "price_change":
-                self._handle_price_change(data)
-            elif event_type == "last_trade_price":
-                self._handle_trade(data)
-            elif event_type == "tick_size_change":
-                self._handle_tick_size_change(data)
+            # 处理数组消息（批量更新）
+            if isinstance(data, list):
+                for item in data:
+                    self._process_single_message(item)
+                return
+
+            self._process_single_message(data)
 
         except json.JSONDecodeError:
             self.log(f"JSON 解析错误: {message[:50]}...", "ERROR")
@@ -96,6 +94,22 @@ class Collector:
         except Exception as e:
             self.log(f"处理消息错误: {e}", "ERROR")
             self.stats["errors"] += 1
+
+    def _process_single_message(self, data: dict):
+        """处理单条消息"""
+        if not isinstance(data, dict):
+            return
+
+        event_type = data.get("event_type", "")
+
+        if event_type == "book":
+            self._handle_book(data)
+        elif event_type == "price_change":
+            self._handle_price_change(data)
+        elif event_type == "last_trade_price":
+            self._handle_trade(data)
+        elif event_type == "tick_size_change":
+            self._handle_tick_size_change(data)
 
     def _handle_book(self, data: dict):
         """处理 book 消息（完整订单簿快照）"""
@@ -178,18 +192,20 @@ class Collector:
 
 
 def get_top_token_ids(limit: int = 10) -> List[str]:
-    """获取热门市场的 token_ids（只取 YES token）"""
-    print(f"正在获取前 {limit} 个热门市场...")
+    """
+    获取热门市场的 token_ids
+    使用 Events API（和老项目一样的逻辑）
+    """
+    print(f"正在从 Events API 获取热门市场...")
 
     try:
+        # 用 Events API，和老项目一样
         response = httpx.get(
-            "https://gamma-api.polymarket.com/markets",
+            "https://gamma-api.polymarket.com/events",
             params={
                 "closed": "false",
                 "active": "true",
-                "limit": limit,
-                "order": "volume24hr",
-                "ascending": "false"
+                "limit": 20,  # 获取 20 个 events
             },
             timeout=10.0
         )
@@ -198,16 +214,30 @@ def get_top_token_ids(limit: int = 10) -> List[str]:
             print(f"API 错误: {response.status_code}")
             return []
 
-        markets = response.json()
+        events = response.json()
         token_ids = []
+        count = 0
 
-        for m in markets:
-            tokens = m.get("clobTokenIds") or []
-            question = m.get("question", "")[:40]
-            # 只取第一个 token (YES token)
-            if tokens and len(tokens) > 0:
-                token_ids.append(tokens[0])
-                print(f"  ✓ {question}...")
+        for event in events:
+            # 每个 event 里有多个 markets
+            markets = event.get("markets", [])
+            for m in markets:
+                if count >= limit:
+                    break
+
+                # 获取 token IDs
+                tokens = m.get("clobTokenIds") or []
+                question = m.get("question", "")[:40]
+                volume = m.get("volume24hr", 0) or 0
+
+                # 只取活跃的市场（有交易量的）
+                if tokens and len(tokens) > 0 and volume > 1000:
+                    token_ids.append(tokens[0])  # YES token
+                    print(f"  ✓ {question}... (${volume:,.0f})")
+                    count += 1
+
+            if count >= limit:
+                break
 
         print(f"\n共获取 {len(token_ids)} 个 token_ids")
         return token_ids
