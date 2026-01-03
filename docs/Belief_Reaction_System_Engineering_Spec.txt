@@ -1,0 +1,657 @@
+================================================================================
+                      BELIEF REACTION SYSTEM
+                   Engineering Specification v1.0
+================================================================================
+
+Real-time Belief Reaction Detection System for Polymarket
+For Claude Code Implementation
+
+================================================================================
+1. SYSTEM OVERVIEW
+================================================================================
+
+1.1 What This System Is
+-----------------------
+A Real-time Belief Reaction Detection System for event-driven prediction 
+markets (Polymarket). It detects whether human beliefs have changed by 
+monitoring order book behavior under pressure.
+
+1.2 What This System Is NOT
+---------------------------
+- NOT a price prediction tool
+- NOT a trading signal generator
+- NOT traditional order flow analysis (Bookmap/Footprint)
+- NOT Market Profile or any price-based technical analysis
+
+1.3 Core Philosophy
+-------------------
+"看存在没意义，看反应才有意义"
+"Observing existence is meaningless; observing REACTION is everything."
+
+In Polymarket, the existence of liquidity at a price level means nothing. 
+What matters is HOW that liquidity REACTS when tested. This system monitors 
+reactions, not states.
+
+1.4 Why Traditional Tools Fail Here
+-----------------------------------
+Polymarket is fundamentally different from traditional markets:
+
+- Bounded price space (0-100%): No trend extension possible
+- No value discovery: Price = probability consensus, not intrinsic value
+- No leverage/stop-loss cascades: Manipulation profit ceiling is very low
+- Information-driven: Orders = belief declarations, not technical signals
+- No market maker protection: DOM changes = real human decision changes
+
+================================================================================
+2. SYSTEM ARCHITECTURE
+================================================================================
+
+2.1 Four-Layer Architecture
+---------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Layer │ Name               │ Responsibility                                 │
+├───────┼────────────────────┼────────────────────────────────────────────────┤
+│   1   │ Data Layer         │ Raw WebSocket data ingestion, state management │
+│   2   │ Reaction Engine    │ Shock detection, reaction classification       │
+│   3   │ Belief State Engine│ State machine for market belief status         │
+│   4   │ Evidence UI        │ Visualization and alerts (evidence, NOT signal)│
+└─────────────────────────────────────────────────────────────────────────────┘
+
+2.2 Data Flow Diagram
+---------------------
+Polymarket WebSocket
+    ↓ book / price_change / last_trade_price
+[Data Layer] → State Store (in-memory L2 map)
+    ↓ price_change events
+[Reaction Engine] → Shock Detection → Reaction Classification
+    ↓ reaction events
+[Belief State Engine] → State Transitions
+    ↓ state changes / alerts
+[Evidence UI] → Heatmap / Timeline / Alerts
+
+================================================================================
+3. DATA LAYER SPECIFICATION
+================================================================================
+
+3.1 WebSocket Connection
+------------------------
+Endpoint: wss://ws-subscriptions-clob.polymarket.com/ws/market
+Channel:  Market Channel (no authentication required)
+Subscribe: By asset_ids (token IDs)
+
+Subscribe Message Format:
+{ "assets_ids": ["token_id_1", "token_id_2"], "type": "market" }
+
+Keep-Alive: Send "PING" every 10 seconds
+
+3.2 Message Types We Use
+------------------------
+
+3.2.1 book Message
+- When emitted: First subscription + when trade affects book
+- Purpose: Full orderbook snapshot for initialization/recovery
+
+{
+  "event_type": "book",
+  "asset_id": "token_id",
+  "market": "condition_id",
+  "bids": [{"price": "0.48", "size": "30"}, ...],
+  "asks": [{"price": "0.52", "size": "25"}, ...],
+  "timestamp": "1234567890000",
+  "hash": "0x..."
+}
+
+3.2.2 price_change Message (CRITICAL)
+- When emitted: New order placed OR order cancelled
+- Purpose: Incremental update - THE PRIMARY DATA SOURCE
+
+⚠️ CRITICAL: size field is NEW AGGREGATE SIZE, not delta!
+
+{
+  "event_type": "price_change",
+  "market": "condition_id",
+  "timestamp": "1234567890000",
+  "price_changes": [
+    {
+      "asset_id": "token_id",
+      "price": "0.50",
+      "size": "200",          // NEW aggregate size at this level
+      "side": "BUY",
+      "hash": "abc123",
+      "best_bid": "0.50",
+      "best_ask": "0.52"
+    }
+  ]
+}
+
+3.2.3 last_trade_price Message
+- When emitted: Maker/taker order matched (trade executed)
+- Purpose: Shock detection anchor point
+
+{
+  "event_type": "last_trade_price",
+  "asset_id": "token_id",
+  "market": "condition_id",
+  "price": "0.456",
+  "side": "BUY",
+  "size": "219.217767",
+  "timestamp": "1750428146322"
+}
+
+3.2.4 tick_size_change Message
+- When emitted: Price > 0.96 or < 0.04 (tick changes from 0.01 to 0.001)
+- Purpose: Adjust heatmap grid resolution
+
+3.3 In-Memory State Store
+-------------------------
+
+3.3.1 State Structure (Python)
+
+class PriceLevel:
+    token_id: str
+    price: Decimal           # e.g., 0.72
+    side: Literal['bid', 'ask']
+    
+    # Current state
+    size_now: float          # Current aggregate size
+    size_peak: float         # Maximum size ever seen
+    first_seen_ts: int       # When this level first appeared (ms)
+    last_update_ts: int      # Last update timestamp (ms)
+    
+    # Behavioral statistics
+    hit_count: int           # Times this level was hit by trades
+    last_hit_ts: int         # Last time hit
+    refill_count: int        # Times liquidity was replenished after hit
+    cancel_count: int        # Times liquidity was pulled without hit
+
+3.3.2 Update Logic
+
+def on_price_change(msg: PriceChangeMessage):
+    for change in msg.price_changes:
+        key = (change.asset_id, change.price, change.side)
+        
+        old_size = state_store.get(key, default=PriceLevel()).size_now
+        new_size = float(change.size)
+        delta = new_size - old_size  # Computed, not received
+        
+        # Update state
+        level = state_store.get_or_create(key)
+        level.size_now = new_size
+        level.size_peak = max(level.size_peak, new_size)
+        level.last_update_ts = msg.timestamp
+        
+        # Emit event for Reaction Engine
+        emit_liquidity_event(level, delta, msg.timestamp)
+        
+        # Write to timeseries DB
+        write_to_timeseries(level, msg.timestamp)
+
+================================================================================
+4. REACTION ENGINE SPECIFICATION
+================================================================================
+
+The Reaction Engine is the core innovation. It transforms raw order book 
+events into meaningful behavioral signals.
+
+4.1 Observation Unit
+--------------------
+The fundamental observation unit is (token_id, price, side) — a specific 
+price level on a specific side of a specific token's order book. Each unit 
+has a LIFECYCLE that we track.
+
+4.2 Shock Detection
+-------------------
+A Shock is a discrete event where a price level is significantly impacted 
+by trading activity.
+
+4.2.1 Shock Trigger Conditions (CONFIGURABLE)
+
+# Configuration parameters - tune based on observation
+SHOCK_TIME_WINDOW_MS = 2000      # 2 seconds
+SHOCK_VOLUME_THRESHOLD = 0.35    # 35% of current size
+SHOCK_CONSECUTIVE_TRADES = 3     # OR 3+ consecutive trades at same price
+
+def detect_shock(trade: TradeEvent, level: PriceLevel) -> Optional[ShockEvent]:
+    """
+    Shock triggers when:
+    1. Trade volume >= SHOCK_VOLUME_THRESHOLD * size_before
+       within SHOCK_TIME_WINDOW_MS
+    OR
+    2. SHOCK_CONSECUTIVE_TRADES consecutive trades hit same price
+    """
+    
+    # Check condition 1: Volume threshold
+    recent_volume = get_recent_trade_volume(
+        level.token_id, level.price, SHOCK_TIME_WINDOW_MS
+    )
+    if recent_volume >= SHOCK_VOLUME_THRESHOLD * level.size_before_trades:
+        return create_shock_event(level, recent_volume, 'volume')
+    
+    # Check condition 2: Consecutive trades
+    consecutive = count_consecutive_trades_at_price(level.price)
+    if consecutive >= SHOCK_CONSECUTIVE_TRADES:
+        return create_shock_event(level, recent_volume, 'consecutive')
+    
+    return None
+
+4.2.2 ShockEvent Schema
+
+@dataclass
+class ShockEvent:
+    shock_id: str              # UUID
+    token_id: str
+    price: Decimal
+    side: Literal['bid', 'ask']
+    ts_start: int              # Timestamp when shock started
+    trade_volume: float        # Total trade volume in shock
+    liquidity_before: float    # Size at level before shock
+    trigger_type: str          # 'volume' or 'consecutive'
+
+4.3 Reaction Window
+-------------------
+Reaction is NOT immediate. After a shock, we observe the price level for a 
+configurable window to see how it responds.
+
+4.3.1 Window Configuration (CONFIGURABLE)
+
+REACTION_WINDOW_MS = 20000       # 20 seconds observation window
+REACTION_SAMPLE_INTERVAL_MS = 500  # Sample every 500ms
+
+4.3.2 Reaction Metrics (Computed at window end)
+
+@dataclass
+class ReactionMetrics:
+    # Liquidity changes
+    net_liquidity_change: float   # size_end - size_after_shock
+    min_liquidity: float          # Minimum size during window
+    max_liquidity: float          # Maximum size during window
+    
+    # Refill behavior
+    refill_ratio: float           # max(size_during_window) / liquidity_before
+    time_to_refill_ms: Optional[int]  # Time until 80% recovery, or None
+    
+    # Speed indicators
+    cancel_speed: Literal['instant', 'fast', 'slow', 'none']
+    
+    # Price movement
+    price_shift: Decimal          # Best bid/ask movement (chase indicator)
+
+4.4 Reaction Classification
+---------------------------
+Based on ReactionMetrics, classify the reaction into one of six types. 
+This is the system's VOCABULARY — the language it speaks.
+
+4.4.1 Reaction Types (FIXED VOCABULARY)
+
+┌─────────┬────────────────────┬─────────────────────────────────┬──────────────────┐
+│  Code   │       Name         │        Detection Rule           │     Meaning      │
+├─────────┼────────────────────┼─────────────────────────────────┼──────────────────┤
+│  HOLD   │ Hold Under Pressure│ refill_ratio ≥ 0.8 AND          │ Belief is STABLE │
+│         │                    │ time_to_refill < 5s             │                  │
+├─────────┼────────────────────┼─────────────────────────────────┼──────────────────┤
+│  DELAY  │ Delayed Refill     │ 0.3 ≤ refill_ratio < 0.8        │ Belief HESITATING│
+├─────────┼────────────────────┼─────────────────────────────────┼──────────────────┤
+│  PULL   │ Pull on Impact     │ min_liq ≤ 0.1×before AND        │ Belief CRACKING  │
+│         │                    │ no refill                       │                  │
+├─────────┼────────────────────┼─────────────────────────────────┼──────────────────┤
+│  VACUUM │ Liquidity Vacuum   │ min_liq ≤ 0.05×before for       │ Belief is BROKEN │
+│         │                    │ full window                     │                  │
+├─────────┼────────────────────┼─────────────────────────────────┼──────────────────┤
+│  CHASE  │ Chase Price        │ price_shift ≠ 0 (anchor moved)  │ Belief SHIFTING  │
+├─────────┼────────────────────┼─────────────────────────────────┼──────────────────┤
+│  FAKE   │ Fake Wall / Anchor │ size_peak_after > liquidity_    │ Psychological    │
+│         │                    │ before                          │ anchoring        │
+└─────────┴────────────────────┴─────────────────────────────────┴──────────────────┘
+
+4.4.2 Classification Algorithm
+
+def classify_reaction(shock: ShockEvent, metrics: ReactionMetrics) -> ReactionType:
+    # Priority order matters - check most specific first
+    
+    # 1. Check for VACUUM (strongest signal)
+    if metrics.min_liquidity <= 0.05 * shock.liquidity_before:
+        if metrics.refill_ratio < 0.1:  # No meaningful refill
+            return ReactionType.VACUUM
+    
+    # 2. Check for FAKE (counter-intuitive increase)
+    if metrics.max_liquidity > shock.liquidity_before:
+        return ReactionType.FAKE
+    
+    # 3. Check for CHASE (price anchor moved)
+    if abs(metrics.price_shift) > 0:
+        return ReactionType.CHASE
+    
+    # 4. Check for PULL
+    if metrics.min_liquidity <= 0.1 * shock.liquidity_before:
+        if metrics.refill_ratio < 0.3:
+            return ReactionType.PULL
+    
+    # 5. Check for HOLD (strong recovery)
+    if metrics.refill_ratio >= 0.8:
+        if metrics.time_to_refill_ms and metrics.time_to_refill_ms < 5000:
+            return ReactionType.HOLD
+    
+    # 6. Default to DELAY
+    return ReactionType.DELAY
+
+================================================================================
+5. BELIEF STATE ENGINE
+================================================================================
+
+The Belief State Engine is a finite state machine that tracks the overall 
+belief status of each market based on accumulated reaction events.
+
+5.1 State Definitions (FIXED SET)
+---------------------------------
+┌───────────┬─────────────────────────────────────┬─────────────┐
+│   State   │           Description               │  Indicator  │
+├───────────┼─────────────────────────────────────┼─────────────┤
+│  STABLE   │ Market belief is confident/consistent│ 🟢 Green   │
+│  FRAGILE  │ Market belief shows weakness signs   │ 🟡 Yellow  │
+│  CRACKING │ Market belief actively deteriorating │ 🟠 Orange  │
+│  BROKEN   │ Market belief has collapsed          │ 🔴 Red     │
+└───────────┴─────────────────────────────────────┴─────────────┘
+
+5.2 Key Price Levels (Anchor Points)
+------------------------------------
+State transitions are only triggered by reactions at KEY PRICE LEVELS — 
+not every price level matters.
+
+def identify_key_levels(token_id: str, lookback_hours: int = 24) -> List[Decimal]:
+    """
+    Key levels = price levels with highest historical size_peak
+    These are 'belief anchors' - where conviction has concentrated
+    """
+    levels = get_historical_levels(token_id, lookback_hours)
+    sorted_by_peak = sorted(levels, key=lambda x: x.size_peak, reverse=True)
+    return [l.price for l in sorted_by_peak[:KEY_LEVELS_COUNT]]
+
+KEY_LEVELS_COUNT = 5  # Configurable: top N levels to track
+
+5.3 State Transition Rules
+--------------------------
+State transitions are DETERMINISTIC — driven entirely by reaction events 
+at key levels.
+
+class BeliefStateMachine:
+    def __init__(self, token_id: str):
+        self.token_id = token_id
+        self.state = BeliefState.STABLE  # Initial state
+        self.recent_reactions: List[ReactionEvent] = []
+        self.key_levels = identify_key_levels(token_id)
+    
+    def on_reaction(self, reaction: ReactionEvent):
+        # Only process reactions at key levels
+        if reaction.price not in self.key_levels:
+            return
+        
+        self.recent_reactions.append(reaction)
+        self._prune_old_reactions()  # Keep last N or last T minutes
+        self._evaluate_transition()
+    
+    def _evaluate_transition(self):
+        counts = self._count_reaction_types()
+        
+        # BROKEN: 2+ key levels with VACUUM
+        vacuum_levels = self._unique_levels_with_type(ReactionType.VACUUM)
+        if len(vacuum_levels) >= 2:
+            self._transition_to(BeliefState.BROKEN)
+            return
+        
+        # CRACKING: Any PULL or VACUUM at key level
+        if counts[ReactionType.PULL] > 0 or counts[ReactionType.VACUUM] > 0:
+            self._transition_to(BeliefState.CRACKING)
+            return
+        
+        # FRAGILE: Mix of HOLD and DELAY
+        if counts[ReactionType.DELAY] > 0 and counts[ReactionType.HOLD] > 0:
+            self._transition_to(BeliefState.FRAGILE)
+            return
+        
+        # STABLE: Consistent HOLD or FAKE
+        if counts[ReactionType.HOLD] >= 3 or counts[ReactionType.FAKE] >= 2:
+            self._transition_to(BeliefState.STABLE)
+            return
+
+================================================================================
+6. DATABASE SCHEMA
+================================================================================
+
+Use PostgreSQL with TimescaleDB extension for time-series optimization.
+
+6.1 Core Tables
+---------------
+
+6.1.1 book_level_ts (Time-series: Heatmap data)
+
+CREATE TABLE book_level_ts (
+    ts              TIMESTAMPTZ NOT NULL,
+    token_id        TEXT NOT NULL,
+    side            TEXT NOT NULL,         -- 'bid' or 'ask'
+    price           NUMERIC(5,3) NOT NULL, -- e.g., 0.720
+    size            NUMERIC NOT NULL,      -- Aggregate size
+    PRIMARY KEY (ts, token_id, side, price)
+);
+
+-- Convert to hypertable for time-series optimization
+SELECT create_hypertable('book_level_ts', 'ts');
+
+-- Recommended: 1-second sampling for MVP
+
+6.1.2 shock_events
+
+CREATE TABLE shock_events (
+    shock_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ts              TIMESTAMPTZ NOT NULL,
+    token_id        TEXT NOT NULL,
+    price           NUMERIC(5,3) NOT NULL,
+    side            TEXT NOT NULL,
+    trade_volume    NUMERIC NOT NULL,
+    liquidity_before NUMERIC NOT NULL,
+    trigger_type    TEXT NOT NULL          -- 'volume' or 'consecutive'
+);
+CREATE INDEX idx_shock_token_ts ON shock_events(token_id, ts);
+
+6.1.3 reaction_events
+
+CREATE TABLE reaction_events (
+    reaction_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    shock_id        UUID REFERENCES shock_events(shock_id),
+    ts              TIMESTAMPTZ NOT NULL,  -- When reaction was classified
+    token_id        TEXT NOT NULL,
+    price           NUMERIC(5,3) NOT NULL,
+    reaction_type   TEXT NOT NULL,         -- HOLD/DELAY/PULL/VACUUM/CHASE/FAKE
+    
+    -- Metrics snapshot
+    refill_ratio    NUMERIC,
+    time_to_refill_ms INTEGER,
+    min_liquidity   NUMERIC,
+    price_shift     NUMERIC(5,3)
+);
+CREATE INDEX idx_reaction_token_ts ON reaction_events(token_id, ts);
+
+6.1.4 belief_state_changes
+
+CREATE TABLE belief_state_changes (
+    id              SERIAL PRIMARY KEY,
+    ts              TIMESTAMPTZ NOT NULL,
+    token_id        TEXT NOT NULL,
+    old_state       TEXT NOT NULL,
+    new_state       TEXT NOT NULL,
+    trigger_reaction_id UUID REFERENCES reaction_events(reaction_id)
+);
+CREATE INDEX idx_belief_token_ts ON belief_state_changes(token_id, ts);
+
+6.1.5 markets_metadata
+
+CREATE TABLE markets_metadata (
+    condition_id    TEXT PRIMARY KEY,
+    question        TEXT,
+    yes_token_id    TEXT NOT NULL,
+    no_token_id     TEXT NOT NULL,
+    tick_size       NUMERIC(5,4) DEFAULT 0.01,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+================================================================================
+7. UI SPECIFICATION
+================================================================================
+
+CRITICAL PRINCIPLE: UI shows CONCLUSIONS first, EVIDENCE second. Users make 
+decisions from state/alerts, then validate with visuals.
+
+7.1 What NOT to Build
+---------------------
+❌ K-line / Candlestick charts
+❌ Market Profile / TPO charts
+❌ Footprint charts
+❌ Traditional DOM ladder as primary view
+❌ Any price-based technical indicators
+
+7.2 Required Components
+-----------------------
+
+7.2.1 Primary: Market State Dashboard
+Main view showing all monitored markets with their current belief state.
+
+┌─────────────────────────────────────────────────────────┐
+│  MARKET                  STATE      LAST REACTION      │
+├─────────────────────────────────────────────────────────┤
+│  🟢 Will X happen?       STABLE     HOLD @0.72 (2m ago) │
+│  🟡 Will Y happen?       FRAGILE    DELAY @0.45 (5m ago)│
+│  🔴 Will Z happen?       BROKEN     VACUUM @0.30 (1m)   │
+└─────────────────────────────────────────────────────────┘
+
+7.2.2 Secondary: Reaction Heatmap (Evidence Layer)
+Only shown when user clicks into a market or alert. NOT the primary view.
+
+- X-axis: Time (short window: 15-60 minutes)
+- Y-axis: Probability / Price (tick-aligned grid)
+- Color: Liquidity depth (log scale recommended)
+- Overlay: Shock markers, reaction type icons, best bid/ask line
+
+7.2.3 Tertiary: Reaction Tape
+Real-time stream of reaction events (like time & sales, but for BEHAVIORS).
+
+14:32:15  HOLD    @0.72  refill 95% in 3s
+14:31:02  PULL    @0.68  liquidity dropped 92%
+14:29:45  CHASE   @0.70  anchor moved +0.02
+14:28:30  VACUUM  @0.65  no recovery for 20s
+
+7.2.4 Alerts Panel
+Structured alerts with evidence. Alert format:
+
+{
+  "market": "Will X happen by Y?",
+  "level": "72%",
+  "event": "BELIEF_BREAKDOWN",
+  "evidence": [
+    "VACUUM detected after shock",
+    "No refill for 18 seconds",
+    "Bid-side liquidity asymmetrically pulled"
+  ]
+}
+
+================================================================================
+8. IMPLEMENTATION PHASES
+================================================================================
+
+Phase 1: Data Foundation (Week 1-2)
+-----------------------------------
+1. WebSocket connector to Polymarket Market Channel
+2. In-memory state store for L2 orderbook
+3. PostgreSQL + TimescaleDB setup
+4. book_level_ts table with 1-second sampling
+5. Basic REST endpoint for market metadata (Gamma API integration)
+
+Deliverable: Can subscribe to markets, maintain state, store timeseries
+
+Phase 2: Reaction Engine (Week 3-4)
+-----------------------------------
+1. Shock detection module
+2. Reaction window observer
+3. Reaction classifier (6 types)
+4. shock_events and reaction_events tables
+5. Logging and metrics for tuning thresholds
+
+Deliverable: System detects and classifies reactions in real-time
+
+Phase 3: Belief State Engine (Week 5)
+-------------------------------------
+1. Key level identification
+2. State machine implementation
+3. belief_state_changes table
+4. State transition alerts
+
+Deliverable: Each market has a live belief state that updates automatically
+
+Phase 4: Evidence UI (Week 6-7)
+-------------------------------
+1. Backend API for state/reactions/timeseries
+2. Frontend: Market State Dashboard
+3. Frontend: Reaction Heatmap (WebGL/Canvas)
+4. Frontend: Reaction Tape
+5. Alert notifications
+
+Deliverable: Usable web application with core features
+
+Phase 5: Polish & Scale (Week 8+)
+---------------------------------
+1. Threshold tuning based on real data
+2. Multi-market support (collector sharding)
+3. Historical replay for backtesting
+4. Performance optimization
+
+Deliverable: Production-ready system
+
+================================================================================
+9. CONFIGURATION REFERENCE
+================================================================================
+
+All tunable parameters in one place. These should be configurable without 
+code changes.
+
+┌─────────────────────────────┬─────────┬──────────────────────────────────────┐
+│         Parameter           │ Default │            Description               │
+├─────────────────────────────┼─────────┼──────────────────────────────────────┤
+│ SHOCK_TIME_WINDOW_MS        │  2000   │ Window for shock volume calculation  │
+│ SHOCK_VOLUME_THRESHOLD      │  0.35   │ % of level size to trigger shock     │
+│ SHOCK_CONSECUTIVE_TRADES    │  3      │ Consecutive trades at same price     │
+│ REACTION_WINDOW_MS          │  20000  │ Observation window after shock       │
+│ HOLD_REFILL_THRESHOLD       │  0.8    │ Refill ratio for HOLD classification │
+│ HOLD_TIME_THRESHOLD_MS      │  5000   │ Time to refill for HOLD              │
+│ VACUUM_THRESHOLD            │  0.05   │ Max liquidity ratio for VACUUM       │
+│ KEY_LEVELS_COUNT            │  5      │ Number of key levels to track        │
+│ KEY_LEVELS_LOOKBACK_HOURS   │  24     │ History for key level identification │
+│ TIMESERIES_SAMPLE_MS        │  1000   │ Database sampling interval           │
+└─────────────────────────────┴─────────┴──────────────────────────────────────┘
+
+================================================================================
+10. FINAL NOTES FOR IMPLEMENTATION
+================================================================================
+
+10.1 Critical Constraints
+-------------------------
+1. No price predictions: System NEVER outputs price direction or targets
+2. No trading signals: System outputs belief state, not buy/sell recommendations
+3. Reaction > State: Focus on HOW liquidity changes, not what exists
+4. Evidence-based UI: Visuals are for validation, not primary signal
+
+10.2 Success Criteria
+---------------------
+- System correctly identifies VACUUM events before price moves
+- Belief state transitions correlate with actual market behavior
+- Users can understand WHY system flagged something via evidence UI
+- System does NOT regress into traditional order flow paradigm
+
+10.3 Remember
+-------------
+"看存在没意义，看反应才有意义"
+
+The existence of a wall means nothing. 
+How it reacts when tested — that's everything.
+
+================================================================================
+                          — End of Engineering Specification —
+================================================================================
