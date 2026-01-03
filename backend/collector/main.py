@@ -96,7 +96,7 @@ def main():
     )
 
     try:
-        ws.start()
+        ws.run()
     except KeyboardInterrupt:
         print("\n\n用户中断")
         print("\n统计信息:")
