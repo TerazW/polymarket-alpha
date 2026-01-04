@@ -1,30 +1,35 @@
 """
 Belief Reaction System - Collector
 实时数据收集器：连接 Polymarket WebSocket，收集订单簿数据并存入数据库。
+集成 ShockDetector 实时检测价格冲击事件。
 
 运行: python run_collector.py
-
-直接复用老项目的 PolymarketWebSocket（已验证运行良好）
 """
 
 import sys
 import os
 
-# 添加项目根目录到 path，以便导入 utils
+# 添加项目根目录到 path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, Optional
+from collections import defaultdict
 import psycopg2
 from psycopg2.extras import execute_values
 from utils.polymarket_ws import PolymarketWebSocket
 from utils.polymarket_api import PolymarketAPI
 
+# 导入 POC 模块
+from poc.models import TradeEvent, PriceLevel, ShockEvent
+from poc.shock_detector import ShockDetector
+
 
 # 数据库配置
 DB_CONFIG = {
     'host': '127.0.0.1',
-    'port': 5433,  # 用 5433 避免和本机 PostgreSQL (5432) 冲突
+    'port': 5433,
     'database': 'belief_reaction',
     'user': 'postgres',
     'password': 'postgres'
@@ -32,6 +37,12 @@ DB_CONFIG = {
 
 # 全局数据库连接
 db_conn: Optional[psycopg2.extensions.connection] = None
+
+# ShockDetector 实例
+shock_detector = ShockDetector()
+
+# 价格层级缓存 {(token_id, price_str, side): PriceLevel}
+price_levels: Dict[tuple, PriceLevel] = {}
 
 
 def get_db_connection():
@@ -63,6 +74,29 @@ def save_trade(trade: Dict):
         print(f"[DB ERROR] 保存成交失败: {e}")
 
 
+def save_shock_event(shock: ShockEvent):
+    """保存 Shock 事件到数据库"""
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO shock_events (shock_id, ts, token_id, price, side, trade_volume, liquidity_before, trigger_type)
+                VALUES (%s, to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (
+                shock.shock_id,
+                shock.ts_start,
+                shock.token_id,
+                float(shock.price),
+                shock.side,
+                shock.trade_volume,
+                shock.liquidity_before,
+                shock.trigger_type
+            ))
+    except Exception as e:
+        print(f"[DB ERROR] 保存 Shock 失败: {e}")
+
+
 def save_book_snapshot(book: Dict):
     """保存订单簿快照到数据库"""
     try:
@@ -72,14 +106,12 @@ def save_book_snapshot(book: Dict):
 
         rows = []
 
-        # 处理 bids
         for bid in book.get('bids', []):
             price = float(bid.get('price', 0))
             size = float(bid.get('size', 0))
             if size > 0:
                 rows.append((ts, token_id, 'bid', price, size))
 
-        # 处理 asks
         for ask in book.get('asks', []):
             price = float(ask.get('price', 0))
             size = float(ask.get('size', 0))
@@ -98,18 +130,73 @@ def save_book_snapshot(book: Dict):
         print(f"[DB ERROR] 保存订单簿失败: {e}")
 
 
+def update_price_levels(book: Dict):
+    """从订单簿更新价格层级缓存"""
+    token_id = book.get('asset_id')
+    now = int(datetime.now().timestamp() * 1000)
+
+    for bid in book.get('bids', []):
+        price = Decimal(str(bid.get('price', 0)))
+        size = float(bid.get('size', 0))
+        key = (token_id, str(price), 'bid')
+
+        if key not in price_levels:
+            price_levels[key] = PriceLevel(token_id=token_id, price=price, side='bid')
+        price_levels[key].update_size(size, now)
+
+    for ask in book.get('asks', []):
+        price = Decimal(str(ask.get('price', 0)))
+        size = float(ask.get('size', 0))
+        key = (token_id, str(price), 'ask')
+
+        if key not in price_levels:
+            price_levels[key] = PriceLevel(token_id=token_id, price=price, side='ask')
+        price_levels[key].update_size(size, now)
+
+
+def get_price_level(token_id: str, price: Decimal, side: str) -> Optional[PriceLevel]:
+    """获取价格层级"""
+    key = (token_id, str(price), side)
+    return price_levels.get(key)
+
+
 # 计数器
 trade_count = 0
 book_count = 0
+shock_count = 0
 
 
 def on_trade(trade: Dict):
     """处理成交消息"""
-    global trade_count
+    global trade_count, shock_count
     trade_count += 1
 
     # 保存到数据库
     save_trade(trade)
+
+    # 转换为 TradeEvent
+    trade_event = TradeEvent(
+        token_id=trade.get('asset_id', ''),
+        price=Decimal(str(trade.get('price', 0))),
+        size=float(trade.get('size', 0)),
+        side=trade.get('side', 'BUY').upper(),
+        timestamp=int(trade.get('timestamp', 0))
+    )
+
+    # 获取对应的价格层级
+    level_side = 'bid' if trade_event.side == 'SELL' else 'ask'
+    level = get_price_level(trade_event.token_id, trade_event.price, level_side)
+
+    # 检测 Shock
+    shock = shock_detector.on_trade(trade_event, level)
+
+    if shock:
+        shock_count += 1
+        save_shock_event(shock)
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] ⚡ SHOCK #{shock_count} | {shock.token_id[:8]}... | "
+              f"price={shock.price} side={shock.side} vol={shock.trade_volume:.1f} "
+              f"trigger={shock.trigger_type}")
 
     # 打印（每 10 条显示一次）
     if trade_count % 10 == 0 or trade_count <= 5:
@@ -127,7 +214,10 @@ def on_book(book: Dict):
     global book_count
     book_count += 1
 
-    # 保存到数据库（每 5 次保存一次，避免写入太频繁）
+    # 更新价格层级缓存
+    update_price_levels(book)
+
+    # 保存到数据库（每 5 次保存一次）
     if book_count % 5 == 0:
         save_book_snapshot(book)
 
@@ -147,7 +237,6 @@ def get_top_markets(limit: int = 10):
     api = PolymarketAPI()
     markets = api.get_all_markets_from_events(min_volume_24h=1000, max_events=20)
 
-    # 按交易量排序，取前 limit 个
     markets_sorted = sorted(markets, key=lambda x: x.get('volume_24h', 0) or 0, reverse=True)
     top_markets = markets_sorted[:limit]
 
@@ -169,7 +258,7 @@ def main():
     print()
     print("=" * 60)
     print("  Belief Reaction System - Collector")
-    print("  实时数据收集器（数据存入 TimescaleDB）")
+    print("  实时数据收集 + Shock 检测")
     print("=" * 60)
     print()
 
@@ -192,7 +281,7 @@ def main():
     print()
     print("=" * 60)
     print("  实时数据流 (按 Ctrl+C 停止)")
-    print("  数据正在写入 TimescaleDB...")
+    print("  ⚡ Shock 检测已启用")
     print("=" * 60)
     print()
 
@@ -211,7 +300,15 @@ def main():
         print("\n统计信息:")
         print(f"  成交消息: {ws.stats['trades_received']} (已存入 DB: {trade_count})")
         print(f"  订单簿: {ws.stats['books_received']} (已存入 DB: {book_count // 5})")
+        print(f"  ⚡ Shock 事件: {shock_count}")
         print(f"  错误: {ws.stats['errors']}")
+
+        # 显示 ShockDetector 统计
+        detector_stats = shock_detector.get_stats()
+        print(f"\nShockDetector 统计:")
+        print(f"  总检测数: {detector_stats['total_shocks']}")
+        print(f"  活跃 Shock: {detector_stats['active_shocks']}")
+        print(f"  追踪层级: {detector_stats['tracked_levels']}")
     finally:
         if db_conn:
             db_conn.close()
