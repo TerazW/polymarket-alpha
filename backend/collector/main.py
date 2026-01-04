@@ -46,6 +46,9 @@ from poc.reaction_classifier import ReactionClassifier
 from poc.leading_events import LeadingEventDetector
 from poc.belief_state_machine import BeliefStateMachine
 
+# v5: Alert generation
+from backend.reactor.alert_generator import AlertGenerator
+
 
 # 数据库配置
 DB_CONFIG = {
@@ -64,6 +67,9 @@ shock_detector = ShockDetector()
 reaction_classifier = ReactionClassifier()
 leading_detector = LeadingEventDetector()
 state_machine = BeliefStateMachine()
+
+# v5: Alert generator
+alert_generator = AlertGenerator(DB_CONFIG, enabled=True)
 
 # 价格层级缓存 {(token_id, price_str, side): PriceLevel}
 price_levels: Dict[tuple, PriceLevel] = {}
@@ -392,6 +398,17 @@ def on_trade(trade: Dict):
     if shock:
         shock_count += 1
         save_shock_event(shock)
+        # v5: Generate alert
+        alert_generator.on_shock(
+            shock_id=shock.shock_id,
+            ts=datetime.fromtimestamp(shock.timestamp / 1000),
+            token_id=shock.token_id,
+            price=float(shock.price),
+            side=shock.side,
+            trade_volume=shock.trade_volume,
+            trigger_type=shock.trigger_type,
+            baseline_size=shock.baseline_size
+        )
         # 启动反应观察
         reaction_classifier.start_observation(shock)
         ts = datetime.now().strftime("%H:%M:%S")
@@ -455,6 +472,17 @@ def on_book(book: Dict):
             for event in leading_events:
                 leading_event_count += 1
                 save_leading_event(event)
+                # v5: Generate alert
+                alert_generator.on_leading_event(
+                    event_id=event.event_id,
+                    ts=datetime.fromtimestamp(event.timestamp / 1000),
+                    token_id=event.token_id,
+                    price=float(event.price),
+                    side=event.side,
+                    event_type=event.event_type.value,
+                    drop_ratio=event.drop_ratio,
+                    affected_levels=getattr(event, 'affected_levels', None)
+                )
                 _print_leading_event(event)
                 # 更新状态机
                 _process_leading_event_for_state(event)
@@ -477,6 +505,17 @@ def on_book(book: Dict):
             for event in leading_events:
                 leading_event_count += 1
                 save_leading_event(event)
+                # v5: Generate alert
+                alert_generator.on_leading_event(
+                    event_id=event.event_id,
+                    ts=datetime.fromtimestamp(event.timestamp / 1000),
+                    token_id=event.token_id,
+                    price=float(event.price),
+                    side=event.side,
+                    event_type=event.event_type.value,
+                    drop_ratio=event.drop_ratio,
+                    affected_levels=getattr(event, 'affected_levels', None)
+                )
                 _print_leading_event(event)
                 # 更新状态机
                 _process_leading_event_for_state(event)
@@ -496,6 +535,20 @@ def on_book(book: Dict):
                 fast_reaction_count += 1
                 reaction_count += 1
                 save_reaction_event(reaction)
+                # v5: Generate alert
+                alert_generator.on_reaction(
+                    reaction_id=reaction.reaction_id,
+                    shock_id=reaction.shock_id,
+                    ts=datetime.fromtimestamp(reaction.timestamp / 1000),
+                    token_id=reaction.token_id,
+                    price=float(reaction.price),
+                    side=reaction.side,
+                    reaction_type=reaction.reaction_type.value,
+                    window_type=reaction.window_type.value,
+                    drop_ratio=reaction.drop_ratio,
+                    refill_ratio=reaction.refill_ratio,
+                    vacuum_duration_ms=reaction.vacuum_duration_ms
+                )
                 _print_reaction(reaction, "FAST")
                 # 更新状态机
                 _process_reaction_for_state(reaction)
@@ -509,6 +562,20 @@ def on_book(book: Dict):
             slow_reaction_count += 1
             reaction_count += 1
             save_reaction_event(reaction)
+            # v5: Generate alert
+            alert_generator.on_reaction(
+                reaction_id=reaction.reaction_id,
+                shock_id=reaction.shock_id,
+                ts=datetime.fromtimestamp(reaction.timestamp / 1000),
+                token_id=reaction.token_id,
+                price=float(reaction.price),
+                side=reaction.side,
+                reaction_type=reaction.reaction_type.value,
+                window_type=reaction.window_type.value,
+                drop_ratio=reaction.drop_ratio,
+                refill_ratio=reaction.refill_ratio,
+                vacuum_duration_ms=reaction.vacuum_duration_ms
+            )
             _print_reaction(reaction, "SLOW")
             # 更新状态机
             _process_reaction_for_state(reaction)
@@ -557,6 +624,16 @@ def _process_reaction_for_state(reaction: ReactionEvent):
     if state_change:
         state_change_count += 1
         save_belief_state_change(state_change)
+        # v5: Generate alert
+        alert_generator.on_state_change(
+            state_id=str(state_change_count),
+            ts=datetime.fromtimestamp(state_change.timestamp / 1000),
+            token_id=state_change.token_id,
+            old_state=state_change.old_state.value,
+            new_state=state_change.new_state.value,
+            trigger_reaction_id=reaction.reaction_id,
+            evidence={'trigger': 'reaction', 'type': reaction.reaction_type.value}
+        )
         _print_state_change(state_change)
 
 
@@ -567,6 +644,16 @@ def _process_leading_event_for_state(event: LeadingEvent):
     if state_change:
         state_change_count += 1
         save_belief_state_change(state_change)
+        # v5: Generate alert
+        alert_generator.on_state_change(
+            state_id=str(state_change_count),
+            ts=datetime.fromtimestamp(state_change.timestamp / 1000),
+            token_id=state_change.token_id,
+            old_state=state_change.old_state.value,
+            new_state=state_change.new_state.value,
+            trigger_reaction_id=None,
+            evidence={'trigger': 'leading_event', 'type': event.event_type.value}
+        )
         _print_state_change(state_change)
 
 
