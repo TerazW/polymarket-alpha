@@ -144,14 +144,26 @@ async def get_markets(
                 yes_token = tokens[0] if len(tokens) > 0 else None
                 no_token = tokens[1] if len(tokens) > 1 else None
 
+                # 解析价格（可能是 JSON 字符串或数组）
+                outcome_prices = m.get("outcomePrices", [])
+                if isinstance(outcome_prices, str):
+                    import json
+                    try:
+                        outcome_prices = json.loads(outcome_prices)
+                    except:
+                        outcome_prices = []
+
+                yes_price = float(outcome_prices[0]) if len(outcome_prices) > 0 and outcome_prices[0] else None
+                no_price = float(outcome_prices[1]) if len(outcome_prices) > 1 and outcome_prices[1] else None
+
                 markets.append({
                     "condition_id": m.get("conditionId"),
                     "question": m.get("question"),
                     "slug": m.get("slug"),
                     "yes_token_id": yes_token,
                     "no_token_id": no_token,
-                    "yes_price": m.get("outcomePrices", [None, None])[0],
-                    "no_price": m.get("outcomePrices", [None, None])[1] if len(m.get("outcomePrices", [])) > 1 else None,
+                    "yes_price": yes_price,
+                    "no_price": no_price,
                     "volume_24h": m.get("volume24hr", 0),
                     "liquidity": m.get("liquidityClob", 0),
                     "end_date": m.get("endDate"),

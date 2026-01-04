@@ -7,7 +7,7 @@ interface Market {
   question: string;
   volume_24h: number;
   liquidity: number;
-  yes_price: string;
+  yes_price: number | null;
 }
 
 interface Stats {
@@ -107,7 +107,7 @@ export default function Dashboard() {
                     </div>
                     <div className="text-right">
                       <div className="text-2xl font-bold text-green-400">
-                        {market.yes_price ? (parseFloat(market.yes_price) * 100).toFixed(0) : '??'}%
+                        {market.yes_price != null ? (market.yes_price * 100).toFixed(0) : '??'}%
                       </div>
                       <div className="text-xs text-gray-500">YES</div>
                     </div>
