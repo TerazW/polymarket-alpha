@@ -1,14 +1,19 @@
 """
-Belief Reaction System - Collector v3
+Belief Reaction System - Collector v4
 实时数据收集器：连接 Polymarket WebSocket，收集订单簿数据并存入数据库。
 集成 ShockDetector, ReactionClassifier, LeadingEventDetector 和 BeliefStateMachine。
 
 v3 改进:
 - 使用 baseline_size 中位数 (避免分母被操纵)
 - 双窗口: FAST (8s) + SLOW (30s)
-- 新反应类型: VACUUM > SWEEP > CHASE > PULL > HOLD > DELAYED
-- 领先事件检测: PRE_SHOCK_PULL / DEPTH_COLLAPSE
+- 新反应类型: VACUUM > SWEEP > CHASE > PULL > HOLD > DELAYED > NO_IMPACT
+- 领先事件检测: PRE_SHOCK_PULL / DEPTH_COLLAPSE / GRADUAL_THINNING
 - Deterministic 状态机: STABLE → FRAGILE → CRACKING → BROKEN
+
+v4 改进 (ChatGPT Audit):
+- 250ms 时间桶采样 (不按消息条数)
+- 统一用 server timestamp
+- 保存 raw_events 用于 debug/replay
 
 运行: python run_collector.py
 """
@@ -25,8 +30,11 @@ from typing import Dict, Optional, Set
 from collections import defaultdict
 import psycopg2
 from psycopg2.extras import execute_values
+import json
+import hashlib
 from utils.polymarket_ws import PolymarketWebSocket
 from utils.polymarket_api import PolymarketAPI
+from poc.config import TIME_BUCKET_MS
 
 # 导入 POC 模块
 from poc.models import (
@@ -65,6 +73,25 @@ best_prices: Dict[str, tuple] = {}
 
 # 已分类 FAST 窗口的 shock (避免重复)
 fast_classified_shocks: Set[str] = set()
+
+# [v4] 时间桶状态追踪器 {token_id: last_bucket_ts}
+last_bucket_ts: Dict[str, int] = {}
+
+
+def get_bucket_ts(timestamp_ms: int) -> int:
+    """计算时间桶 (floor(ts / TIME_BUCKET_MS) * TIME_BUCKET_MS)"""
+    return (timestamp_ms // TIME_BUCKET_MS) * TIME_BUCKET_MS
+
+
+def should_save_bucket(token_id: str, current_ts: int) -> bool:
+    """检查是否应该保存当前时间桶"""
+    current_bucket = get_bucket_ts(current_ts)
+    last_bucket = last_bucket_ts.get(token_id, 0)
+
+    if current_bucket > last_bucket:
+        last_bucket_ts[token_id] = current_bucket
+        return True
+    return False
 
 
 def get_db_connection():
@@ -208,12 +235,22 @@ def save_leading_event(event: LeadingEvent):
         print(f"[DB ERROR] 保存 LeadingEvent 失败: {e}")
 
 
-def save_book_snapshot(book: Dict):
-    """保存订单簿快照到数据库"""
+def save_book_snapshot(book: Dict, server_ts: int):
+    """
+    [v4] 保存订单簿快照到数据库 (使用时间桶)
+
+    Args:
+        book: 订单簿数据
+        server_ts: 服务器时间戳 (毫秒)
+    """
     try:
         conn = get_db_connection()
-        ts = datetime.now()
         token_id = book.get('asset_id')
+
+        # [v4] 计算时间桶
+        bucket_ts_ms = get_bucket_ts(server_ts)
+        bucket_ts = datetime.fromtimestamp(bucket_ts_ms / 1000.0)
+        ts = datetime.fromtimestamp(server_ts / 1000.0)
 
         rows = []
 
@@ -221,24 +258,55 @@ def save_book_snapshot(book: Dict):
             price = float(bid.get('price', 0))
             size = float(bid.get('size', 0))
             if size > 0:
-                rows.append((ts, token_id, 'bid', price, size))
+                rows.append((bucket_ts, ts, token_id, 'bid', price, size))
 
         for ask in book.get('asks', []):
             price = float(ask.get('price', 0))
             size = float(ask.get('size', 0))
             if size > 0:
-                rows.append((ts, token_id, 'ask', price, size))
+                rows.append((bucket_ts, ts, token_id, 'ask', price, size))
 
         if rows:
             with conn.cursor() as cur:
                 execute_values(cur, """
-                    INSERT INTO book_bins (ts, token_id, side, price, size)
+                    INSERT INTO book_bins (bucket_ts, ts, token_id, side, price, size)
                     VALUES %s
                     ON CONFLICT DO NOTHING
                 """, rows)
 
     except Exception as e:
         print(f"[DB ERROR] 保存订单簿失败: {e}")
+
+
+def save_raw_event(event_type: str, token_id: str, payload: Dict, server_ts: int):
+    """
+    [v4] 保存原始事件用于 debug/replay
+
+    Args:
+        event_type: 'trade', 'book', 'price_change'
+        token_id: Token ID
+        payload: 原始 JSON 消息
+        server_ts: 服务器时间戳 (毫秒)
+    """
+    try:
+        conn = get_db_connection()
+        ts = datetime.fromtimestamp(server_ts / 1000.0)
+        arrival_ts = datetime.now()
+
+        # 计算 hash 用于一致性检查
+        payload_str = json.dumps(payload, sort_keys=True)
+        payload_hash = hashlib.md5(payload_str.encode()).hexdigest()[:16]
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO raw_events (ts, arrival_ts, event_type, token_id, payload, hash)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (ts, arrival_ts, event_type, token_id, json.dumps(payload), payload_hash))
+
+    except Exception as e:
+        # raw_events 保存失败不影响主流程
+        pass
 
 
 def update_price_levels(book: Dict):
@@ -287,16 +355,23 @@ def on_trade(trade: Dict):
     global trade_count, shock_count
     trade_count += 1
 
+    # [v4] 使用服务器时间戳
+    server_ts = trade.get('timestamp', int(datetime.now().timestamp() * 1000))
+    token_id = trade.get('asset_id', '')
+
     # 保存到数据库
     save_trade(trade)
 
+    # 保存 raw_event 用于 debug/replay
+    save_raw_event('trade', token_id, trade, server_ts)
+
     # 转换为 TradeEvent
     trade_event = TradeEvent(
-        token_id=trade.get('asset_id', ''),
+        token_id=token_id,
         price=Decimal(str(trade.get('price', 0))),
         size=float(trade.get('size', 0)),
         side=trade.get('side', 'BUY').upper(),
-        timestamp=int(trade.get('timestamp', 0))
+        timestamp=server_ts
     )
 
     # 获取对应的价格层级
@@ -341,7 +416,13 @@ def on_book(book: Dict):
     book_count += 1
 
     token_id = book.get('asset_id', '')
-    now = int(datetime.now().timestamp() * 1000)
+
+    # [v4] 使用服务器时间戳 (如果有) 否则使用本地时间
+    server_ts = book.get('timestamp')
+    if server_ts is None:
+        now = int(datetime.now().timestamp() * 1000)
+    else:
+        now = int(server_ts)
 
     # 更新价格层级缓存
     update_price_levels(book)
@@ -436,15 +517,17 @@ def on_book(book: Dict):
         reaction_classifier.remove_observer(shock.token_id, shock.price)
         fast_classified_shocks.discard(shock.shock_id)
 
-    # 保存到数据库（每 5 次保存一次）
-    if book_count % 5 == 0:
-        save_book_snapshot(book)
+    # [v4] 按时间桶保存到数据库 (不按消息条数)
+    if should_save_bucket(token_id, now):
+        save_book_snapshot(book, now)
+        # 保存 raw_event 用于 debug/replay
+        save_raw_event('book', token_id, book, now)
 
     # 打印（每 20 条显示一次）
     if book_count % 20 == 0 or book_count <= 3:
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts_str = datetime.now().strftime("%H:%M:%S")
         asset_id = token_id[:8]
-        print(f"[{ts}] 📚 BOOK #{book_count} | {asset_id}... | {len(bids)} bids, {len(asks)} asks")
+        print(f"[{ts_str}] 📚 BOOK #{book_count} | {asset_id}... | {len(bids)} bids, {len(asks)} asks")
 
 
 def _print_reaction(reaction: ReactionEvent, window: str):
@@ -523,16 +606,21 @@ def main():
     """主函数"""
     print()
     print("=" * 60)
-    print("  Belief Reaction System - Collector v3")
+    print("  Belief Reaction System - Collector v4")
     print("  实时数据收集 + Shock 检测 + 双窗口反应分类 + 状态机")
     print("=" * 60)
     print()
     print("  v3 改进:")
     print("    - baseline_size 中位数 (防操纵)")
     print("    - FAST 窗口 (8s) + SLOW 窗口 (30s)")
-    print("    - 新分类: VACUUM > SWEEP > CHASE > PULL > HOLD > DELAYED")
-    print("    - 领先事件: PRE_SHOCK_PULL / DEPTH_COLLAPSE")
+    print("    - 新分类: VACUUM > SWEEP > CHASE > PULL > HOLD > DELAYED > NO_IMPACT")
+    print("    - 领先事件: PRE_SHOCK_PULL / DEPTH_COLLAPSE / GRADUAL_THINNING")
     print("    - Deterministic 状态机: STABLE → FRAGILE → CRACKING → BROKEN")
+    print()
+    print("  v4 改进 (ChatGPT Audit):")
+    print("    - 250ms 时间桶采样 (不按消息条数)")
+    print("    - 统一用 server timestamp")
+    print("    - raw_events 保存用于 debug/replay")
     print()
 
     # 测试数据库连接
@@ -555,8 +643,9 @@ def main():
     print("=" * 60)
     print("  实时数据流 (按 Ctrl+C 停止)")
     print("  ⚡ Shock 检测 + 双窗口反应分类")
-    print("  🚨 领先事件检测 (PRE_SHOCK_PULL / DEPTH_COLLAPSE)")
+    print("  🚨 领先事件: PRE_SHOCK_PULL / DEPTH_COLLAPSE / GRADUAL_THINNING")
     print("  📊 状态机: STABLE → FRAGILE → CRACKING → BROKEN")
+    print(f"  ⏱️  时间桶: {TIME_BUCKET_MS}ms")
     print("=" * 60)
     print()
 
@@ -576,7 +665,7 @@ def main():
         print("统计信息:")
         print("=" * 40)
         print(f"  成交消息: {ws.stats['trades_received']} (已存入 DB: {trade_count})")
-        print(f"  订单簿: {ws.stats['books_received']} (已存入 DB: {book_count // 5})")
+        print(f"  订单簿: {ws.stats['books_received']} (时间桶存入: {len(last_bucket_ts)} tokens)")
         print(f"  ⚡ Shock 事件: {shock_count}")
         print(f"  🎯 Reaction 事件: {reaction_count}")
         print(f"     - FAST 窗口: {fast_reaction_count}")
