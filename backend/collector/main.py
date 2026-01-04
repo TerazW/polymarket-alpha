@@ -28,11 +28,12 @@ from utils.polymarket_api import PolymarketAPI
 
 # 导入 POC 模块
 from poc.models import (
-    TradeEvent, PriceLevel, ShockEvent, ReactionEvent,
-    WindowType, REACTION_INDICATORS
+    TradeEvent, PriceLevel, ShockEvent, ReactionEvent, LeadingEvent,
+    WindowType, LeadingEventType, REACTION_INDICATORS
 )
 from poc.shock_detector import ShockDetector
 from poc.reaction_classifier import ReactionClassifier
+from poc.leading_events import LeadingEventDetector
 
 
 # 数据库配置
@@ -47,9 +48,10 @@ DB_CONFIG = {
 # 全局数据库连接
 db_conn: Optional[psycopg2.extensions.connection] = None
 
-# ShockDetector 和 ReactionClassifier 实例
+# ShockDetector, ReactionClassifier 和 LeadingEventDetector 实例
 shock_detector = ShockDetector()
 reaction_classifier = ReactionClassifier()
+leading_detector = LeadingEventDetector()
 
 # 价格层级缓存 {(token_id, price_str, side): PriceLevel}
 price_levels: Dict[tuple, PriceLevel] = {}
@@ -145,6 +147,37 @@ def save_reaction_event(reaction: ReactionEvent):
         print(f"[DB ERROR] 保存 Reaction 失败: {e}")
 
 
+def save_leading_event(event: LeadingEvent):
+    """保存领先事件到数据库"""
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO leading_events (
+                    event_id, ts, event_type, token_id, price, side,
+                    drop_ratio, duration_ms, trade_volume_nearby, is_anchor,
+                    affected_levels, time_std_ms
+                )
+                VALUES (%s, to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (
+                event.event_id,
+                event.timestamp,
+                event.event_type.value,
+                event.token_id,
+                float(event.price),
+                event.side,
+                event.drop_ratio,
+                event.duration_ms,
+                event.trade_volume_nearby,
+                event.is_anchor,
+                event.affected_levels,
+                event.time_std_ms
+            ))
+    except Exception as e:
+        print(f"[DB ERROR] 保存 LeadingEvent 失败: {e}")
+
+
 def save_book_snapshot(book: Dict):
     """保存订单簿快照到数据库"""
     try:
@@ -215,6 +248,7 @@ shock_count = 0
 reaction_count = 0
 fast_reaction_count = 0
 slow_reaction_count = 0
+leading_event_count = 0
 
 
 def on_trade(trade: Dict):
@@ -237,6 +271,14 @@ def on_trade(trade: Dict):
     # 获取对应的价格层级
     level_side = 'bid' if trade_event.side == 'SELL' else 'ask'
     level = get_price_level(trade_event.token_id, trade_event.price, level_side)
+
+    # 记录成交到领先事件检测器
+    leading_detector.on_trade(
+        trade_event.token_id,
+        trade_event.price,
+        trade_event.size,
+        trade_event.timestamp
+    )
 
     # 检测 Shock (v2: 使用 baseline_size)
     shock = shock_detector.on_trade(trade_event, level)
@@ -264,7 +306,7 @@ def on_trade(trade: Dict):
 
 def on_book(book: Dict):
     """处理订单簿快照"""
-    global book_count, reaction_count, fast_reaction_count, slow_reaction_count
+    global book_count, reaction_count, fast_reaction_count, slow_reaction_count, leading_event_count
     book_count += 1
 
     token_id = book.get('asset_id', '')
@@ -280,18 +322,52 @@ def on_book(book: Dict):
     best_ask = Decimal(str(asks[0].get('price', 0))) if asks else None
     best_prices[token_id] = (best_bid, best_ask)
 
-    # 为活跃观察记录样本
+    # 为活跃观察记录样本 + 检测领先事件
+    tick_size = Decimal("0.01")
+
     for bid in bids:
         price = Decimal(str(bid.get('price', 0)))
         size = float(bid.get('size', 0))
+
+        # 记录反应分类样本
         if reaction_classifier.has_active_observation(token_id, price):
             reaction_classifier.record_sample(token_id, price, now, size, best_bid, best_ask)
+
+        # 检测领先事件
+        level = get_price_level(token_id, price, 'bid')
+        if level:
+            baseline = level.get_baseline_size(now)
+            leading_events = leading_detector.on_level_update(
+                level, baseline, now, best_bid, tick_size
+            )
+            for event in leading_events:
+                leading_event_count += 1
+                save_leading_event(event)
+                _print_leading_event(event)
 
     for ask in asks:
         price = Decimal(str(ask.get('price', 0)))
         size = float(ask.get('size', 0))
+
+        # 记录反应分类样本
         if reaction_classifier.has_active_observation(token_id, price):
             reaction_classifier.record_sample(token_id, price, now, size, best_bid, best_ask)
+
+        # 检测领先事件
+        level = get_price_level(token_id, price, 'ask')
+        if level:
+            baseline = level.get_baseline_size(now)
+            leading_events = leading_detector.on_level_update(
+                level, baseline, now, best_ask, tick_size
+            )
+            for event in leading_events:
+                leading_event_count += 1
+                save_leading_event(event)
+                _print_leading_event(event)
+
+    # 每分钟更新一次 anchor 列表
+    if book_count % 60 == 0:
+        leading_detector.update_anchors(token_id, now)
 
     # v2: 双窗口处理
     # 1. 检查 FAST 窗口过期的 shock
@@ -337,6 +413,18 @@ def _print_reaction(reaction: ReactionEvent, window: str):
     emoji = REACTION_INDICATORS.get(reaction.reaction_type, '⚪')
     print(f"[{ts_str}] {emoji} {window} REACTION | {reaction.token_id[:8]}... | "
           f"{reaction.reaction_type.value} drop={reaction.drop_ratio:.0%} refill={reaction.refill_ratio:.0%}")
+
+
+def _print_leading_event(event: LeadingEvent):
+    """打印领先事件"""
+    ts_str = datetime.now().strftime("%H:%M:%S")
+    if event.event_type == LeadingEventType.PRE_SHOCK_PULL:
+        anchor_mark = "⭐" if event.is_anchor else ""
+        print(f"[{ts_str}] 🚨 PRE_SHOCK_PULL {anchor_mark}| {event.token_id[:8]}... | "
+              f"price={event.price} drop={event.drop_ratio:.0%} duration={event.duration_ms}ms")
+    else:  # DEPTH_COLLAPSE
+        print(f"[{ts_str}] 💥 DEPTH_COLLAPSE | {event.token_id[:8]}... | "
+              f"{event.affected_levels} levels collapsed, std={event.time_std_ms:.0f}ms")
 
 
 def get_top_markets(limit: int = 10):
@@ -395,7 +483,8 @@ def main():
     print()
     print("=" * 60)
     print("  实时数据流 (按 Ctrl+C 停止)")
-    print("  ⚡ Shock 检测 + 双窗口反应分类已启用")
+    print("  ⚡ Shock 检测 + 双窗口反应分类")
+    print("  🚨 领先事件检测 (PRE_SHOCK_PULL / DEPTH_COLLAPSE)")
     print("=" * 60)
     print()
 
@@ -420,6 +509,7 @@ def main():
         print(f"  🎯 Reaction 事件: {reaction_count}")
         print(f"     - FAST 窗口: {fast_reaction_count}")
         print(f"     - SLOW 窗口: {slow_reaction_count}")
+        print(f"  🚨 领先事件: {leading_event_count}")
         print(f"  错误: {ws.stats['errors']}")
 
         # 显示 ShockDetector 统计
@@ -449,6 +539,17 @@ def main():
                 if hasattr(emoji, 'value'):
                     emoji = emoji.value if hasattr(emoji, 'value') else str(emoji)
                 print(f"    {emoji} {rtype}: {count}")
+
+        # 显示 LeadingEventDetector 统计
+        leading_stats = leading_detector.get_stats()
+        print(f"\nLeadingEventDetector 统计:")
+        print(f"  总事件数: {leading_stats['total_events']}")
+        print(f"  追踪的 token 数: {leading_stats['anchor_tokens']}")
+        if leading_stats.get('by_type'):
+            print(f"  按类型:")
+            for etype, count in leading_stats['by_type'].items():
+                emoji = "🚨" if etype == "PRE_SHOCK_PULL" else "💥"
+                print(f"    {emoji} {etype}: {count}")
     finally:
         if db_conn:
             db_conn.close()
