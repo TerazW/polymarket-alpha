@@ -1,13 +1,132 @@
 'use client';
 
-import { useState, useEffect, use } from 'react';
+import { useState, useEffect, use, useCallback } from 'react';
 import { ContextPanel } from '@/components/evidence/ContextPanel';
 import { EvidencePlayer } from '@/components/evidence/EvidencePlayer';
 import { TapePanel } from '@/components/evidence/TapePanel';
-import type { EvidenceResponse, BeliefState } from '@/types/api';
+import type { EvidenceResponse, BeliefState, ShockEvent, ReactionEvent, LeadingEvent, StateChange, ProofSummary } from '@/types/api';
+import { getEvidence, type EvidenceResponse as ApiEvidenceResponse } from '@/lib/api';
 
 interface PageProps {
   params: Promise<{ tokenId: string }>;
+}
+
+// Convert API response to frontend types
+function convertApiEvidence(api: ApiEvidenceResponse): EvidenceResponse {
+  return {
+    token_id: api.token_id,
+    t0: api.t0,
+    window_start: api.window.from_ts,
+    window_end: api.window.to_ts,
+    anchors: api.anchors.map(a => ({
+      price: String(a.price),
+      side: a.side.toLowerCase() as 'bid' | 'ask',
+      score: a.score,
+    })),
+    shocks: api.shocks.map(s => ({
+      id: s.id,
+      timestamp: s.ts,
+      price: String(s.price),
+      side: s.side.toLowerCase() as 'bid' | 'ask',
+      trigger_type: s.trigger.toLowerCase() as 'volume' | 'consecutive',
+      trade_volume: s.trade_vol || 0,
+      liquidity_before: s.baseline_size || 0,
+      baseline_size: s.baseline_size || 0,
+    })),
+    reactions: api.reactions.map(r => ({
+      id: r.id,
+      timestamp: r.ts_start,
+      shock_id: r.shock_id || '',
+      price: String(r.price),
+      side: r.side.toLowerCase() as 'bid' | 'ask',
+      reaction_type: r.reaction as ReactionEvent['reaction_type'],
+      drop_ratio: r.proof?.drop_ratio || 0,
+      refill_ratio: r.proof?.refill_ratio || 0,
+      min_size: 0,
+      max_size: 0,
+      time_to_min_ms: 0,
+      time_to_refill_ms: r.proof?.time_to_refill_ms || null,
+      price_shift_ticks: r.proof?.shift_ticks || 0,
+      proof: {
+        rule_triggered: `${r.reaction} reaction`,
+        thresholds: { drop_min: 0, refill_max: 1 },
+        actual_values: { drop: r.proof?.drop_ratio || 0, refill: r.proof?.refill_ratio || 0 },
+        window_type: r.window,
+      },
+    })),
+    leading_events: api.leading_events.map(e => ({
+      id: e.id,
+      timestamp: e.ts,
+      price: String((e.price_band.price_min + e.price_band.price_max) / 2),
+      side: e.side.toLowerCase() as 'bid' | 'ask',
+      event_type: e.type as LeadingEvent['event_type'],
+      drop_ratio: (e.proof as Record<string, number>)?.drop_ratio || 0,
+      trade_volume_nearby: (e.proof as Record<string, number>)?.trade_volume_nearby || 0,
+    })),
+    state_changes: api.belief_states.map(s => ({
+      id: s.id,
+      timestamp: s.ts,
+      old_state: 'STABLE' as BeliefState, // API doesn't provide old_state directly
+      new_state: s.belief_state as BeliefState,
+      evidence: [s.note || ''],
+      evidence_refs: s.evidence_refs,
+    })),
+    proof_summary: {
+      current_state: (api.belief_states[api.belief_states.length - 1]?.belief_state || 'STABLE') as BeliefState,
+      state_since: api.belief_states[api.belief_states.length - 1]?.ts || api.t0,
+      confidence: 80,
+      shock_count: api.shocks.length,
+      reaction_counts: {
+        VACUUM: api.reactions.filter(r => r.reaction === 'VACUUM').length,
+        SWEEP: api.reactions.filter(r => r.reaction === 'SWEEP').length,
+        CHASE: api.reactions.filter(r => r.reaction === 'CHASE').length,
+        PULL: api.reactions.filter(r => r.reaction === 'PULL').length,
+        HOLD: api.reactions.filter(r => r.reaction === 'HOLD').length,
+        DELAYED: api.reactions.filter(r => r.reaction === 'DELAYED').length,
+        NO_IMPACT: api.reactions.filter(r => r.reaction === 'NO_IMPACT').length,
+      },
+      leading_event_counts: {
+        PRE_SHOCK_PULL: api.leading_events.filter(e => e.type === 'PRE_SHOCK_PULL').length,
+        DEPTH_COLLAPSE: api.leading_events.filter(e => e.type === 'DEPTH_COLLAPSE').length,
+        GRADUAL_THINNING: api.leading_events.filter(e => e.type === 'GRADUAL_THINNING').length,
+      },
+      hold_ratio: api.reactions.length > 0
+        ? api.reactions.filter(r => r.reaction === 'HOLD').length / api.reactions.length
+        : 0,
+      fragile_signals: api.leading_events.length + api.reactions.filter(r => ['VACUUM', 'PULL'].includes(r.reaction)).length,
+      data_health: {
+        missing_buckets: Math.round(api.data_health.missing_bucket_ratio_10m * 100),
+        rebuild_count: api.data_health.rebuild_count_10m,
+        last_rebuild_ts: null,
+        hash_mismatch: api.data_health.hash_mismatch_count_10m > 0,
+      },
+    },
+    tiles_manifest: api.tiles_manifest ? {
+      token_id: api.tiles_manifest.token_id,
+      lod: `${api.tiles_manifest.lod_ms}ms` as '250ms' | '1s' | '5s',
+      tile_duration_ms: api.tiles_manifest.tile_ms,
+      tiles: [],
+      normalization: {
+        method: 'log1p',
+        clip_max: 10000,
+        price_min: '0.00',
+        price_max: '1.00',
+        tick_size: '0.01',
+      },
+    } : {
+      token_id: api.token_id,
+      lod: '250ms',
+      tile_duration_ms: 10000,
+      tiles: [],
+      normalization: {
+        method: 'log1p',
+        clip_max: 10000,
+        price_min: '0.00',
+        price_max: '1.00',
+        tick_size: '0.01',
+      },
+    },
+  };
 }
 
 // Mock data for development
@@ -154,36 +273,60 @@ export default function MarketDetailPage({ params }: PageProps) {
   const [error, setError] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(Date.now());
+  const [useMockData, setUseMockData] = useState(false);
+  const [apiStatus, setApiStatus] = useState<'loading' | 'online' | 'offline'>('loading');
 
-  // Market info (would come from API)
-  const marketInfo = {
-    question: 'Will Russia Invade Ukraine?',
-    yes_price: 0.72,
+  // Market info from evidence or default
+  const marketInfo = evidence ? {
+    question: evidence.token_id,
+    yes_price: 0.72, // Would come from market data
+    tick_size: 0.01,
+    min_order_size: 5,
+  } : {
+    question: 'Loading...',
+    yes_price: 0,
     tick_size: 0.01,
     min_order_size: 5,
   };
 
-  useEffect(() => {
-    const fetchEvidence = async () => {
-      setLoading(true);
-      try {
-        // TODO: Replace with actual API call
-        // const res = await fetch(`/api/v1/evidence?token_id=${tokenId}&t0=${Date.now()}`);
-        // const data = await res.json();
+  const fetchEvidenceData = useCallback(async () => {
+    setLoading(true);
+    try {
+      // Try to fetch from API first
+      const t0 = Date.now();
+      const apiData = await getEvidence({
+        token_id: tokenId,
+        t0,
+        window_before_ms: 60000,
+        window_after_ms: 30000,
+      });
 
-        // Using mock data for now
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        setEvidence(MOCK_EVIDENCE);
-        setCurrentTime(MOCK_EVIDENCE.t0);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load evidence');
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchEvidence();
+      const converted = convertApiEvidence(apiData);
+      setEvidence(converted);
+      setCurrentTime(converted.t0);
+      setApiStatus('online');
+      setError(null);
+    } catch (err) {
+      console.warn('API failed, using mock data:', err);
+      setApiStatus('offline');
+      // Fallback to mock data
+      setEvidence(MOCK_EVIDENCE);
+      setCurrentTime(MOCK_EVIDENCE.t0);
+      setUseMockData(true);
+    } finally {
+      setLoading(false);
+    }
   }, [tokenId]);
+
+  useEffect(() => {
+    if (useMockData) {
+      setEvidence(MOCK_EVIDENCE);
+      setCurrentTime(MOCK_EVIDENCE.t0);
+      setLoading(false);
+      return;
+    }
+    fetchEvidenceData();
+  }, [tokenId, useMockData, fetchEvidenceData]);
 
   const handleEventClick = (eventId: string, timestamp: number) => {
     setSelectedEventId(eventId);
@@ -219,9 +362,20 @@ export default function MarketDetailPage({ params }: PageProps) {
             <a href="/" className="text-gray-400 hover:text-white">
               &larr; Back
             </a>
-            <h1 className="text-lg font-semibold">{marketInfo.question}</h1>
+            <h1 className="text-lg font-semibold truncate max-w-md">{marketInfo.question}</h1>
           </div>
           <div className="flex items-center gap-4">
+            {apiStatus !== 'loading' && (
+              <span className={`text-xs ${apiStatus === 'online' ? 'text-green-400' : 'text-yellow-400'}`}>
+                {apiStatus === 'online' ? '● Live' : '○ Mock'}
+              </span>
+            )}
+            <button
+              onClick={() => setUseMockData(!useMockData)}
+              className={`px-2 py-1 rounded text-xs ${useMockData ? 'bg-yellow-600' : 'bg-green-600'}`}
+            >
+              {useMockData ? 'Mock' : 'Live'}
+            </button>
             <span className="text-2xl font-bold text-green-400">
               {(marketInfo.yes_price * 100).toFixed(0)}%
             </span>
