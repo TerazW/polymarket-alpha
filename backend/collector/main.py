@@ -22,8 +22,9 @@ from utils.polymarket_ws import PolymarketWebSocket
 from utils.polymarket_api import PolymarketAPI
 
 # 导入 POC 模块
-from poc.models import TradeEvent, PriceLevel, ShockEvent
+from poc.models import TradeEvent, PriceLevel, ShockEvent, ReactionEvent
 from poc.shock_detector import ShockDetector
+from poc.reaction_classifier import ReactionClassifier
 
 
 # 数据库配置
@@ -38,11 +39,15 @@ DB_CONFIG = {
 # 全局数据库连接
 db_conn: Optional[psycopg2.extensions.connection] = None
 
-# ShockDetector 实例
+# ShockDetector 和 ReactionClassifier 实例
 shock_detector = ShockDetector()
+reaction_classifier = ReactionClassifier()
 
 # 价格层级缓存 {(token_id, price_str, side): PriceLevel}
 price_levels: Dict[tuple, PriceLevel] = {}
+
+# 最佳买卖价格缓存 {token_id: (best_bid, best_ask)}
+best_prices: Dict[str, tuple] = {}
 
 
 def get_db_connection():
@@ -95,6 +100,37 @@ def save_shock_event(shock: ShockEvent):
             ))
     except Exception as e:
         print(f"[DB ERROR] 保存 Shock 失败: {e}")
+
+
+def save_reaction_event(reaction: ReactionEvent):
+    """保存 Reaction 事件到数据库"""
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO reaction_events (
+                    reaction_id, shock_id, ts, token_id, price, side,
+                    reaction_type, refill_ratio, time_to_refill_ms,
+                    min_liquidity, price_shift, liquidity_before
+                )
+                VALUES (%s, %s, to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (
+                reaction.reaction_id,
+                reaction.shock_id,
+                reaction.timestamp,
+                reaction.token_id,
+                float(reaction.price),
+                reaction.side,
+                reaction.reaction_type.value,
+                reaction.refill_ratio,
+                reaction.time_to_refill_ms,
+                reaction.min_liquidity,
+                float(reaction.price_shift),
+                reaction.liquidity_before
+            ))
+    except Exception as e:
+        print(f"[DB ERROR] 保存 Reaction 失败: {e}")
 
 
 def save_book_snapshot(book: Dict):
@@ -164,6 +200,7 @@ def get_price_level(token_id: str, price: Decimal, side: str) -> Optional[PriceL
 trade_count = 0
 book_count = 0
 shock_count = 0
+reaction_count = 0
 
 
 def on_trade(trade: Dict):
@@ -193,6 +230,8 @@ def on_trade(trade: Dict):
     if shock:
         shock_count += 1
         save_shock_event(shock)
+        # 启动反应观察
+        reaction_classifier.start_observation(shock)
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"[{ts}] ⚡ SHOCK #{shock_count} | {shock.token_id[:8]}... | "
               f"price={shock.price} side={shock.side} vol={shock.trade_volume:.1f} "
@@ -211,11 +250,53 @@ def on_trade(trade: Dict):
 
 def on_book(book: Dict):
     """处理订单簿快照"""
-    global book_count
+    global book_count, reaction_count
     book_count += 1
+
+    token_id = book.get('asset_id', '')
+    now = int(datetime.now().timestamp() * 1000)
 
     # 更新价格层级缓存
     update_price_levels(book)
+
+    # 提取最佳买卖价
+    bids = book.get('bids', [])
+    asks = book.get('asks', [])
+    best_bid = Decimal(str(bids[0].get('price', 0))) if bids else None
+    best_ask = Decimal(str(asks[0].get('price', 0))) if asks else None
+    best_prices[token_id] = (best_bid, best_ask)
+
+    # 为活跃观察记录样本
+    for bid in bids:
+        price = Decimal(str(bid.get('price', 0)))
+        size = float(bid.get('size', 0))
+        if reaction_classifier.has_active_observation(token_id, price):
+            reaction_classifier.record_sample(token_id, price, now, size, best_bid, best_ask)
+
+    for ask in asks:
+        price = Decimal(str(ask.get('price', 0)))
+        size = float(ask.get('size', 0))
+        if reaction_classifier.has_active_observation(token_id, price):
+            reaction_classifier.record_sample(token_id, price, now, size, best_bid, best_ask)
+
+    # 检查过期的反应窗口并分类
+    expired_shocks = shock_detector.get_expired_shocks(now)
+    for shock in expired_shocks:
+        reaction = reaction_classifier.classify(shock)
+        if reaction:
+            reaction_count += 1
+            save_reaction_event(reaction)
+            ts_str = datetime.now().strftime("%H:%M:%S")
+            # 反应类型颜色
+            type_colors = {
+                'HOLD': '🟢', 'DELAY': '🟡', 'PULL': '🟠',
+                'VACUUM': '🔴', 'CHASE': '🔵', 'FAKE': '💜'
+            }
+            emoji = type_colors.get(reaction.reaction_type.value, '⚪')
+            print(f"[{ts_str}] {emoji} REACTION #{reaction_count} | {reaction.token_id[:8]}... | "
+                  f"{reaction.reaction_type.value} refill={reaction.refill_ratio:.1%}")
+        # 清理已处理的 shock
+        shock_detector.complete_shock(shock.token_id, shock.price)
 
     # 保存到数据库（每 5 次保存一次）
     if book_count % 5 == 0:
@@ -224,10 +305,8 @@ def on_book(book: Dict):
     # 打印（每 20 条显示一次）
     if book_count % 20 == 0 or book_count <= 3:
         ts = datetime.now().strftime("%H:%M:%S")
-        asset_id = book.get('asset_id', '')[:8]
-        bids = len(book.get('bids', []))
-        asks = len(book.get('asks', []))
-        print(f"[{ts}] 📚 BOOK #{book_count} | {asset_id}... | {bids} bids, {asks} asks")
+        asset_id = token_id[:8]
+        print(f"[{ts}] 📚 BOOK #{book_count} | {asset_id}... | {len(bids)} bids, {len(asks)} asks")
 
 
 def get_top_markets(limit: int = 10):
@@ -281,7 +360,7 @@ def main():
     print()
     print("=" * 60)
     print("  实时数据流 (按 Ctrl+C 停止)")
-    print("  ⚡ Shock 检测已启用")
+    print("  ⚡ Shock 检测 + 反应分类已启用")
     print("=" * 60)
     print()
 
@@ -301,6 +380,7 @@ def main():
         print(f"  成交消息: {ws.stats['trades_received']} (已存入 DB: {trade_count})")
         print(f"  订单簿: {ws.stats['books_received']} (已存入 DB: {book_count // 5})")
         print(f"  ⚡ Shock 事件: {shock_count}")
+        print(f"  🎯 Reaction 事件: {reaction_count}")
         print(f"  错误: {ws.stats['errors']}")
 
         # 显示 ShockDetector 统计
@@ -309,6 +389,21 @@ def main():
         print(f"  总检测数: {detector_stats['total_shocks']}")
         print(f"  活跃 Shock: {detector_stats['active_shocks']}")
         print(f"  追踪层级: {detector_stats['tracked_levels']}")
+
+        # 显示 ReactionClassifier 统计
+        classifier_stats = reaction_classifier.get_stats()
+        print(f"\nReactionClassifier 统计:")
+        print(f"  总分类数: {classifier_stats['total_classified']}")
+        print(f"  活跃观察: {classifier_stats['active_observations']}")
+        if classifier_stats['by_type']:
+            print(f"  按类型:")
+            for rtype, count in classifier_stats['by_type'].items():
+                type_colors = {
+                    'HOLD': '🟢', 'DELAY': '🟡', 'PULL': '🟠',
+                    'VACUUM': '🔴', 'CHASE': '🔵', 'FAKE': '💜'
+                }
+                emoji = type_colors.get(rtype, '⚪')
+                print(f"    {emoji} {rtype}: {count}")
     finally:
         if db_conn:
             db_conn.close()

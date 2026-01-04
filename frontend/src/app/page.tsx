@@ -14,6 +14,8 @@ interface Stats {
   trades: number;
   books: number;
   shocks: number;
+  reactions: number;
+  reaction_types: Record<string, number>;
 }
 
 export default function Dashboard() {
@@ -82,6 +84,39 @@ export default function Dashboard() {
             <div className="bg-gray-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-yellow-400">{stats.shocks.toLocaleString()}</div>
               <div className="text-gray-400 text-sm">⚡ Shock Events</div>
+            </div>
+            <div className="bg-gray-800 rounded-lg p-4">
+              <div className="text-2xl font-bold text-purple-400">{stats.reactions.toLocaleString()}</div>
+              <div className="text-gray-400 text-sm">🎯 Reactions</div>
+            </div>
+          </div>
+        )}
+
+        {stats && stats.reaction_types && Object.keys(stats.reaction_types).length > 0 && (
+          <div className="bg-gray-800 rounded-lg p-4 mb-8">
+            <h3 className="text-lg font-semibold mb-3">Reaction Types</h3>
+            <div className="flex flex-wrap gap-3">
+              {Object.entries(stats.reaction_types).map(([type, count]) => {
+                const colors: Record<string, string> = {
+                  HOLD: 'bg-green-500/20 text-green-400',
+                  DELAY: 'bg-yellow-500/20 text-yellow-400',
+                  PULL: 'bg-orange-500/20 text-orange-400',
+                  VACUUM: 'bg-red-500/20 text-red-400',
+                  CHASE: 'bg-cyan-500/20 text-cyan-400',
+                  FAKE: 'bg-purple-500/20 text-purple-400',
+                };
+                const emojis: Record<string, string> = {
+                  HOLD: '🟢', DELAY: '🟡', PULL: '🟠',
+                  VACUUM: '🔴', CHASE: '🔵', FAKE: '💜',
+                };
+                return (
+                  <div key={type} className={`px-3 py-2 rounded-lg ${colors[type] || 'bg-gray-700'}`}>
+                    <span className="mr-1">{emojis[type] || ''}</span>
+                    <span className="font-medium">{type}</span>
+                    <span className="ml-2 opacity-70">{count}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
