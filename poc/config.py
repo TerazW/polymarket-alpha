@@ -42,6 +42,9 @@ REACTION_SLOW_WINDOW_MS = 30000    # 30 seconds
 
 REACTION_SAMPLE_INTERVAL_MS = 250  # Sample every 250ms (关键窗口更密集)
 
+# Legacy alias (for backward compatibility)
+REACTION_WINDOW_MS = REACTION_SLOW_WINDOW_MS
+
 # =============================================================================
 # REACTION CLASSIFICATION THRESHOLDS (Spec 1 v1 规则 + v3 修复)
 # =============================================================================
@@ -120,6 +123,9 @@ ANCHOR_TOP_K = 3                     # 每个 token 选 top 3
 # =============================================================================
 STATE_WINDOW_MS = 30 * 60 * 1000     # 滚动窗口 30 分钟
 STATE_HOLD_RATIO_STABLE = 0.7        # STABLE 需要 hold_ratio >= 70%
+KEY_LEVELS_COUNT = 5                 # 追踪的关键价位数量
+KEY_LEVELS_LOOKBACK_HOURS = 24       # 关键价位历史回看时间
+STATE_REACTION_WINDOW = 10           # 状态计算的反应事件窗口数量
 
 # =============================================================================
 # WEBSOCKET PARAMETERS
