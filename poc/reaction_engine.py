@@ -1,9 +1,18 @@
 """
-Belief Reaction System - Reaction Engine
+Belief Reaction System - Reaction Engine v2
 The core engine that processes WebSocket data and produces belief state changes.
 
+v2 集成:
+1. LeadingEventDetector - 领先事件检测
+2. BeliefStateMachine - 信念状态机 (从 belief_state_machine.py)
+3. AlertSystem - 统一警报系统
+
 Data Flow:
-WebSocket → State Store → Shock Detection → Reaction Classification → Belief State
+WebSocket → State Store → Shock Detection → Reaction Classification
+                       ↘ Leading Events ↗        ↓
+                                         Belief State Machine → Alerts
+
+"看存在没意义，看反应才有意义"
 """
 
 from collections import defaultdict
@@ -14,7 +23,8 @@ import time
 
 from .models import (
     PriceLevel, TradeEvent, ShockEvent, ReactionEvent,
-    BeliefState, BeliefStateChange, ReactionType, STATE_INDICATORS
+    BeliefState, BeliefStateChange, ReactionType, LeadingEvent,
+    STATE_INDICATORS, AnchorLevel
 )
 from .config import (
     REACTION_WINDOW_MS,
@@ -24,6 +34,9 @@ from .config import (
 from .shock_detector import ShockDetector
 from .reaction_classifier import ReactionClassifier
 from .belief_state import BeliefStateEngine
+from .leading_events import LeadingEventDetector
+from .belief_state_machine import BeliefStateMachine as BeliefStateMachineV2
+from .alert_system import AlertSystem, Alert
 
 
 class OrderBookState:
@@ -37,6 +50,7 @@ class OrderBookState:
         self.levels: Dict[Tuple[str, Decimal], PriceLevel] = {}  # (side, price) -> PriceLevel
         self.best_bid: Optional[Decimal] = None
         self.best_ask: Optional[Decimal] = None
+        self.tick_size: Decimal = Decimal("0.01")
         self.last_update_ts: int = 0
         self.lock = threading.Lock()
 
@@ -145,6 +159,24 @@ class OrderBookState:
             sorted_levels = sorted(side_levels, key=lambda l: l.size_peak, reverse=True)
             return [l.price for l in sorted_levels[:count]]
 
+    def get_total_depth(self, side: str, ticks_range: int = 5) -> float:
+        """Get total depth within N ticks of best price."""
+        with self.lock:
+            best_price = self.best_bid if side == 'bid' else self.best_ask
+            if not best_price:
+                return 0.0
+
+            total = 0.0
+            price_range = ticks_range * self.tick_size
+
+            for (s, price), level in self.levels.items():
+                if s != side:
+                    continue
+                if abs(price - best_price) <= price_range:
+                    total += level.size_now
+
+            return total
+
     def _update_best_prices(self):
         """Update best bid/ask from current levels."""
         bids = [p for (s, p), l in self.levels.items() if s == 'bid' and l.size_now > 0]
@@ -158,22 +190,27 @@ class ReactionEngine:
     """
     The main engine that processes real-time data and produces reactions.
 
-    Components:
+    v2 Components:
     - OrderBookState: Tracks current state of each token's order book
     - ShockDetector: Detects when price levels are tested
     - ReactionClassifier: Classifies reactions after observation window
-    - BeliefStateEngine: Maintains belief state machine for each market
+    - LeadingEventDetector: Detects leading events (PRE_SHOCK_PULL, DEPTH_COLLAPSE, etc.)
+    - BeliefStateMachine: Maintains belief state machine for each market
+    - AlertSystem: Unified alert management
     """
 
     def __init__(
         self,
         on_reaction: Optional[Callable[[ReactionEvent], None]] = None,
         on_state_change: Optional[Callable[[BeliefStateChange], None]] = None,
-        on_alert: Optional[Callable[[dict], None]] = None
+        on_leading_event: Optional[Callable[[LeadingEvent], None]] = None,
+        on_alert: Optional[Callable[[dict], None]] = None,
+        use_alert_system: bool = True
     ):
         # Callbacks
         self.on_reaction_callback = on_reaction
         self.on_state_change_callback = on_state_change
+        self.on_leading_event_callback = on_leading_event
         self.on_alert_callback = on_alert
 
         # State stores: token_id -> OrderBookState
@@ -185,6 +222,21 @@ class ReactionEngine:
         self.belief_state_engine = BeliefStateEngine(
             on_state_change=self._handle_state_change
         )
+
+        # v2: Leading event detector
+        self.leading_event_detector = LeadingEventDetector()
+
+        # v2: Belief state machine (enhanced version)
+        self.belief_state_machines: Dict[str, BeliefStateMachineV2] = {}
+
+        # v2: Alert system
+        self.use_alert_system = use_alert_system
+        if use_alert_system:
+            self.alert_system = AlertSystem(
+                on_alert=self._handle_alert_system_callback
+            )
+        else:
+            self.alert_system = None
 
         # Reaction window sampling
         self.sample_thread: Optional[threading.Thread] = None
@@ -198,6 +250,7 @@ class ReactionEngine:
             'books_processed': 0,
             'shocks_detected': 0,
             'reactions_classified': 0,
+            'leading_events_detected': 0,
             'state_changes': 0
         }
 
@@ -219,6 +272,12 @@ class ReactionEngine:
             self.order_books[token_id] = OrderBookState(token_id)
         return self.order_books[token_id]
 
+    def _get_or_create_belief_machine(self, token_id: str) -> BeliefStateMachineV2:
+        """Get or create belief state machine for a token."""
+        if token_id not in self.belief_state_machines:
+            self.belief_state_machines[token_id] = BeliefStateMachineV2()
+        return self.belief_state_machines[token_id]
+
     def on_book(self, data: dict):
         """Handle book snapshot message."""
         token_id = data.get('asset_id', '')
@@ -237,6 +296,14 @@ class ReactionEngine:
         ask_key_levels = book.get_key_levels('ask')
         all_key_levels = bid_key_levels + ask_key_levels
         self.belief_state_engine.update_key_levels(token_id, all_key_levels)
+
+        # v2: Update anchors in leading event detector
+        self.leading_event_detector.update_anchors(token_id, timestamp)
+
+        # v2: Update anchors in belief state machine v2
+        belief_machine = self._get_or_create_belief_machine(token_id)
+        anchor_levels = self.leading_event_detector.get_anchors(token_id)
+        belief_machine.update_anchors(token_id, anchor_levels)
 
         self.stats['books_processed'] += 1
 
@@ -269,6 +336,35 @@ class ReactionEngine:
                 token_id, price, timestamp, size, best_bid, best_ask
             )
 
+            # v2: Update leading event detector
+            if level:
+                baseline = level.get_baseline_size(timestamp)
+                best_price = best_bid if book_side == 'bid' else best_ask
+
+                leading_events = self.leading_event_detector.on_level_update(
+                    level=level,
+                    baseline=baseline,
+                    timestamp=timestamp,
+                    best_price=best_price,
+                    tick_size=book.tick_size
+                )
+
+                # Process detected leading events
+                for leading_event in leading_events:
+                    self._handle_leading_event(leading_event)
+
+            # v2: Check for GRADUAL_THINNING
+            total_depth = book.get_total_depth(book_side)
+            thinning_event = self.leading_event_detector.on_book_depth_update(
+                token_id=token_id,
+                side=book_side,
+                total_depth=total_depth,
+                trade_volume=0,  # Will be updated on trade
+                timestamp=timestamp
+            )
+            if thinning_event:
+                self._handle_leading_event(thinning_event)
+
             self.stats['price_changes_processed'] += 1
 
     def on_trade(self, data: dict):
@@ -285,6 +381,14 @@ class ReactionEngine:
         level_side = 'ask' if trade.side == 'BUY' else 'bid'
         level = book.get_level(level_side, trade.price)
 
+        # v2: Record trade in leading event detector
+        self.leading_event_detector.on_trade(token_id, trade.price, trade.size, trade.timestamp)
+
+        # v2: Update GRADUAL_THINNING trade volume
+        self.leading_event_detector.gradual_thinning_detector.record_trade(
+            token_id, level_side, trade.size, trade.timestamp
+        )
+
         # Check for shock
         shock = self.shock_detector.on_trade(trade, level)
 
@@ -294,8 +398,10 @@ class ReactionEngine:
             # Start observing this level
             self.reaction_classifier.start_observation(shock)
 
-            # Alert on shock
-            if self.on_alert_callback:
+            # v2: Alert via AlertSystem
+            if self.alert_system:
+                self.alert_system.on_shock(shock)
+            elif self.on_alert_callback:
                 self._emit_shock_alert(shock)
 
         self.stats['trades_processed'] += 1
@@ -320,12 +426,21 @@ class ReactionEngine:
                         if self.on_reaction_callback:
                             self.on_reaction_callback(reaction)
 
-                        # Alert on reaction
-                        if self.on_alert_callback:
+                        # v2: Alert via AlertSystem
+                        if self.alert_system:
+                            self.alert_system.on_reaction(reaction)
+                        elif self.on_alert_callback:
                             self._emit_reaction_alert(reaction)
 
-                        # Update belief state
+                        # Update belief state (old engine)
                         state_change = self.belief_state_engine.on_reaction(reaction)
+
+                        # v2: Update belief state machine v2
+                        belief_machine = self._get_or_create_belief_machine(reaction.token_id)
+                        state_change_v2 = belief_machine.on_reaction(reaction)
+
+                        if state_change_v2:
+                            self._handle_state_change_v2(state_change_v2)
 
                         if state_change:
                             self.stats['state_changes'] += 1
@@ -340,14 +455,51 @@ class ReactionEngine:
                 print(f"Error in sample loop: {e}")
                 time.sleep(1)
 
+    def _handle_leading_event(self, event: LeadingEvent):
+        """Handle a detected leading event."""
+        self.stats['leading_events_detected'] += 1
+
+        # Callback
+        if self.on_leading_event_callback:
+            self.on_leading_event_callback(event)
+
+        # v2: Alert via AlertSystem
+        if self.alert_system:
+            self.alert_system.on_leading_event(event)
+
+        # v2: Update belief state machine v2
+        belief_machine = self._get_or_create_belief_machine(event.token_id)
+        state_change = belief_machine.on_leading_event(event)
+
+        if state_change:
+            self._handle_state_change_v2(state_change)
+
     def _handle_state_change(self, change: BeliefStateChange):
         """Handle state change from belief state engine."""
         if self.on_state_change_callback:
             self.on_state_change_callback(change)
 
-        if self.on_alert_callback:
+        if self.alert_system:
+            self.alert_system.on_state_change(change)
+        elif self.on_alert_callback:
             self._emit_state_change_alert(change)
 
+    def _handle_state_change_v2(self, change: BeliefStateChange):
+        """Handle state change from belief state machine v2."""
+        self.stats['state_changes'] += 1
+
+        if self.on_state_change_callback:
+            self.on_state_change_callback(change)
+
+        if self.alert_system:
+            self.alert_system.on_state_change(change)
+
+    def _handle_alert_system_callback(self, alert: Alert):
+        """Handle alert from AlertSystem, convert to dict for legacy callback."""
+        if self.on_alert_callback:
+            self.on_alert_callback(alert.to_dict())
+
+    # Legacy alert emission (for when AlertSystem is not used)
     def _emit_shock_alert(self, shock: ShockEvent):
         """Emit alert for shock detection."""
         alert = {
@@ -392,13 +544,19 @@ class ReactionEngine:
 
     def get_stats(self) -> dict:
         """Get engine statistics."""
-        return {
+        stats = {
             **self.stats,
             'tracked_books': len(self.order_books),
             'shock_detector': self.shock_detector.get_stats(),
             'classifier': self.reaction_classifier.get_stats(),
-            'belief_engine': self.belief_state_engine.get_stats()
+            'belief_engine': self.belief_state_engine.get_stats(),
+            'leading_events': self.leading_event_detector.get_stats(),
         }
+
+        if self.alert_system:
+            stats['alert_system'] = self.alert_system.get_stats()
+
+        return stats
 
     def get_market_summary(self, token_id: str) -> Optional[dict]:
         """Get summary for a specific market."""
@@ -410,10 +568,21 @@ class ReactionEngine:
 
         indicator = STATE_INDICATORS.get(state, "⚪")
 
+        # v2: Get belief machine state
+        belief_machine = self.belief_state_machines.get(token_id)
+        if belief_machine:
+            v2_state = belief_machine.get_state(token_id)
+            v2_indicator = STATE_INDICATORS.get(v2_state, "⚪")
+        else:
+            v2_state = state
+            v2_indicator = indicator
+
         return {
             'token_id': token_id,
             'state': state.value,
             'indicator': indicator,
+            'state_v2': v2_state.value,
+            'indicator_v2': v2_indicator,
             'best_bid': str(book.best_bid) if book.best_bid else None,
             'best_ask': str(book.best_ask) if book.best_ask else None,
             'bid_key_levels': [str(p) for p in book.get_key_levels('bid')],
@@ -427,3 +596,15 @@ class ReactionEngine:
             token_id: self.get_market_summary(token_id)
             for token_id in self.order_books
         }
+
+    def get_alerts(self, **kwargs) -> List[Alert]:
+        """Get alerts from AlertSystem."""
+        if self.alert_system:
+            return self.alert_system.get_alerts(**kwargs)
+        return []
+
+    def get_critical_alerts(self, limit: int = 10) -> List[Alert]:
+        """Get critical alerts."""
+        if self.alert_system:
+            return self.alert_system.get_critical_alerts(limit)
+        return []
