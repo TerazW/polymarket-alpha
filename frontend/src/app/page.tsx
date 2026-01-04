@@ -13,6 +13,7 @@ interface Market {
 interface Stats {
   trades: number;
   books: number;
+  shocks: number;
 }
 
 export default function Dashboard() {
@@ -77,6 +78,10 @@ export default function Dashboard() {
             <div className="bg-gray-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-blue-400">{stats.books.toLocaleString()}</div>
               <div className="text-gray-400 text-sm">Book Snapshots</div>
+            </div>
+            <div className="bg-gray-800 rounded-lg p-4">
+              <div className="text-2xl font-bold text-yellow-400">{stats.shocks.toLocaleString()}</div>
+              <div className="text-gray-400 text-sm">⚡ Shock Events</div>
             </div>
           </div>
         )}
