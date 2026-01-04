@@ -241,14 +241,18 @@ def get_stats():
 
             cur.execute("SELECT COUNT(*) FROM book_bins")
             books = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM shock_events")
+            shocks = cur.fetchone()[0]
         conn.close()
 
         return {
             "trades": trades,
-            "books": books
+            "books": books,
+            "shocks": shocks
         }
     except Exception as e:
-        return {"trades": 0, "books": 0, "error": str(e)}
+        return {"trades": 0, "books": 0, "shocks": 0, "error": str(e)}
 
 
 # ============================================================================
