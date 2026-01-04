@@ -174,6 +174,54 @@ FROM belief_states
 ORDER BY token_id, ts DESC;
 
 -- ============================================================================
+-- 7. leading_events - 领先事件（不靠成交触发）
+-- ============================================================================
+-- 这是系统"领先"于价格的核心信号
+
+CREATE TABLE IF NOT EXISTS leading_events (
+    event_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ts              TIMESTAMPTZ NOT NULL,
+    event_type      TEXT NOT NULL,              -- PRE_SHOCK_PULL 或 DEPTH_COLLAPSE
+    token_id        TEXT NOT NULL,
+    price           NUMERIC(5,3) NOT NULL,
+    side            TEXT NOT NULL,
+
+    -- PRE_SHOCK_PULL 字段
+    drop_ratio      NUMERIC,                    -- 下降比例
+    duration_ms     INTEGER,                    -- 持续时间
+    trade_volume_nearby NUMERIC,                -- 附近成交量
+    is_anchor       BOOLEAN DEFAULT FALSE,      -- 是否为关键价位
+
+    -- DEPTH_COLLAPSE 字段
+    affected_levels INTEGER,                    -- 受影响价位数
+    time_std_ms     NUMERIC,                    -- 时间标准差
+
+    CONSTRAINT valid_leading_type CHECK (event_type IN ('PRE_SHOCK_PULL', 'DEPTH_COLLAPSE'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_leading_token_ts ON leading_events(token_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_leading_type ON leading_events(event_type, ts DESC);
+
+-- ============================================================================
+-- 8. anchor_levels - 关键价位快照
+-- ============================================================================
+-- 用于记录关键价位的选择历史
+
+CREATE TABLE IF NOT EXISTS anchor_levels (
+    id              SERIAL PRIMARY KEY,
+    ts              TIMESTAMPTZ NOT NULL,
+    token_id        TEXT NOT NULL,
+    price           NUMERIC(5,3) NOT NULL,
+    side            TEXT NOT NULL,
+    peak_size       NUMERIC,
+    persistence_seconds NUMERIC,
+    anchor_score    NUMERIC,
+    rank            INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_anchor_token_ts ON anchor_levels(token_id, ts DESC);
+
+-- ============================================================================
 -- 说明
 -- ============================================================================
 --
