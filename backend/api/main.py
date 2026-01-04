@@ -8,12 +8,18 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from typing import Optional
 
+# Import v1 routes
+from .routes import v1_router
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="Belief Reaction System",
     description="人类信念反应感知系统 - 检测预测市场中的信念变化",
-    version="0.1.0"
+    version="1.0.0"
 )
+
+# Register v1 API routes
+app.include_router(v1_router)
 
 # 允许前端跨域访问
 app.add_middleware(
@@ -278,10 +284,18 @@ def get_stats():
 async def startup():
     print()
     print("=" * 50)
-    print("  Belief Reaction System API")
+    print("  Belief Reaction System API v1.0")
     print("  看存在没意义，看反应才有意义")
     print("=" * 50)
     print()
     print("  API 文档: http://localhost:8000/docs")
     print("  健康检查: http://localhost:8000/health")
+    print()
+    print("  v1 Endpoints:")
+    print("    GET /v1/health      - Health check")
+    print("    GET /v1/radar       - Market radar")
+    print("    GET /v1/evidence    - Evidence window")
+    print("    GET /v1/alerts      - Alerts list")
+    print("    GET /v1/heatmap/tiles - Heatmap tiles")
+    print("    GET /v1/replay/catalog - Replay catalog")
     print()
