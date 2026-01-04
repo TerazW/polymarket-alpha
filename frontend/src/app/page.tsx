@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { BeliefState } from '@/types/api';
 import { STATE_COLORS } from '@/types/api';
+import { getRadar, type RadarRow } from '@/lib/api';
 
 interface Market {
   condition_id: string;
@@ -12,7 +13,6 @@ interface Market {
   volume_24h: number;
   liquidity: number;
   yes_price: number | null;
-  // v5 additions
   state?: BeliefState;
   confidence?: number;
   leading_rate_10m?: number;
@@ -70,28 +70,47 @@ const STATE_EMOJIS: Record<BeliefState, string> = {
   BROKEN: '🔴',
 };
 
+// Convert RadarRow to Market interface
+function radarRowToMarket(row: RadarRow): Market {
+  return {
+    condition_id: row.market.condition_id,
+    token_id: row.market.token_id,
+    question: row.market.title,
+    volume_24h: 0,
+    liquidity: 0,
+    yes_price: row.market.last_price ?? null,
+    state: row.belief_state,
+    confidence: row.confidence,
+    leading_rate_10m: row.leading_rate_10m,
+  };
+}
+
 export default function Dashboard() {
   const [markets, setMarkets] = useState<Market[]>(MOCK_MARKETS);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [useMockData, setUseMockData] = useState(true);
+  const [apiStatus, setApiStatus] = useState<'unknown' | 'online' | 'offline'>('unknown');
 
   const API_BASE = 'http://127.0.0.1:8000';
 
-  const fetchMarkets = async () => {
+  const fetchRadar = useCallback(async () => {
     if (useMockData) return;
     try {
-      const res = await fetch(`${API_BASE}/api/markets?limit=20`);
-      if (!res.ok) throw new Error('Failed to fetch markets');
-      const data = await res.json();
-      setMarkets(data.markets || []);
+      const data = await getRadar({ limit: 50 });
+      const convertedMarkets = data.rows.map(radarRowToMarket);
+      setMarkets(convertedMarkets.length > 0 ? convertedMarkets : MOCK_MARKETS);
+      setApiStatus('online');
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
+      setApiStatus('offline');
+      // Keep mock data on error
     }
-  };
+  }, [useMockData]);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     if (useMockData) return;
     try {
       const res = await fetch(`${API_BASE}/api/stats`);
@@ -102,22 +121,28 @@ export default function Dashboard() {
     } catch {
       // Stats endpoint might not exist yet
     }
-  };
+  }, [useMockData]);
 
   useEffect(() => {
-    if (useMockData) return;
+    if (useMockData) {
+      setMarkets(MOCK_MARKETS);
+      setApiStatus('unknown');
+      return;
+    }
+
     const loadData = async () => {
       setLoading(true);
-      await Promise.all([fetchMarkets(), fetchStats()]);
+      await Promise.all([fetchRadar(), fetchStats()]);
       setLoading(false);
     };
     loadData();
+
     const interval = setInterval(() => {
-      fetchMarkets();
+      fetchRadar();
       fetchStats();
     }, 30000);
     return () => clearInterval(interval);
-  }, [useMockData]);
+  }, [useMockData, fetchRadar, fetchStats]);
 
   // Sort markets by state priority (BROKEN > CRACKING > FRAGILE > STABLE)
   const sortedMarkets = [...markets].sort((a, b) => {
@@ -135,14 +160,21 @@ export default function Dashboard() {
             <h1 className="text-3xl font-bold mb-2">Belief Reaction System</h1>
             <p className="text-gray-400">&quot;看存在没意义，看反应才有意义&quot;</p>
           </div>
-          <button
-            onClick={() => setUseMockData(!useMockData)}
-            className={`px-3 py-1 rounded text-sm ${
-              useMockData ? 'bg-yellow-600' : 'bg-green-600'
-            }`}
-          >
-            {useMockData ? 'Mock Data' : 'Live Data'}
-          </button>
+          <div className="flex items-center gap-2">
+            {!useMockData && apiStatus !== 'unknown' && (
+              <span className={`text-xs ${apiStatus === 'online' ? 'text-green-400' : 'text-red-400'}`}>
+                {apiStatus === 'online' ? '● API Online' : '○ API Offline'}
+              </span>
+            )}
+            <button
+              onClick={() => setUseMockData(!useMockData)}
+              className={`px-3 py-1 rounded text-sm ${
+                useMockData ? 'bg-yellow-600' : 'bg-green-600'
+              }`}
+            >
+              {useMockData ? 'Mock Data' : 'Live Data'}
+            </button>
+          </div>
         </div>
 
         {stats && (
