@@ -1,5 +1,43 @@
 # Changelog
 
+## v4.1.0 (2026-01-04) - Deterministic Replay + Collector/Reactor Decoupling
+
+### Replay Specification (REPLAY_SPEC.md)
+- Defined `raw_events` schema with `sort_key = (server_ts, seq_num)`
+- Sequence number generator for deterministic ordering
+- Same-timestamp event priority rules (book > trade > price_change)
+- Output hash computation for consistency verification
+- Replay engine with time simulation support
+
+### Consistency Specification (CONSISTENCY_SPEC.md)
+- Inconsistency detection mechanism with 5-minute check intervals
+- Automatic diagnosis of root causes (data_loss, sequence_error, state_corruption, logic_error)
+- State rebuild workflow with safety margins
+- Alert levels: INFO, WARNING, ERROR, CRITICAL
+- API endpoints for manual checks and rebuilds
+
+### Collector/Reactor Decoupling
+- **EventBus** (`event_bus.py`): Abstract interface for event passing
+  - `InMemoryEventBus`: Queue-based for single-process deployment
+  - `DBBackedEventBus`: Database-backed for multi-process/replay scenarios
+  - `RawEvent` dataclass with `sort_key` property
+- **DataCollector** (`collector.py`): WebSocket connection management
+  - Publishes `RawEvent` to EventBus
+  - Connection state machine (DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING)
+  - Exponential backoff for reconnection
+- **Reactor** (`reactor.py`): Event processing engine
+  - Consumes events from EventBus
+  - Supports `replay_mode` for deterministic replay
+  - `clear_state()` method for rebuild support
+
+### Architecture Benefits
+- Horizontal scaling: Multiple reactors can process same event stream
+- Replay support: Process historical events deterministically
+- Audit trail: All raw events persisted with timestamps
+- Testing: Inject events directly to reactor without WebSocket
+
+---
+
 ## v4.0.0 (2026-01-04) - ChatGPT Audit Complete
 
 ### WebSocket v4 - Disconnect Handling State Machine
