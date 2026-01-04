@@ -1,12 +1,14 @@
 """
-Belief Reaction System - Collector v2
+Belief Reaction System - Collector v3
 实时数据收集器：连接 Polymarket WebSocket，收集订单簿数据并存入数据库。
-集成 ShockDetector 和 ReactionClassifier 实时检测和分类反应。
+集成 ShockDetector, ReactionClassifier, LeadingEventDetector 和 BeliefStateMachine。
 
-v2 改进:
+v3 改进:
 - 使用 baseline_size 中位数 (避免分母被操纵)
 - 双窗口: FAST (8s) + SLOW (30s)
 - 新反应类型: VACUUM > SWEEP > CHASE > PULL > HOLD > DELAYED
+- 领先事件检测: PRE_SHOCK_PULL / DEPTH_COLLAPSE
+- Deterministic 状态机: STABLE → FRAGILE → CRACKING → BROKEN
 
 运行: python run_collector.py
 """
@@ -29,11 +31,12 @@ from utils.polymarket_api import PolymarketAPI
 # 导入 POC 模块
 from poc.models import (
     TradeEvent, PriceLevel, ShockEvent, ReactionEvent, LeadingEvent,
-    WindowType, LeadingEventType, REACTION_INDICATORS
+    WindowType, LeadingEventType, BeliefState, REACTION_INDICATORS, STATE_INDICATORS
 )
 from poc.shock_detector import ShockDetector
 from poc.reaction_classifier import ReactionClassifier
 from poc.leading_events import LeadingEventDetector
+from poc.belief_state_machine import BeliefStateMachine
 
 
 # 数据库配置
@@ -48,10 +51,11 @@ DB_CONFIG = {
 # 全局数据库连接
 db_conn: Optional[psycopg2.extensions.connection] = None
 
-# ShockDetector, ReactionClassifier 和 LeadingEventDetector 实例
+# ShockDetector, ReactionClassifier, LeadingEventDetector 和 BeliefStateMachine 实例
 shock_detector = ShockDetector()
 reaction_classifier = ReactionClassifier()
 leading_detector = LeadingEventDetector()
+state_machine = BeliefStateMachine()
 
 # 价格层级缓存 {(token_id, price_str, side): PriceLevel}
 price_levels: Dict[tuple, PriceLevel] = {}
@@ -145,6 +149,32 @@ def save_reaction_event(reaction: ReactionEvent):
             ))
     except Exception as e:
         print(f"[DB ERROR] 保存 Reaction 失败: {e}")
+
+
+def save_belief_state_change(change):
+    """保存信念状态变化到数据库"""
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # 转换 evidence 列表为 JSON
+            import json
+            evidence_json = json.dumps({
+                'triggers': change.evidence,
+                'refs': change.evidence_refs
+            })
+
+            cur.execute("""
+                INSERT INTO belief_states (ts, token_id, old_state, new_state, evidence)
+                VALUES (to_timestamp(%s / 1000.0), %s, %s, %s, %s)
+            """, (
+                change.timestamp,
+                change.token_id,
+                change.old_state.value,
+                change.new_state.value,
+                evidence_json
+            ))
+    except Exception as e:
+        print(f"[DB ERROR] 保存 BeliefStateChange 失败: {e}")
 
 
 def save_leading_event(event: LeadingEvent):
@@ -249,6 +279,7 @@ reaction_count = 0
 fast_reaction_count = 0
 slow_reaction_count = 0
 leading_event_count = 0
+state_change_count = 0
 
 
 def on_trade(trade: Dict):
@@ -344,6 +375,8 @@ def on_book(book: Dict):
                 leading_event_count += 1
                 save_leading_event(event)
                 _print_leading_event(event)
+                # 更新状态机
+                _process_leading_event_for_state(event)
 
     for ask in asks:
         price = Decimal(str(ask.get('price', 0)))
@@ -364,10 +397,13 @@ def on_book(book: Dict):
                 leading_event_count += 1
                 save_leading_event(event)
                 _print_leading_event(event)
+                # 更新状态机
+                _process_leading_event_for_state(event)
 
-    # 每分钟更新一次 anchor 列表
+    # 每分钟更新一次 anchor 列表并同步到状态机
     if book_count % 60 == 0:
-        leading_detector.update_anchors(token_id, now)
+        anchors = leading_detector.update_anchors(token_id, now)
+        state_machine.update_anchors(token_id, anchors)
 
     # v2: 双窗口处理
     # 1. 检查 FAST 窗口过期的 shock
@@ -380,6 +416,8 @@ def on_book(book: Dict):
                 reaction_count += 1
                 save_reaction_event(reaction)
                 _print_reaction(reaction, "FAST")
+                # 更新状态机
+                _process_reaction_for_state(reaction)
             fast_classified_shocks.add(shock.shock_id)
 
     # 2. 检查 SLOW 窗口过期的 shock
@@ -391,6 +429,8 @@ def on_book(book: Dict):
             reaction_count += 1
             save_reaction_event(reaction)
             _print_reaction(reaction, "SLOW")
+            # 更新状态机
+            _process_reaction_for_state(reaction)
         # 清理已完成的 shock
         shock_detector.complete_shock(shock.token_id, shock.price)
         reaction_classifier.remove_observer(shock.token_id, shock.price)
@@ -427,6 +467,35 @@ def _print_leading_event(event: LeadingEvent):
               f"{event.affected_levels} levels collapsed, std={event.time_std_ms:.0f}ms")
 
 
+def _process_reaction_for_state(reaction: ReactionEvent):
+    """处理反应事件并更新状态机"""
+    global state_change_count
+    state_change = state_machine.on_reaction(reaction)
+    if state_change:
+        state_change_count += 1
+        save_belief_state_change(state_change)
+        _print_state_change(state_change)
+
+
+def _process_leading_event_for_state(event: LeadingEvent):
+    """处理领先事件并更新状态机"""
+    global state_change_count
+    state_change = state_machine.on_leading_event(event)
+    if state_change:
+        state_change_count += 1
+        save_belief_state_change(state_change)
+        _print_state_change(state_change)
+
+
+def _print_state_change(change):
+    """打印状态变化"""
+    ts_str = datetime.now().strftime("%H:%M:%S")
+    old_indicator = STATE_INDICATORS.get(change.old_state, '⚪')
+    new_indicator = STATE_INDICATORS.get(change.new_state, '⚪')
+    print(f"[{ts_str}] 📊 STATE CHANGE | {change.token_id[:8]}... | "
+          f"{old_indicator} {change.old_state.value} → {new_indicator} {change.new_state.value}")
+
+
 def get_top_markets(limit: int = 10):
     """获取热门市场"""
     print(f"正在获取前 {limit} 个热门市场...")
@@ -454,14 +523,16 @@ def main():
     """主函数"""
     print()
     print("=" * 60)
-    print("  Belief Reaction System - Collector v2")
-    print("  实时数据收集 + Shock 检测 + 双窗口反应分类")
+    print("  Belief Reaction System - Collector v3")
+    print("  实时数据收集 + Shock 检测 + 双窗口反应分类 + 状态机")
     print("=" * 60)
     print()
-    print("  v2 改进:")
+    print("  v3 改进:")
     print("    - baseline_size 中位数 (防操纵)")
     print("    - FAST 窗口 (8s) + SLOW 窗口 (30s)")
     print("    - 新分类: VACUUM > SWEEP > CHASE > PULL > HOLD > DELAYED")
+    print("    - 领先事件: PRE_SHOCK_PULL / DEPTH_COLLAPSE")
+    print("    - Deterministic 状态机: STABLE → FRAGILE → CRACKING → BROKEN")
     print()
 
     # 测试数据库连接
@@ -485,6 +556,7 @@ def main():
     print("  实时数据流 (按 Ctrl+C 停止)")
     print("  ⚡ Shock 检测 + 双窗口反应分类")
     print("  🚨 领先事件检测 (PRE_SHOCK_PULL / DEPTH_COLLAPSE)")
+    print("  📊 状态机: STABLE → FRAGILE → CRACKING → BROKEN")
     print("=" * 60)
     print()
 
@@ -510,6 +582,7 @@ def main():
         print(f"     - FAST 窗口: {fast_reaction_count}")
         print(f"     - SLOW 窗口: {slow_reaction_count}")
         print(f"  🚨 领先事件: {leading_event_count}")
+        print(f"  📊 状态变化: {state_change_count}")
         print(f"  错误: {ws.stats['errors']}")
 
         # 显示 ShockDetector 统计
@@ -550,6 +623,23 @@ def main():
             for etype, count in leading_stats['by_type'].items():
                 emoji = "🚨" if etype == "PRE_SHOCK_PULL" else "💥"
                 print(f"    {emoji} {etype}: {count}")
+
+        # 显示 BeliefStateMachine 统计
+        state_stats = state_machine.get_stats()
+        print(f"\nBeliefStateMachine 统计:")
+        print(f"  📊 状态变化总数: {state_change_count}")
+        print(f"  追踪的 token 数: {state_stats['total_tokens']}")
+        print(f"  总状态转换: {state_stats['total_transitions']}")
+        if state_stats.get('by_current_state'):
+            print(f"  当前状态分布:")
+            for state, count in state_stats['by_current_state'].items():
+                indicator = STATE_INDICATORS.get(BeliefState(state), '⚪')
+                print(f"    {indicator} {state}: {count}")
+        if state_stats.get('transitions_by_state'):
+            print(f"  状态转换分布:")
+            for state, count in state_stats['transitions_by_state'].items():
+                indicator = STATE_INDICATORS.get(BeliefState(state), '⚪')
+                print(f"    → {indicator} {state}: {count}")
     finally:
         if db_conn:
             db_conn.close()
