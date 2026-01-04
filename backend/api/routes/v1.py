@@ -6,6 +6,7 @@ Implements OpenAPI spec endpoints
 from fastapi import APIRouter, Query, HTTPException
 from typing import Optional, Literal
 import time
+import base64
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -27,6 +28,13 @@ from ..schemas.v1 import (
 
 # v5.3: Bundle hash computation for evidence verification
 from backend.evidence.bundle_hash import compute_bundle_hash
+
+# v5.4: Heatmap tile generation
+from backend.heatmap.tile_generator import (
+    HeatmapTileGenerator,
+    TileBand as GeneratorTileBand,
+    tile_to_api_response
+)
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
@@ -695,11 +703,55 @@ def get_heatmap_tiles(
 
         conn.close()
 
-        # If no pre-computed tiles, generate placeholder response
-        # Real implementation would generate tiles from book_bins
+        # v5.4: Generate tiles on-demand if not in cache
         if not tiles:
-            # This is a placeholder - real implementation generates tiles on demand
-            pass
+            try:
+                generator = HeatmapTileGenerator(db_config=DB_CONFIG)
+                generator_band = GeneratorTileBand(band.value)
+
+                generated_tiles = generator.get_or_generate(
+                    token_id=token_id,
+                    from_ts=from_ts,
+                    to_ts=to_ts,
+                    lod_ms=lod,
+                    tile_ms=tile_ms,
+                    band=generator_band,
+                    cache=True  # Cache for future requests
+                )
+
+                for t in generated_tiles:
+                    tiles.append(HeatmapTileMeta(
+                        tile_id=t.tile_id,
+                        token_id=t.token_id,
+                        lod_ms=t.lod_ms,
+                        tile_ms=t.tile_ms,
+                        band=TileBand(t.band.value),
+                        t_start=t.t_start,
+                        t_end=t.t_end,
+                        tick_size=t.tick_size,
+                        price_min=t.price_min,
+                        price_max=t.price_max,
+                        rows=t.rows,
+                        cols=t.cols,
+                        encoding=TileEncoding(
+                            dtype=t.encoding_dtype,
+                            layout=t.encoding_layout,
+                            scale=t.encoding_scale,
+                            clip_pctl=t.clip_pctl,
+                            clip_value=t.clip_value,
+                        ),
+                        compression=TileCompression(
+                            algo=t.compression_algo,
+                            level=t.compression_level,
+                        ),
+                        payload_b64=base64.b64encode(t.payload).decode('utf-8'),
+                        checksum=TileChecksum(
+                            algo=t.checksum_algo,
+                            value=t.checksum_value,
+                        ),
+                    ))
+            except Exception as gen_error:
+                print(f"[HEATMAP] Tile generation failed: {gen_error}")
 
         return HeatmapTilesResponse(
             manifest=HeatmapTilesManifest(
