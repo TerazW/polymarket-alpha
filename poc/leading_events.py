@@ -1,12 +1,13 @@
 """
-Belief Reaction System - Leading Events Detector
+Belief Reaction System - Leading Events Detector v3
 检测不靠成交触发的领先预警信号。
 
 这是系统从"成交驱动"升级为"行为领先"的核心模块。
 
-两种领先事件:
+三种领先事件:
 1. PRE_SHOCK_PULL: 无成交撤退（信息前兆）
 2. DEPTH_COLLAPSE: 多价位同步塌陷（恐慌信号）
+3. [v3] GRADUAL_THINNING: 渐进撤退（慢慢撤离）
 
 关键价位选择 (Anchor Levels):
 - 基于 peak_size 和 persistence 评分
@@ -36,6 +37,11 @@ from .config import (
     DEPTH_COLLAPSE_MIN_LEVELS,
     DEPTH_COLLAPSE_DROP_RATIO,
     DEPTH_COLLAPSE_TIME_STD_MS,
+    # [v3] GRADUAL_THINNING
+    GRADUAL_THINNING_WINDOW_MS,
+    GRADUAL_THINNING_TICKS,
+    GRADUAL_THINNING_DROP_RATIO,
+    GRADUAL_THINNING_TRADE_RATIO,
     # ANCHOR
     ANCHOR_LOOKBACK_HOURS,
     ANCHOR_PERSISTENCE_THETA,
@@ -446,20 +452,156 @@ class DepthCollapseDetector:
         }
 
 
+class GradualThinningDetector:
+    """
+    [v3] GRADUAL_THINNING 检测器 - 渐进撤退
+
+    触发条件:
+    - 在 60s 内，best ± N ticks 范围内的总深度下降 >= 40%
+    - 成交驱动占比 < 10% (即不是被动消耗，而是主动撤退)
+
+    这是"风险上升/参与者退出"的另一种领先信号，
+    与 DEPTH_COLLAPSE (同步撤离) 互补。
+    """
+
+    def __init__(self):
+        # 深度快照历史 {(token_id, side): [(timestamp, total_depth, trade_volume), ...]}
+        self.depth_history: Dict[Tuple[str, str], List[Tuple[int, float, float]]] = defaultdict(list)
+
+        # 累计成交量 {(token_id, side): [(timestamp, volume), ...]}
+        self.trade_volumes: Dict[Tuple[str, str], List[Tuple[int, float]]] = defaultdict(list)
+
+        # 已检测的事件
+        self.detected_events: Set[Tuple[str, str, int]] = set()
+
+        # 统计
+        self.total_detected = 0
+
+    def record_depth_snapshot(
+        self,
+        token_id: str,
+        side: str,
+        total_depth: float,
+        timestamp: int
+    ):
+        """记录总深度快照"""
+        key = (token_id, side)
+        self.depth_history[key].append((timestamp, total_depth, 0.0))
+
+        # 清理旧数据 (保留 90s)
+        cutoff = timestamp - 90000
+        self.depth_history[key] = [
+            (ts, d, v) for ts, d, v in self.depth_history[key] if ts > cutoff
+        ]
+
+    def record_trade(
+        self,
+        token_id: str,
+        side: str,
+        volume: float,
+        timestamp: int
+    ):
+        """记录成交量"""
+        key = (token_id, side)
+        self.trade_volumes[key].append((timestamp, volume))
+
+        # 清理旧数据 (保留 90s)
+        cutoff = timestamp - 90000
+        self.trade_volumes[key] = [
+            (ts, v) for ts, v in self.trade_volumes[key] if ts > cutoff
+        ]
+
+    def check_gradual_thinning(
+        self,
+        token_id: str,
+        side: str,
+        current_time: int
+    ) -> Optional[LeadingEvent]:
+        """检查是否触发 GRADUAL_THINNING"""
+        key = (token_id, side)
+        history = self.depth_history.get(key, [])
+
+        if len(history) < 2:
+            return None
+
+        # 找到窗口开始时的深度
+        window_start = current_time - GRADUAL_THINNING_WINDOW_MS
+
+        start_depth = None
+        for ts, depth, _ in history:
+            if ts >= window_start:
+                start_depth = depth
+                break
+
+        if start_depth is None or start_depth <= 0:
+            return None
+
+        # 当前深度
+        current_depth = history[-1][1]
+
+        # 计算下降比例
+        depth_drop_ratio = (start_depth - current_depth) / start_depth
+
+        if depth_drop_ratio < GRADUAL_THINNING_DROP_RATIO:
+            return None
+
+        # 计算成交驱动占比
+        trades = self.trade_volumes.get(key, [])
+        total_trade_volume = sum(
+            v for ts, v in trades
+            if window_start <= ts <= current_time
+        )
+
+        depth_lost = start_depth - current_depth
+        trade_driven_ratio = total_trade_volume / depth_lost if depth_lost > 0 else 0
+
+        if trade_driven_ratio >= GRADUAL_THINNING_TRADE_RATIO:
+            return None  # 成交驱动太多，不算渐进撤退
+
+        # 避免重复检测 (每分钟最多一次)
+        event_key = (token_id, side, current_time // 60000)
+        if event_key in self.detected_events:
+            return None
+
+        self.detected_events.add(event_key)
+        self.total_detected += 1
+
+        return LeadingEvent(
+            event_type=LeadingEventType.GRADUAL_THINNING,
+            timestamp=current_time,
+            token_id=token_id,
+            price=Decimal("0"),  # GRADUAL_THINNING 不特定于某个价位
+            side=side,
+            drop_ratio=depth_drop_ratio,
+            duration_ms=GRADUAL_THINNING_WINDOW_MS,
+            total_depth_before=start_depth,
+            total_depth_after=current_depth,
+            trade_driven_ratio=trade_driven_ratio
+        )
+
+    def get_stats(self) -> dict:
+        return {
+            "total_detected": self.total_detected,
+            "tracked_sides": len(self.depth_history)
+        }
+
+
 class LeadingEventDetector:
     """
-    领先事件检测器（总入口）
+    领先事件检测器（总入口）v3
 
     整合:
     - AnchorLevelTracker: 关键价位选择
     - PreShockPullDetector: 无成交撤退
     - DepthCollapseDetector: 多价位同步塌陷
+    - [v3] GradualThinningDetector: 渐进撤退
     """
 
     def __init__(self):
         self.anchor_tracker = AnchorLevelTracker()
         self.pre_shock_detector = PreShockPullDetector(self.anchor_tracker)
         self.depth_collapse_detector = DepthCollapseDetector()
+        self.gradual_thinning_detector = GradualThinningDetector()  # v3
 
         # 收集到的领先事件
         self.events: List[LeadingEvent] = []
@@ -530,6 +672,48 @@ class LeadingEventDetector:
         """记录成交（用于 PRE_SHOCK_PULL 检测）"""
         self.pre_shock_detector.record_trade(token_id, price, size, timestamp)
 
+    def on_book_depth_update(
+        self,
+        token_id: str,
+        side: str,
+        total_depth: float,
+        trade_volume: float,
+        timestamp: int
+    ) -> Optional[LeadingEvent]:
+        """
+        [v3] 记录总深度更新，用于 GRADUAL_THINNING 检测
+
+        Args:
+            token_id: Token ID
+            side: 'bid' or 'ask'
+            total_depth: 当前 best ± N ticks 范围内的总深度
+            trade_volume: 自上次更新以来的成交量
+            timestamp: 时间戳
+
+        Returns:
+            检测到的 GRADUAL_THINNING 事件 (如果有)
+        """
+        # 记录深度和成交
+        self.gradual_thinning_detector.record_depth_snapshot(
+            token_id, side, total_depth, timestamp
+        )
+        if trade_volume > 0:
+            self.gradual_thinning_detector.record_trade(
+                token_id, side, trade_volume, timestamp
+            )
+
+        # 检测 GRADUAL_THINNING
+        thinning = self.gradual_thinning_detector.check_gradual_thinning(
+            token_id, side, timestamp
+        )
+        if thinning:
+            self.events.append(thinning)
+            self.total_events += 1
+            self.events_by_type[LeadingEventType.GRADUAL_THINNING] += 1
+            return thinning
+
+        return None
+
     def update_anchors(self, token_id: str, current_time: int) -> List[AnchorLevel]:
         """更新 anchor 列表"""
         return self.anchor_tracker.compute_anchors(token_id, current_time)
@@ -550,5 +734,6 @@ class LeadingEventDetector:
             "by_type": {t.value: c for t, c in self.events_by_type.items()},
             "pre_shock_pull": self.pre_shock_detector.get_stats(),
             "depth_collapse": self.depth_collapse_detector.get_stats(),
+            "gradual_thinning": self.gradual_thinning_detector.get_stats(),  # v3
             "anchor_tokens": len(self.anchor_tracker.anchors)
         }
