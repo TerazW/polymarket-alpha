@@ -1,5 +1,5 @@
 """
-Belief Reaction System - Data Models v2
+Belief Reaction System - Data Models v3
 Core data structures for the reaction detection system.
 
 v2 改进:
@@ -8,6 +8,11 @@ v2 改进:
 - ReactionEvent 添加 window_type (FAST/SLOW)
 - 添加 SWEEP 反应类型
 - 添加领先事件类型
+
+v3 改进:
+- 添加 NO_IMPACT 反应类型 (drop 太小不计算 refill)
+- 添加 GRADUAL_THINNING 领先事件类型
+- ReactionMetrics 添加 is_valid_drop 标记
 """
 
 from dataclasses import dataclass, field
@@ -23,12 +28,13 @@ class ReactionType(Enum):
     反应类型 - 系统的核心词汇表
     按优先级排序（分类时先检查优先级高的）
     """
-    VACUUM = "VACUUM"   # 1. 最高优先级: 流动性完全消失
-    SWEEP = "SWEEP"     # 2. 多档被扫 / 快速重定价
-    CHASE = "CHASE"     # 3. 迁移但未必深度塌陷
-    PULL = "PULL"       # 4. 撤退: 立即取消
-    HOLD = "HOLD"       # 5. 防守: 快速补单
-    DELAYED = "DELAYED" # 6. 默认: 犹豫/部分补单
+    VACUUM = "VACUUM"       # 1. 最高优先级: 流动性完全消失
+    SWEEP = "SWEEP"         # 2. 多档被扫 / 快速重定价
+    CHASE = "CHASE"         # 3. 迁移但未必深度塌陷
+    PULL = "PULL"           # 4. 撤退: 立即取消
+    HOLD = "HOLD"           # 5. 防守: 快速补单
+    DELAYED = "DELAYED"     # 6. 犹豫/部分补单
+    NO_IMPACT = "NO_IMPACT" # 7. [v3] drop 太小，无意义 (防止 refill_ratio 爆炸)
 
 
 class LeadingEventType(Enum):
@@ -36,8 +42,9 @@ class LeadingEventType(Enum):
     领先事件类型 - 不靠成交触发的预警信号
     这是系统"领先"于价格的核心来源
     """
-    PRE_SHOCK_PULL = "PRE_SHOCK_PULL"   # 无成交撤退（信息前兆）
-    DEPTH_COLLAPSE = "DEPTH_COLLAPSE"   # 多价位同步塌陷
+    PRE_SHOCK_PULL = "PRE_SHOCK_PULL"       # 无成交撤退（信息前兆）
+    DEPTH_COLLAPSE = "DEPTH_COLLAPSE"       # 多价位同步塌陷
+    GRADUAL_THINNING = "GRADUAL_THINNING"   # [v3] 渐进撤退（慢慢撤离）
 
 
 class WindowType(Enum):
@@ -69,6 +76,7 @@ REACTION_INDICATORS = {
     ReactionType.PULL: "🟠",
     ReactionType.HOLD: "🟢",
     ReactionType.DELAYED: "🟡",
+    ReactionType.NO_IMPACT: "⚪",  # v3: 无意义冲击
 }
 
 
@@ -271,6 +279,11 @@ class LeadingEvent:
     # DEPTH_COLLAPSE 特有字段
     affected_levels: int = 0          # 受影响的价位数
     time_std_ms: float = 0.0          # 时间标准差
+
+    # [v3] GRADUAL_THINNING 特有字段
+    total_depth_before: float = 0.0   # 窗口开始时的总深度
+    total_depth_after: float = 0.0    # 窗口结束时的总深度
+    trade_driven_ratio: float = 0.0   # 成交驱动的占比
 
 
 @dataclass

@@ -1,6 +1,6 @@
 """
-Belief Reaction System - Reaction Classifier v2
-Classifies reactions into the 6 atomic types after observing the reaction window.
+Belief Reaction System - Reaction Classifier v3
+Classifies reactions into the 7 atomic types after observing the reaction window.
 
 v2 改进 (基于 Spec 1):
 1. 双窗口: FAST (8s) + SLOW (30s)
@@ -8,13 +8,19 @@ v2 改进 (基于 Spec 1):
 3. 使用 baseline_size 而非 liquidity_before
 4. 添加 drop_ratio, vacuum_duration 等新指标
 
+v3 改进 (ChatGPT Audit):
+1. refill_ratio 防爆: drop < DROP_MIN 时返回 NO_IMPACT
+2. vacuum 双阈值: 相对 (5%) + 绝对 (VACUUM_ABS) 同时满足
+3. CHASE/SWEEP 持续性检查: 500ms 持续 + 200ms 回撤容忍
+
 反应类型 (按优先级):
 1. VACUUM: 流动性完全消失 (最强信号)
 2. SWEEP: 多档被扫 / 快速重定价
 3. CHASE: 迁移但未必深度塌陷
 4. PULL: 撤退 - 立即取消
 5. HOLD: 防守 - 快速补单
-6. DELAYED: 默认 - 犹豫/部分补单
+6. DELAYED: 犹豫/部分补单
+7. NO_IMPACT: drop 太小，无意义
 """
 
 from collections import defaultdict
@@ -30,12 +36,16 @@ from .config import (
     REACTION_SLOW_WINDOW_MS,
     REACTION_SAMPLE_INTERVAL_MS,
     # Thresholds
+    DROP_MIN_THRESHOLD,           # v3: 防止 refill_ratio 爆炸
     VACUUM_DURATION_THRESHOLD_MS,
     VACUUM_MIN_SIZE_RATIO,
+    VACUUM_ABS_THRESHOLD,         # v3: 绝对阈值
     VACUUM_REFILL_RATIO,
     SWEEP_DROP_RATIO,
     SWEEP_SHIFT_TICKS,
     CHASE_SHIFT_TICKS,
+    PRICE_SHIFT_PERSIST_MS,       # v3: 持续性检查
+    PRICE_SHIFT_REVERT_TOLERANCE_MS,
     PULL_DROP_RATIO,
     PULL_REFILL_RATIO,
     HOLD_REFILL_THRESHOLD,
@@ -125,9 +135,16 @@ class ReactionObserver:
         # Drop ratio: (baseline - min) / baseline
         drop_ratio = (baseline - min_liq) / baseline if baseline > 0 else 0.0
 
-        # Refill ratio: (max - min) / (baseline - min)
+        # [v3] Refill ratio: 只有 drop >= DROP_MIN 才计算，否则视为 NO_IMPACT
+        # 防止分母爆炸: refill_ratio = (max-min)/(baseline-min)
         denominator = baseline - min_liq
-        refill_ratio = (max_liq - min_liq) / denominator if denominator > 0 else 0.0
+        if drop_ratio >= DROP_MIN_THRESHOLD and denominator > 0:
+            refill_ratio = (max_liq - min_liq) / denominator
+            # 限制在合理范围 [0, 2] 防止数值异常
+            refill_ratio = max(0.0, min(2.0, refill_ratio))
+        else:
+            # drop 太小，refill 无意义，设为 1.0 表示"没有实际冲击"
+            refill_ratio = 1.0 if drop_ratio < DROP_MIN_THRESHOLD else 0.0
 
         # Time to refill: first sample where size >= α * baseline
         time_to_refill = None
@@ -177,16 +194,31 @@ class ReactionObserver:
         samples: List[Tuple[int, float]],
         baseline: float
     ) -> int:
-        """Calculate the longest duration where size <= 2% of baseline."""
+        """
+        Calculate the longest duration where size is in vacuum state.
+
+        [v3] 双阈值判定: 必须同时满足相对阈值和绝对阈值
+        - 相对: size <= VACUUM_MIN_SIZE_RATIO * baseline (5%)
+        - 绝对: size <= VACUUM_ABS_THRESHOLD (10)
+
+        这样可以防止薄盘市场误触发 (baseline 很小时 5% 可能 < 1)
+        """
         if not samples or baseline <= 0:
             return 0
 
-        vacuum_threshold = VACUUM_MIN_SIZE_RATIO * baseline
+        # [v3] 双阈值: 同时满足才算 vacuum
+        relative_threshold = VACUUM_MIN_SIZE_RATIO * baseline
+        absolute_threshold = VACUUM_ABS_THRESHOLD
+        # 两者都要满足
+        vacuum_threshold = max(relative_threshold, absolute_threshold)
+
         max_duration = 0
         current_start = None
 
         for ts, size in samples:
-            if size <= vacuum_threshold:
+            # [v3] 同时检查两个条件
+            is_vacuum = (size <= relative_threshold and size <= absolute_threshold)
+            if is_vacuum:
                 if current_start is None:
                     current_start = ts
             else:
@@ -203,31 +235,85 @@ class ReactionObserver:
         return max_duration
 
     def _calculate_price_shift(self, window_end: int) -> Tuple[Decimal, int]:
-        """Calculate price shift and tick count."""
+        """
+        Calculate price shift and tick count.
+
+        [v3] 持续性检查:
+        - 迁移必须持续 >= PRICE_SHIFT_PERSIST_MS (500ms)
+        - 期间回撤不超过 PRICE_SHIFT_REVERT_TOLERANCE_MS (200ms)
+        - 否则视为"抖动/短暂穿刺"，不算真正的迁移
+        """
         price_shift = Decimal("0")
         shift_ticks = 0
 
         tick_size = self.shock.tick_size or Decimal("0.01")
 
         if self.shock.side == 'bid':
-            # For bids, check best_bid shift
-            if self.initial_best_bid and self.best_bid_shifts:
-                # Find the best_bid at window_end (or closest before)
-                final_bid = self.initial_best_bid
-                for ts, bid in self.best_bid_shifts:
-                    if ts <= window_end:
-                        final_bid = bid
-                price_shift = final_bid - self.initial_best_bid
-                shift_ticks = int(abs(price_shift) / tick_size)
+            shifts = self.best_bid_shifts
+            initial = self.initial_best_bid
         else:
-            # For asks, check best_ask shift
-            if self.initial_best_ask and self.best_ask_shifts:
-                final_ask = self.initial_best_ask
-                for ts, ask in self.best_ask_shifts:
-                    if ts <= window_end:
-                        final_ask = ask
-                price_shift = final_ask - self.initial_best_ask
-                shift_ticks = int(abs(price_shift) / tick_size)
+            shifts = self.best_ask_shifts
+            initial = self.initial_best_ask
+
+        if not initial or not shifts:
+            return price_shift, shift_ticks
+
+        # [v3] 检查持续性: 找到持续最久的新 best 价格
+        # 只有持续 >= PRICE_SHIFT_PERSIST_MS 才算有效迁移
+        final_price = initial
+        valid_shift_found = False
+
+        # 按时间排序
+        sorted_shifts = sorted(shifts, key=lambda x: x[0])
+
+        # 追踪每个价格的持续时间
+        if len(sorted_shifts) >= 2:
+            current_price = sorted_shifts[0][1]
+            current_start = sorted_shifts[0][0]
+
+            for i in range(1, len(sorted_shifts)):
+                ts, price = sorted_shifts[i]
+
+                if price != current_price:
+                    # 价格变化，检查之前价格的持续时间
+                    duration = ts - current_start
+
+                    if price != initial and duration >= PRICE_SHIFT_PERSIST_MS:
+                        # 这是一个有效的持续迁移
+                        valid_shift_found = True
+                        final_price = current_price
+
+                    current_price = price
+                    current_start = ts
+
+            # 检查最后一个价格段
+            if sorted_shifts:
+                last_ts = min(sorted_shifts[-1][0], window_end)
+                duration = last_ts - current_start
+
+                if current_price != initial and duration >= PRICE_SHIFT_PERSIST_MS:
+                    valid_shift_found = True
+                    final_price = current_price
+
+        # 如果没有找到持续的迁移，用最后一个价格（可能是抖动）
+        if not valid_shift_found and sorted_shifts:
+            # 退化行为: 用窗口结束时的价格，但标记为 0 ticks 如果不够持续
+            for ts, price in reversed(sorted_shifts):
+                if ts <= window_end:
+                    # 检查这个价格是否有足够持续性
+                    final_price = price
+                    break
+
+        price_shift = final_price - initial
+        raw_ticks = int(abs(price_shift) / tick_size)
+
+        # [v3] 如果没有找到持续迁移，shift_ticks 设为 0
+        # 防止短暂抖动触发 CHASE/SWEEP
+        if valid_shift_found:
+            shift_ticks = raw_ticks
+        else:
+            # 有位移但不够持续，减半（可配置）
+            shift_ticks = raw_ticks // 2
 
         return price_shift, shift_ticks
 
@@ -355,23 +441,33 @@ class ReactionClassifier:
         metrics: ReactionMetrics
     ) -> ReactionType:
         """
-        Apply classification rules in priority order (Spec 1 v1).
+        Apply classification rules in priority order (Spec 1 v1 + v3).
 
-        Priority: VACUUM > SWEEP > CHASE > PULL > HOLD > DELAYED
+        Priority: NO_IMPACT > VACUUM > SWEEP > CHASE > PULL > HOLD > DELAYED
+
+        [v3] 改进:
+        - 先检查 DROP_MIN，太小直接返回 NO_IMPACT
+        - VACUUM 使用双阈值 (相对 + 绝对)
         """
         baseline = shock.baseline_size
         if baseline <= 0:
             baseline = shock.liquidity_before
 
         if baseline <= 0:
-            return ReactionType.DELAYED  # Can't classify without baseline
+            return ReactionType.NO_IMPACT  # Can't classify without baseline
+
+        # [v3] 0. 先检查 DROP_MIN 门槛
+        # drop 太小说明这次 shock 没有实际冲击，不值得分类
+        if metrics.drop_ratio < DROP_MIN_THRESHOLD:
+            return ReactionType.NO_IMPACT
 
         # 1. Check for VACUUM (highest priority)
-        # vacuum_duration >= 3s OR (min_size <= 2% AND refill < 20%)
+        # [v3] 双阈值: 相对 (5%) + 绝对 (10) 同时满足
+        relative_vacuum = metrics.min_liquidity <= VACUUM_MIN_SIZE_RATIO * baseline
+        absolute_vacuum = metrics.min_liquidity <= VACUUM_ABS_THRESHOLD
         is_vacuum = (
             metrics.vacuum_duration_ms >= VACUUM_DURATION_THRESHOLD_MS or
-            (metrics.min_liquidity <= VACUUM_MIN_SIZE_RATIO * baseline and
-             metrics.refill_ratio < VACUUM_REFILL_RATIO)
+            (relative_vacuum and absolute_vacuum and metrics.refill_ratio < VACUUM_REFILL_RATIO)
         )
         if is_vacuum:
             return ReactionType.VACUUM
