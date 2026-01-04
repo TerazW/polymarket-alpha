@@ -121,6 +121,7 @@ export interface EvidenceResponse {
     available_from_ts: number;
     available_to_ts: number;
   };
+  bundle_hash?: string;  // v5.3: Cryptographic hash for evidence verification
 }
 
 export interface AlertRow {

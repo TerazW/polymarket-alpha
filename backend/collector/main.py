@@ -49,6 +49,9 @@ from poc.belief_state_machine import BeliefStateMachine
 # v5: Alert generation
 from backend.reactor.alert_generator import AlertGenerator
 
+# v5.3: Version and provenance tracking
+from backend.version import ENGINE_VERSION, CONFIG_HASH, save_config_snapshot, raw_event_tracker
+
 
 # 数据库配置
 DB_CONFIG = {
@@ -129,14 +132,17 @@ def save_trade(trade: Dict):
         print(f"[DB ERROR] 保存成交失败: {e}")
 
 
-def save_shock_event(shock: ShockEvent):
-    """保存 Shock 事件到数据库"""
+def save_shock_event(shock: ShockEvent, seq_start: int = None, seq_end: int = None):
+    """保存 Shock 事件到数据库 (v5.3: 含版本和溯源信息)"""
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO shock_events (shock_id, ts, token_id, price, side, trade_volume, liquidity_before, trigger_type)
-                VALUES (%s, to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s)
+                INSERT INTO shock_events (
+                    shock_id, ts, token_id, price, side, trade_volume, liquidity_before, trigger_type,
+                    engine_version, config_hash, raw_event_seq_start, raw_event_seq_end
+                )
+                VALUES (%s, to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
             """, (
                 shock.shock_id,
@@ -146,14 +152,18 @@ def save_shock_event(shock: ShockEvent):
                 shock.side,
                 shock.trade_volume,
                 shock.baseline_size,  # v2: 使用 baseline_size
-                shock.trigger_type
+                shock.trigger_type,
+                ENGINE_VERSION,       # v5.3
+                CONFIG_HASH,          # v5.3
+                seq_start,            # v5.3
+                seq_end               # v5.3
             ))
     except Exception as e:
         print(f"[DB ERROR] 保存 Shock 失败: {e}")
 
 
-def save_reaction_event(reaction: ReactionEvent):
-    """保存 Reaction 事件到数据库"""
+def save_reaction_event(reaction: ReactionEvent, seq_start: int = None, seq_end: int = None):
+    """保存 Reaction 事件到数据库 (v5.3: 含版本和溯源信息)"""
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
@@ -161,9 +171,10 @@ def save_reaction_event(reaction: ReactionEvent):
                 INSERT INTO reaction_events (
                     reaction_id, shock_id, ts, token_id, price, side,
                     reaction_type, refill_ratio, time_to_refill_ms,
-                    min_liquidity, max_liquidity, price_shift, liquidity_before
+                    min_liquidity, max_liquidity, price_shift, liquidity_before,
+                    engine_version, config_hash, raw_event_seq_start, raw_event_seq_end
                 )
-                VALUES (%s, %s, to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
             """, (
                 reaction.reaction_id,
@@ -178,40 +189,49 @@ def save_reaction_event(reaction: ReactionEvent):
                 reaction.min_liquidity,
                 reaction.max_liquidity,
                 float(reaction.price_shift),
-                reaction.baseline_size  # v2: 使用 baseline_size
+                reaction.baseline_size,  # v2: 使用 baseline_size
+                ENGINE_VERSION,          # v5.3
+                CONFIG_HASH,             # v5.3
+                seq_start,               # v5.3
+                seq_end                  # v5.3
             ))
     except Exception as e:
         print(f"[DB ERROR] 保存 Reaction 失败: {e}")
 
 
-def save_belief_state_change(change):
-    """保存信念状态变化到数据库"""
+def save_belief_state_change(change, trigger_event_seq: int = None):
+    """保存信念状态变化到数据库 (v5.3: 含版本和溯源信息)"""
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
             # 转换 evidence 列表为 JSON
-            import json
             evidence_json = json.dumps({
                 'triggers': change.evidence,
                 'refs': change.evidence_refs
             })
 
             cur.execute("""
-                INSERT INTO belief_states (ts, token_id, old_state, new_state, evidence)
-                VALUES (to_timestamp(%s / 1000.0), %s, %s, %s, %s)
+                INSERT INTO belief_states (
+                    ts, token_id, old_state, new_state, evidence,
+                    engine_version, config_hash, trigger_event_seq
+                )
+                VALUES (to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s)
             """, (
                 change.timestamp,
                 change.token_id,
                 change.old_state.value,
                 change.new_state.value,
-                evidence_json
+                evidence_json,
+                ENGINE_VERSION,       # v5.3
+                CONFIG_HASH,          # v5.3
+                trigger_event_seq     # v5.3
             ))
     except Exception as e:
         print(f"[DB ERROR] 保存 BeliefStateChange 失败: {e}")
 
 
-def save_leading_event(event: LeadingEvent):
-    """保存领先事件到数据库"""
+def save_leading_event(event: LeadingEvent, seq_start: int = None, seq_end: int = None):
+    """保存领先事件到数据库 (v5.3: 含版本和溯源信息)"""
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
@@ -219,9 +239,10 @@ def save_leading_event(event: LeadingEvent):
                 INSERT INTO leading_events (
                     event_id, ts, event_type, token_id, price, side,
                     drop_ratio, duration_ms, trade_volume_nearby, is_anchor,
-                    affected_levels, time_std_ms
+                    affected_levels, time_std_ms,
+                    engine_version, config_hash, raw_event_seq_start, raw_event_seq_end
                 )
-                VALUES (%s, to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
             """, (
                 event.event_id,
@@ -235,7 +256,11 @@ def save_leading_event(event: LeadingEvent):
                 event.trade_volume_nearby,
                 event.is_anchor,
                 event.affected_levels,
-                event.time_std_ms
+                event.time_std_ms,
+                ENGINE_VERSION,          # v5.3
+                CONFIG_HASH,             # v5.3
+                seq_start,               # v5.3
+                seq_end                  # v5.3
             ))
     except Exception as e:
         print(f"[DB ERROR] 保存 LeadingEvent 失败: {e}")
@@ -284,15 +309,19 @@ def save_book_snapshot(book: Dict, server_ts: int):
         print(f"[DB ERROR] 保存订单簿失败: {e}")
 
 
-def save_raw_event(event_type: str, token_id: str, payload: Dict, server_ts: int):
+def save_raw_event(event_type: str, token_id: str, payload: Dict, server_ts: int) -> int:
     """
     [v4] 保存原始事件用于 debug/replay
+    [v5.3] 返回 seq 用于溯源
 
     Args:
         event_type: 'trade', 'book', 'price_change'
         token_id: Token ID
         payload: 原始 JSON 消息
         server_ts: 服务器时间戳 (毫秒)
+
+    Returns:
+        seq: 序列号 (用于溯源), -1 表示失败
     """
     try:
         conn = get_db_connection()
@@ -308,11 +337,20 @@ def save_raw_event(event_type: str, token_id: str, payload: Dict, server_ts: int
                 INSERT INTO raw_events (ts, arrival_ts, event_type, token_id, payload, hash)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
+                RETURNING seq
             """, (ts, arrival_ts, event_type, token_id, json.dumps(payload), payload_hash))
+
+            result = cur.fetchone()
+            if result:
+                seq = result[0]
+                # v5.3: 记录到 tracker
+                raw_event_tracker.record_seq(token_id, seq)
+                return seq
+        return -1
 
     except Exception as e:
         # raw_events 保存失败不影响主流程
-        pass
+        return -1
 
 
 def update_price_levels(book: Dict):
@@ -709,11 +747,22 @@ def main():
     print("    - 统一用 server timestamp")
     print("    - raw_events 保存用于 debug/replay")
     print()
+    print(f"  v5.3 Evidence 可审计性:")
+    print(f"    - Engine Version: {ENGINE_VERSION}")
+    print(f"    - Config Hash: {CONFIG_HASH[:16]}...")
+    print()
 
     # 测试数据库连接
     try:
         conn = get_db_connection()
         print("✅ 数据库连接成功")
+
+        # v5.3: 保存配置快照
+        if save_config_snapshot(conn):
+            print(f"✅ 配置快照已保存 (hash: {CONFIG_HASH[:16]}...)")
+        else:
+            print(f"ℹ️  配置快照已存在 (hash: {CONFIG_HASH[:16]}...)")
+
     except Exception as e:
         print(f"❌ 数据库连接失败: {e}")
         print("   请确保 Docker 容器正在运行: docker-compose up -d")

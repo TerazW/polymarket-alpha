@@ -25,6 +25,9 @@ from ..schemas.v1 import (
     Side, ShockTrigger, ReactionWindow, TileBand, ReplayCatalogKind,
 )
 
+# v5.3: Bundle hash computation for evidence verification
+from backend.evidence.bundle_hash import compute_bundle_hash
+
 router = APIRouter(prefix="/v1", tags=["v1"])
 
 # Database config
@@ -364,6 +367,19 @@ def get_evidence(
                 available_to_ts=to_ts,
             )
 
+        # v5.3: Compute bundle hash for evidence verification
+        bundle_data = {
+            'token_id': token_id,
+            't0': t0,
+            'window': {'from_ts': from_ts, 'to_ts': to_ts},
+            'shocks': [s.model_dump() for s in shocks],
+            'reactions': [r.model_dump() for r in reactions],
+            'leading_events': [e.model_dump() for e in leading_events],
+            'belief_states': [b.model_dump() for b in belief_states],
+            'anchors': [a.model_dump() for a in anchors],
+        }
+        bundle_hash = compute_bundle_hash(bundle_data)
+
         return EvidenceResponse(
             token_id=token_id,
             t0=t0,
@@ -387,6 +403,7 @@ def get_evidence(
                 hash_mismatch_count_10m=0,
             ),
             tiles_manifest=tiles_manifest,
+            bundle_hash=bundle_hash,
         )
 
     except HTTPException:

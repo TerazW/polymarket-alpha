@@ -253,6 +253,7 @@ class EvidenceResponse(BaseModel):
     belief_states: List[BeliefStateChange]
     data_health: DataHealth
     tiles_manifest: Optional[TilesManifest] = None
+    bundle_hash: Optional[str] = Field(None, description="Cryptographic hash for evidence verification (v5.3)")
 
 
 # =============================================================================
