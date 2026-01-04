@@ -244,15 +244,30 @@ def get_stats():
 
             cur.execute("SELECT COUNT(*) FROM shock_events")
             shocks = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM reaction_events")
+            reactions = cur.fetchone()[0]
+
+            # 按反应类型统计
+            cur.execute("""
+                SELECT reaction_type, COUNT(*)
+                FROM reaction_events
+                GROUP BY reaction_type
+                ORDER BY COUNT(*) DESC
+            """)
+            reaction_types = {row[0]: row[1] for row in cur.fetchall()}
+
         conn.close()
 
         return {
             "trades": trades,
             "books": books,
-            "shocks": shocks
+            "shocks": shocks,
+            "reactions": reactions,
+            "reaction_types": reaction_types
         }
     except Exception as e:
-        return {"trades": 0, "books": 0, "shocks": 0, "error": str(e)}
+        return {"trades": 0, "books": 0, "shocks": 0, "reactions": 0, "reaction_types": {}, "error": str(e)}
 
 
 # ============================================================================
