@@ -40,7 +40,34 @@ Layer 3: derived_events (COMPUTED: reactions, states, alerts)
 
 ---
 
-### Contract 2: Tainted Windows
+### Contract 2: Evidence Grade and Alert Policy Binding (v5.34)
+
+Every evidence response includes a mandatory **evidence_grade** field:
+
+| Grade | Meaning | Alert Policy |
+|-------|---------|--------------|
+| A | Full integrity - all data complete, hashes verified | All severities allowed |
+| B | Minor issues - small gaps but replayable | All severities allowed |
+| C | Degraded - significant gaps, use with caution | Only MEDIUM/LOW, requires manual escalation |
+| D | Tainted - integrity compromised | Only LOW, requires manual review |
+
+**Alert Policy Binding (Mandatory):**
+
+```python
+def validate_alert_severity(evidence_grade: str, severity: str) -> bool:
+    """
+    CRITICAL/HIGH alerts ONLY allowed for Grade A/B evidence.
+    """
+    if severity in ["CRITICAL", "HIGH"]:
+        return evidence_grade in ["A", "B"]
+    return True  # MEDIUM/LOW always allowed
+```
+
+**UI Requirement:** If `evidence_grade < B`, display warning badge on all panels.
+
+---
+
+### Contract 3: Tainted Windows
 
 A window is **tainted** when its evidence cannot be trusted for deterministic replay:
 

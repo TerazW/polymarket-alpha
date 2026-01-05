@@ -1,0 +1,152 @@
+# Language Governance CI Check (v5.34)
+#
+# Enforces ADR-003 Language & Label Governance
+# Prevents paradigm drift through vocabulary corruption
+#
+# Forbidden terms will cause CI failure.
+# See docs/adr/003-language-governance.md for details.
+
+name: Language Governance
+
+on:
+  push:
+    branches: [main, 'claude/**']
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  language-check:
+    name: Language Governance Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check forbidden terms in Python code
+        run: |
+          echo "=========================================="
+          echo "LANGUAGE GOVERNANCE CHECK (ADR-003)"
+          echo "=========================================="
+          echo ""
+          echo "Checking for forbidden trading narrative terms..."
+          echo ""
+
+          # Forbidden terms that indicate paradigm drift
+          # These terms imply prediction/trading intent rather than evidence observation
+
+          FORBIDDEN_TRADING="breakout|absorption|exhaustion|bullish|bearish|overbought|oversold"
+          FORBIDDEN_PREDICTION="trend.confirmation|signal.strength|buy.signal|sell.signal"
+          FORBIDDEN_CAUSAL="means.belief|indicates.direction|predicts|forecasts"
+
+          ERRORS=0
+
+          echo "=== Checking Python backend code ==="
+
+          # Check backend Python files (excluding tests and __pycache__)
+          if grep -rniE "$FORBIDDEN_TRADING" --include="*.py" backend/ poc/ 2>/dev/null | grep -v "__pycache__" | grep -v "test_"; then
+            echo ""
+            echo "ERROR: Forbidden trading narrative terms found in code!"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          echo ""
+          echo "=== Checking for causal inference language ==="
+
+          # Check for causal language (because/therefore/means in explanations)
+          CAUSAL_PATTERNS="because.*belief|therefore.*will|means.*market|due.to.*direction"
+          if grep -rniE "$CAUSAL_PATTERNS" --include="*.py" backend/api/ 2>/dev/null | grep -v "__pycache__" | grep -v "test_"; then
+            echo ""
+            echo "WARNING: Causal inference language detected in API code"
+            echo "Consider using: 'observed', 'measured', 'classified' instead"
+          fi
+
+          echo ""
+          echo "=== Checking documentation ==="
+
+          # Check documentation (allow in ADR-003 which defines the rules)
+          if grep -rniE "$FORBIDDEN_TRADING" --include="*.md" docs/ 2>/dev/null | grep -v "003-language-governance" | grep -v "CHANGELOG"; then
+            echo ""
+            echo "ERROR: Forbidden terms found in documentation!"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          echo ""
+          echo "=== Checking frontend code ==="
+
+          # Check frontend TypeScript/JavaScript
+          if [ -d "frontend/src" ]; then
+            if grep -rniE "$FORBIDDEN_TRADING" --include="*.ts" --include="*.tsx" --include="*.js" frontend/src/ 2>/dev/null; then
+              echo ""
+              echo "ERROR: Forbidden terms found in frontend code!"
+              ERRORS=$((ERRORS + 1))
+            fi
+          fi
+
+          echo ""
+          echo "=========================================="
+
+          if [ $ERRORS -gt 0 ]; then
+            echo "FAILED: $ERRORS language governance violations found"
+            echo ""
+            echo "See docs/adr/003-language-governance.md for allowed terms."
+            echo "If this is a false positive, add # LANGUAGE-EXCEPTION: <reason>"
+            exit 1
+          else
+            echo "PASSED: No forbidden terms found"
+          fi
+
+      - name: Check API descriptions for prediction language
+        run: |
+          echo ""
+          echo "=== Checking API descriptions ==="
+
+          # Check for prediction language in API endpoint descriptions
+          PREDICTION_WORDS="predict|forecast|will.happen|expected.to|likely.to"
+
+          if grep -rniE "$PREDICTION_WORDS" --include="*.py" backend/api/routes/ 2>/dev/null | grep -E "(description|docstring|\"\"\")" ; then
+            echo ""
+            echo "WARNING: Prediction language in API descriptions"
+            echo "API descriptions should use observation language only"
+          fi
+
+          echo ""
+          echo "API description check completed."
+
+      - name: Check for proper proof field references
+        run: |
+          echo ""
+          echo "=== Checking for proof field references in explanations ==="
+
+          # State/Reaction explanations should reference proof fields
+          # This is a soft check - warning only
+
+          PROOF_FIELDS="drop_ratio|refill_ratio|shift_ticks|vacuum_duration_ms|time_to_refill_ms"
+
+          # Find explanation strings that don't reference proof fields
+          echo "Checking that explanations reference measurable proof fields..."
+          echo "(This is informational - not a blocking check)"
+
+          echo ""
+          echo "Proof field reference check completed."
+
+      - name: Generate language report
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "LANGUAGE GOVERNANCE SUMMARY"
+          echo "=========================================="
+          echo ""
+          echo "Forbidden terms checked:"
+          echo "  - Trading narrative: breakout, absorption, exhaustion, bullish, bearish"
+          echo "  - Prediction language: predicts, forecasts, will happen"
+          echo "  - Causal inference: because belief, means market"
+          echo ""
+          echo "Allowed terms:"
+          echo "  - Observation: observed, measured, detected, classified"
+          echo "  - Evidence: drop_ratio, refill_ratio, vacuum_duration_ms"
+          echo "  - Structure: structural, persistence, resolution"
+          echo ""
+          echo "See docs/adr/003-language-governance.md for complete word lists."

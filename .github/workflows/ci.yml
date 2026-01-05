@@ -291,6 +291,82 @@ jobs:
           echo ""
           echo "Schema freeze check completed."
 
+      - name: Check enum changes (v5.34 - breaking change detection)
+        run: |
+          echo ""
+          echo "Checking for enum changes (potential breaking)..."
+
+          ERRORS=0
+
+          # Check for removed enum values (CRITICAL - always breaking)
+          if git diff --name-only origin/main...HEAD | grep -qE "schemas.*\.py|models\.py"; then
+            # Check ReactionType enum
+            REMOVED_REACTION=$(git diff origin/main...HEAD -- backend/common/schemas.py poc/models.py | grep "^-.*VACUUM\|^-.*SWEEP\|^-.*CHASE\|^-.*PULL\|^-.*HOLD\|^-.*DELAYED\|^-.*NO_IMPACT" || true)
+            if [ -n "$REMOVED_REACTION" ]; then
+              echo "CRITICAL: ReactionType enum values removed (BREAKING):"
+              echo "$REMOVED_REACTION"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            # Check BeliefState enum
+            REMOVED_STATE=$(git diff origin/main...HEAD -- backend/common/schemas.py poc/models.py | grep "^-.*STABLE\|^-.*FRAGILE\|^-.*CRACKING\|^-.*BROKEN" || true)
+            if [ -n "$REMOVED_STATE" ]; then
+              echo "CRITICAL: BeliefState enum values removed (BREAKING):"
+              echo "$REMOVED_STATE"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            # Check LeadingEventType enum
+            REMOVED_LEADING=$(git diff origin/main...HEAD -- backend/common/schemas.py poc/models.py | grep "^-.*PRE_SHOCK_PULL\|^-.*DEPTH_COLLAPSE\|^-.*GRADUAL_THINNING" || true)
+            if [ -n "$REMOVED_LEADING" ]; then
+              echo "CRITICAL: LeadingEventType enum values removed (BREAKING):"
+              echo "$REMOVED_LEADING"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            # Check EvidenceGrade enum (v5.34)
+            REMOVED_GRADE=$(git diff origin/main...HEAD -- backend/api/schemas/v1.py | grep "^-.*class EvidenceGrade\|^-.*=.*\"A\"\|^-.*=.*\"B\"\|^-.*=.*\"C\"\|^-.*=.*\"D\"" || true)
+            if [ -n "$REMOVED_GRADE" ]; then
+              echo "CRITICAL: EvidenceGrade enum values removed (BREAKING):"
+              echo "$REMOVED_GRADE"
+              ERRORS=$((ERRORS + 1))
+            fi
+          fi
+
+          if [ $ERRORS -gt 0 ]; then
+            echo ""
+            echo "ERROR: $ERRORS enum breaking changes detected."
+            echo "Enum values cannot be removed without [BREAKING] tag."
+            if ! git log --oneline origin/main...HEAD | grep -q "\[BREAKING\]"; then
+              exit 1
+            fi
+          else
+            echo "No enum breaking changes detected."
+          fi
+
+      - name: Check type narrowing (v5.34 - breaking change detection)
+        run: |
+          echo ""
+          echo "Checking for type narrowing (potential breaking)..."
+
+          # Check for nullable -> not null changes
+          NULLABLE_REMOVED=$(git diff origin/main...HEAD -- backend/api/schemas/ | grep "^-.*Optional\[" | head -10 || true)
+          if [ -n "$NULLABLE_REMOVED" ]; then
+            echo "WARNING: Optional fields may have been made required:"
+            echo "$NULLABLE_REMOVED"
+            echo ""
+            echo "This is a breaking change for existing clients."
+          fi
+
+          # Check for type changes (str -> int, etc.)
+          TYPE_CHANGES=$(git diff origin/main...HEAD -- backend/api/schemas/ | grep -E "^-.*: (str|int|float|bool)" | head -10 || true)
+          if [ -n "$TYPE_CHANGES" ]; then
+            echo "WARNING: Field types may have been changed:"
+            echo "$TYPE_CHANGES"
+          fi
+
+          echo "Type narrowing check completed."
+
       - name: Check database migration compatibility
         run: |
           echo ""
@@ -307,6 +383,22 @@ jobs:
               echo "$DROPS"
               echo ""
               echo "Ensure data is backed up or migration is reversible."
+            fi
+
+            # Check for NOT NULL without default (v5.34)
+            NOT_NULL=$(git diff origin/main...HEAD -- "**/migrations/**" "**/alembic/**" | grep -i "NOT NULL" | grep -v "DEFAULT" | head -10 || true)
+            if [ -n "$NOT_NULL" ]; then
+              echo "WARNING: NOT NULL constraint without DEFAULT detected:"
+              echo "$NOT_NULL"
+              echo ""
+              echo "Existing rows will fail. Add DEFAULT or backfill first."
+            fi
+
+            # Check for constraint changes
+            CONSTRAINTS=$(git diff origin/main...HEAD -- "**/migrations/**" "**/alembic/**" | grep -iE "UNIQUE|PRIMARY KEY|FOREIGN KEY|CHECK" | head -10 || true)
+            if [ -n "$CONSTRAINTS" ]; then
+              echo "INFO: Constraint changes detected:"
+              echo "$CONSTRAINTS"
             fi
           else
             echo "No migration changes detected."

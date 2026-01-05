@@ -20,6 +20,10 @@ We establish the following language governance rules:
 
 The following terms are **forbidden** in code, comments, documentation, and UI labels:
 
+**v5.34 Addition:** Also forbidden are **causal inference words** in API responses and UI:
+- `because`, `due to`, `therefore`, `means`, `indicates`, `implies`
+- Only allowed: `observed`, `measured`, `classified`, `counts`
+
 | Forbidden Term | Reason | Allowed Alternative |
 |----------------|--------|---------------------|
 | `breakout` | Trading narrative / prediction | `level_invalidated`, `threshold_exceeded` |
@@ -93,7 +97,32 @@ evidence_refs: [...]             trade_recommendation: [...]
 
 ---
 
-### Rule 4: PR Review Checklist
+### Rule 4: Proof Field Reference Requirement (v5.34)
+
+All Reaction/State explanations **must reference proof field names**:
+
+```
+✅ GOOD: "VACUUM classified: drop_ratio=0.92, vacuum_duration_ms=2400"
+❌ BAD:  "VACUUM classified: liquidity disappeared completely"
+
+✅ GOOD: "FRAGILE: refill_ratio=0.45, shift_ticks=3"
+❌ BAD:  "FRAGILE: market belief is wavering"
+```
+
+**Required proof fields for each type:**
+
+| Type | Required Proof References |
+|------|---------------------------|
+| VACUUM | `drop_ratio`, `vacuum_duration_ms` |
+| SWEEP | `levels_swept`, `sweep_duration_ms` |
+| CHASE | `shift_ticks`, `persistence_ms` |
+| PULL | `drop_ratio`, `trade_driven_ratio` |
+| HOLD | `refill_ratio`, `time_to_refill_ms` |
+| DELAYED | `refill_ratio`, `delay_ms` |
+
+---
+
+### Rule 5: PR Review Checklist
 
 Every Pull Request must pass language review:
 
