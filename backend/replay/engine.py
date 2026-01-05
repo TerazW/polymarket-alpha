@@ -1,11 +1,16 @@
 """
-Belief Reaction System - Replay Engine v1
+Belief Reaction System - Replay Engine v2
 Re-execute raw events deterministically to reproduce system state.
 
 Core Principles:
 1. Deterministic: 使用事件时间戳而非系统时间
 2. Reproducible: 同样输入必须产生同样输出
 3. Auditable: 每步都有可验证的中间状态
+
+v5.14: 集成 v5.13 确定性基础设施
+- 使用 ReplayContext 强制事件时间
+- 使用 EventSortKey 确保排序一致性
+- 使用 deterministic_now 替代 time.time()
 
 "同一证据包，不同机器回放结果必须相同"
 """
@@ -18,6 +23,15 @@ import json
 import hashlib
 
 from backend.evidence.bundle_hash import compute_bundle_hash
+from backend.common.determinism import (
+    ReplayContext,
+    EventSortKey,
+    get_event_clock,
+    deterministic_now,
+    ProcessingMode,
+    sort_events,
+    validate_event_order,
+)
 
 
 class ReplayStatus(Enum):
@@ -91,17 +105,21 @@ class ReplayResult:
 
 class DeterministicClock:
     """
-    Deterministic clock that uses event timestamps instead of system time.
+    Deterministic clock that wraps EventClock for replay compatibility.
+
+    v5.14: Now delegates to EventClock singleton for consistent time management.
     Critical for reproducible replay.
     """
 
     def __init__(self, start_ts: int = 0):
         self._current_ts = start_ts
+        self._clock = get_event_clock()
 
     def advance_to(self, ts: int):
         """Advance clock to given timestamp"""
         if ts > self._current_ts:
             self._current_ts = ts
+            self._clock.set_event_time(ts)
 
     @property
     def now(self) -> int:
@@ -110,6 +128,7 @@ class DeterministicClock:
 
     def reset(self, ts: int = 0):
         self._current_ts = ts
+        self._clock.clear_event_time()
 
 
 class ReplayEngine:
@@ -161,10 +180,13 @@ class ReplayEngine:
         expected_hash: str,
         token_id: str,
         t0: int,
-        window_ms: int = 60000
+        window_ms: int = 60000,
+        strict_order: bool = True
     ) -> ReplayResult:
         """
         Replay raw events and verify against expected hash.
+
+        v5.14: Uses ReplayContext for strict determinism enforcement.
 
         Args:
             raw_events: List of raw events (trades, book updates)
@@ -172,6 +194,7 @@ class ReplayEngine:
             token_id: Token being replayed
             t0: Center timestamp of evidence window
             window_ms: Window size (default 60s)
+            strict_order: If True, raise on sort violations (default True)
 
         Returns:
             ReplayResult with verification status
@@ -191,27 +214,49 @@ class ReplayEngine:
         try:
             self.reset()
 
-            # Sort events by timestamp for deterministic processing
-            sorted_events = sorted(raw_events, key=lambda e: e.get('ts', 0))
+            # Sort events using EventSortKey for deterministic ordering
+            def event_sort_key(e: Dict) -> EventSortKey:
+                return EventSortKey(
+                    token_id=e.get('token_id', token_id),
+                    ts_ms=e.get('ts', 0),
+                    sort_seq=e.get('seq', 0)
+                )
+
+            sorted_events = sort_events(raw_events, event_sort_key)
+
+            # Validate sort order
+            violations = validate_event_order(sorted_events, event_sort_key)
+            if violations and strict_order:
+                raise ValueError(f"Event order violations: {violations[:3]}")
 
             # Window boundaries
             window_start = t0 - (window_ms // 2)
             window_end = t0 + (window_ms // 2)
 
-            # Process events
-            for i, event in enumerate(sorted_events):
-                event_ts = event.get('ts', 0)
+            # Process events within ReplayContext for strict determinism
+            with ReplayContext(strict=strict_order) as replay_ctx:
+                for i, event in enumerate(sorted_events):
+                    event_ts = event.get('ts', 0)
+                    event_token = event.get('token_id', token_id)
+                    event_seq = event.get('seq', 0)
 
-                # Advance deterministic clock
-                self.clock.advance_to(event_ts)
+                    # Process event within replay context
+                    with replay_ctx.process_event(event_ts, event_token, event_seq):
+                        # Advance deterministic clock
+                        self.clock.advance_to(event_ts)
 
-                # Process event
-                self._process_event(event, token_id)
+                        # Process event
+                        self._process_event(event, token_id)
 
-                # Checkpoint
-                if i > 0 and i % self.checkpoint_interval == 0:
-                    checkpoint = self._create_checkpoint(i, event)
-                    result.checkpoints.append(checkpoint)
+                    # Checkpoint
+                    if i > 0 and i % self.checkpoint_interval == 0:
+                        checkpoint = self._create_checkpoint(i, event)
+                        result.checkpoints.append(checkpoint)
+
+                # Record replay context stats
+                ctx_stats = replay_ctx.stats
+                if ctx_stats.get('sort_violations', 0) > 0:
+                    result.error = f"Sort violations: {ctx_stats['sort_violations']}"
 
             # Build reconstructed bundle
             bundle = self._build_bundle(token_id, t0, window_start, window_end)

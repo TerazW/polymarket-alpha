@@ -1,6 +1,9 @@
 """
-Belief Reaction System - Bundle Verifier v1
+Belief Reaction System - Bundle Verifier v2
 Verifies evidence bundle integrity and provides audit reports.
+
+v5.14: 验证操作使用 LIVE 模式（wall clock 用于验证元数据）
+       重放操作使用 REPLAY 模式（通过 ReplayEngine）
 
 "每一个证据包都可验证、可追溯、可复现"
 """
@@ -13,6 +16,7 @@ import json
 import time
 
 from backend.evidence.bundle_hash import compute_bundle_hash, verify_bundle
+from backend.common.determinism import ProcessingMode, get_event_clock
 
 
 class VerificationStatus(Enum):
@@ -128,6 +132,9 @@ class BundleVerifier:
         """
         Verify a bundle against expected hash and run integrity checks.
 
+        v5.14: Verification metadata uses wall clock (LIVE mode).
+               For replay verification, use ReplayEngine which enforces REPLAY mode.
+
         Args:
             bundle: Evidence bundle to verify
             expected_hash: Expected hash from storage
@@ -136,6 +143,10 @@ class BundleVerifier:
         Returns:
             VerificationResult with detailed check results
         """
+        # Ensure we're in LIVE mode for verification metadata timestamps
+        clock = get_event_clock()
+        clock.set_mode(ProcessingMode.LIVE)
+
         now = int(time.time() * 1000)
 
         result = VerificationResult(
