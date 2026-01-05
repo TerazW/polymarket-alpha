@@ -83,6 +83,28 @@ def health_check():
     return {"ok": True, "version": "1.0.0"}
 
 
+@router.get("/health/deep")
+async def deep_health_check():
+    """
+    Deep health check - comprehensive system diagnostics.
+
+    Checks:
+    - Database connectivity and performance
+    - WebSocket stream manager status
+    - Data pipeline freshness
+    - Alert queue status
+    - Tile generation status
+
+    Returns detailed health report for monitoring systems.
+    """
+    from backend.monitoring.health import HealthChecker
+
+    checker = HealthChecker(db_config=DB_CONFIG, version="1.0.0")
+    report = await checker.run_all_checks()
+
+    return report.to_dict()
+
+
 # =============================================================================
 # Radar API
 # =============================================================================
