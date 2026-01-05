@@ -146,6 +146,13 @@ class ReactionProof(BaseModel):
     time_to_refill_ms: Optional[int] = None
 
 
+class ReactionAttributionSummary(BaseModel):
+    """Compact attribution summary for reactions (v5.25)"""
+    trade_driven_ratio: float = Field(..., ge=0, le=1)
+    cancel_driven_ratio: float = Field(..., ge=0, le=1)
+    attribution_type: str  # TRADE_DRIVEN, CANCEL_DRIVEN, MIXED, etc.
+
+
 class ReactionEvent(BaseModel):
     """Reaction classification event"""
     id: str
@@ -158,6 +165,7 @@ class ReactionEvent(BaseModel):
     side: Side
     reaction: ReactionType
     proof: Optional[ReactionProof] = None
+    attribution: Optional[ReactionAttributionSummary] = Field(None, description="v5.25: Attribution data")
 
 
 class PriceBand(BaseModel):
@@ -199,6 +207,13 @@ class LastCriticalAlert(BaseModel):
     evidence_ref: EvidenceRef
 
 
+class RadarStateExplanationCompact(BaseModel):
+    """Compact state explanation for radar display (v5.25)"""
+    headline: str
+    trend: str = "STABLE"  # IMPROVING, STABLE, WORSENING, VOLATILE
+    top_factors: List[str] = Field(default_factory=list, max_length=3)
+
+
 class RadarRow(BaseModel):
     """Single row in radar response"""
     market: MarketSummary
@@ -210,6 +225,7 @@ class RadarRow(BaseModel):
     confidence: float = Field(..., ge=0, le=100)
     data_health: DataHealth
     last_critical_alert: Optional[LastCriticalAlert] = None
+    explanation: Optional[RadarStateExplanationCompact] = Field(None, description="v5.25: State explanation")
 
 
 class RadarResponse(BaseModel):
@@ -254,6 +270,7 @@ class EvidenceResponse(BaseModel):
     data_health: DataHealth
     tiles_manifest: Optional[TilesManifest] = None
     bundle_hash: Optional[str] = Field(None, description="Cryptographic hash for evidence verification (v5.3)")
+    state_explanation: Optional["StateExplanationInfo"] = Field(None, description="v5.25: Detailed state explanation")
 
 
 # =============================================================================
@@ -365,6 +382,108 @@ class HeatmapTilesResponse(BaseModel):
     """GET /v1/heatmap/tiles response"""
     manifest: HeatmapTilesManifest
     tiles: List[HeatmapTileMeta]
+
+
+# =============================================================================
+# Attribution (v5.25)
+# =============================================================================
+
+class AttributionTypeEnum(str, Enum):
+    """Primary attribution type for depth changes"""
+    TRADE_DRIVEN = "TRADE_DRIVEN"
+    CANCEL_DRIVEN = "CANCEL_DRIVEN"
+    MIXED = "MIXED"
+    REPLENISHMENT = "REPLENISHMENT"
+    NO_CHANGE = "NO_CHANGE"
+
+
+class DepthChangeAttributionInfo(BaseModel):
+    """Attribution for a single depth change event"""
+    depth_before: float
+    depth_after: float
+    trade_volume: float
+    depth_removed: float
+    trade_driven_volume: float
+    cancel_driven_volume: float
+    trade_driven_ratio: float = Field(..., ge=0, le=1)
+    cancel_driven_ratio: float = Field(..., ge=0, le=1)
+    attribution_type: AttributionTypeEnum
+    price_level: Optional[str] = None
+
+
+class MultiLevelAttributionInfo(BaseModel):
+    """Attribution aggregated across multiple price levels"""
+    levels_affected: int
+    total_depth_removed: float
+    total_trade_driven: float
+    total_cancel_driven: float
+    trade_driven_ratio: float = Field(..., ge=0, le=1)
+    cancel_driven_ratio: float = Field(..., ge=0, le=1)
+    attribution_type: AttributionTypeEnum
+
+
+# =============================================================================
+# Explainability (v5.25)
+# =============================================================================
+
+class TrendDirection(str, Enum):
+    """Belief state trend direction"""
+    IMPROVING = "IMPROVING"
+    STABLE = "STABLE"
+    WORSENING = "WORSENING"
+    VOLATILE = "VOLATILE"
+
+
+class ExplainFactorType(str, Enum):
+    """Factors that contribute to belief state"""
+    HIGH_HOLD_RATIO = "HIGH_HOLD_RATIO"
+    LOW_FRAGILE_SIGNALS = "LOW_FRAGILE_SIGNALS"
+    CONSISTENT_DEPTH = "CONSISTENT_DEPTH"
+    QUICK_REFILL = "QUICK_REFILL"
+    NO_VACUUM = "NO_VACUUM"
+    LOW_HOLD_RATIO = "LOW_HOLD_RATIO"
+    VACUUM_AT_KEY_LEVEL = "VACUUM_AT_KEY_LEVEL"
+    PULL_AT_KEY_LEVEL = "PULL_AT_KEY_LEVEL"
+    DEPTH_COLLAPSE = "DEPTH_COLLAPSE"
+    PRE_SHOCK_PULL = "PRE_SHOCK_PULL"
+    MULTIPLE_VACUUM = "MULTIPLE_VACUUM"
+    GRADUAL_THINNING = "GRADUAL_THINNING"
+    CANCEL_DOMINATED = "CANCEL_DOMINATED"
+    HIGH_FRAGILITY_INDEX = "HIGH_FRAGILITY_INDEX"
+    RECENT_STATE_CHANGE = "RECENT_STATE_CHANGE"
+    ACTIVE_ALERTS = "ACTIVE_ALERTS"
+
+
+class ExplainFactor(BaseModel):
+    """A single explanatory factor"""
+    factor: ExplainFactorType
+    weight: float = Field(..., ge=-1.0, le=1.0)
+    value: Any
+    threshold: Optional[Any] = None
+    description: Dict[str, str] = Field(default_factory=dict)
+
+
+class CounterfactualCondition(BaseModel):
+    """What would need to change to reach a different state"""
+    target_state: str
+    conditions: List[str]
+    likelihood: str = Field(..., description="high, medium, or low")
+
+
+class StateExplanationInfo(BaseModel):
+    """Complete explanation for a belief state"""
+    token_id: str
+    current_state: str
+    confidence: float = Field(..., ge=0, le=100)
+    headline: str
+    summary: str
+    positive_factors: List[ExplainFactor] = Field(default_factory=list)
+    negative_factors: List[ExplainFactor] = Field(default_factory=list)
+    trend: TrendDirection = TrendDirection.STABLE
+    trend_reason: str = ""
+    counterfactuals: List[CounterfactualCondition] = Field(default_factory=list)
+    generated_at: int
+    window_minutes: int = 10
 
 
 # =============================================================================
