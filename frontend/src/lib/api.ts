@@ -373,3 +373,45 @@ export async function getHeatmapTiles(params: {
 
   return fetchApi<HeatmapTilesResponse>(`/v1/heatmap/tiles?${searchParams.toString()}`);
 }
+
+// =============================================================================
+// Alert Actions API (v5.9)
+// =============================================================================
+
+export interface AlertAckResponse {
+  alert_id: string;
+  status: 'OPEN' | 'ACKED' | 'RESOLVED';
+  acked_at: number;
+  acked_by?: string;
+  note?: string;
+}
+
+export async function acknowledgeAlert(
+  alertId: string,
+  params?: { note?: string; acked_by?: string }
+): Promise<AlertAckResponse> {
+  return fetchApi<AlertAckResponse>(`/v1/alerts/${alertId}/ack`, {
+    method: 'PUT',
+    body: JSON.stringify(params || {}),
+  });
+}
+
+export async function resolveAlert(
+  alertId: string,
+  params?: { note?: string; acked_by?: string }
+): Promise<AlertAckResponse> {
+  return fetchApi<AlertAckResponse>(`/v1/alerts/${alertId}/resolve`, {
+    method: 'PUT',
+    body: JSON.stringify(params || {}),
+  });
+}
+
+// =============================================================================
+// WebSocket Stream URL
+// =============================================================================
+
+export function getStreamUrl(): string {
+  const wsProtocol = API_BASE.startsWith('https') ? 'wss' : 'ws';
+  const wsHost = API_BASE.replace(/^https?:\/\//, '');
+  return `${wsProtocol}://${wsHost}/v1/stream`;
+}

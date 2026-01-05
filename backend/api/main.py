@@ -11,6 +11,9 @@ from typing import Optional
 # Import v1 routes
 from .routes import v1_router
 
+# v5.9: WebSocket stream manager
+from .stream import stream_manager
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="Belief Reaction System",
@@ -282,6 +285,9 @@ def get_stats():
 
 @app.on_event("startup")
 async def startup():
+    # Start WebSocket stream manager
+    await stream_manager.start()
+
     print()
     print("=" * 50)
     print("  Belief Reaction System API v1.0")
@@ -292,10 +298,20 @@ async def startup():
     print("  健康检查: http://localhost:8000/health")
     print()
     print("  v1 Endpoints:")
-    print("    GET /v1/health      - Health check")
-    print("    GET /v1/radar       - Market radar")
-    print("    GET /v1/evidence    - Evidence window")
-    print("    GET /v1/alerts      - Alerts list")
-    print("    GET /v1/heatmap/tiles - Heatmap tiles")
-    print("    GET /v1/replay/catalog - Replay catalog")
+    print("    GET  /v1/health         - Health check")
+    print("    GET  /v1/radar          - Market radar")
+    print("    GET  /v1/evidence       - Evidence window")
+    print("    GET  /v1/alerts         - Alerts list")
+    print("    PUT  /v1/alerts/{id}/ack     - Acknowledge alert")
+    print("    PUT  /v1/alerts/{id}/resolve - Resolve alert")
+    print("    GET  /v1/heatmap/tiles  - Heatmap tiles")
+    print("    GET  /v1/replay/catalog - Replay catalog")
+    print("    WS   /v1/stream         - Real-time event stream")
     print()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    # Stop WebSocket stream manager
+    await stream_manager.stop()
+    print("[API] Stream manager stopped")
