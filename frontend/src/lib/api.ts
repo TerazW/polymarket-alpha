@@ -299,3 +299,77 @@ export async function getReplayCatalog(params: {
 export async function checkHealth(): Promise<{ ok: boolean; version: string }> {
   return fetchApi<{ ok: boolean; version: string }>('/v1/health');
 }
+
+// =============================================================================
+// Heatmap Tiles API
+// =============================================================================
+
+export interface HeatmapTileEncoding {
+  dtype: string;
+  layout: string;
+  scale: string;
+  clip_pctl: number;
+  clip_value?: number;
+}
+
+export interface HeatmapTileCompression {
+  algo: string;
+  level: number;
+}
+
+export interface HeatmapTileChecksum {
+  algo: string;
+  value: string;
+}
+
+export interface HeatmapTileMeta {
+  tile_id: string;
+  token_id: string;
+  lod_ms: number;
+  tile_ms: number;
+  band: string;
+  t_start: number;
+  t_end: number;
+  tick_size: number;
+  price_min: number;
+  price_max: number;
+  rows: number;
+  cols: number;
+  encoding: HeatmapTileEncoding;
+  compression: HeatmapTileCompression;
+  payload_b64: string;
+  checksum: HeatmapTileChecksum;
+}
+
+export interface HeatmapTilesManifest {
+  token_id: string;
+  from_ts: number;
+  to_ts: number;
+  lod_ms: number;
+  tile_ms: number;
+  band: string;
+}
+
+export interface HeatmapTilesResponse {
+  manifest: HeatmapTilesManifest;
+  tiles: HeatmapTileMeta[];
+}
+
+export async function getHeatmapTiles(params: {
+  token_id: string;
+  from_ts: number;
+  to_ts: number;
+  lod?: 250 | 1000 | 5000;
+  tile_ms?: 5000 | 10000 | 15000;
+  band?: 'FULL' | 'BID' | 'ASK';
+}): Promise<HeatmapTilesResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set('token_id', params.token_id);
+  searchParams.set('from_ts', String(params.from_ts));
+  searchParams.set('to_ts', String(params.to_ts));
+  if (params.lod) searchParams.set('lod', String(params.lod));
+  if (params.tile_ms) searchParams.set('tile_ms', String(params.tile_ms));
+  if (params.band) searchParams.set('band', params.band);
+
+  return fetchApi<HeatmapTilesResponse>(`/v1/heatmap/tiles?${searchParams.toString()}`);
+}
