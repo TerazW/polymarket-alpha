@@ -8,6 +8,8 @@ Provides API endpoints for reactor service:
 - GET /reactor/state/{token_id} - Single market state
 - GET /reactor/leading-events - Recent leading events
 - POST /reactor/events - Inject test events (dev only)
+
+v5.28: WebSocket integration for real-time event broadcasting
 """
 
 from fastapi import APIRouter, Query, HTTPException, Depends
@@ -15,8 +17,18 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from enum import Enum
 import os
+import asyncio
 
 from backend.reactor.service import ReactorService, BeliefMachineService
+
+# v5.28: Import WebSocket publishing functions
+from backend.api.stream import (
+    publish_reaction,
+    publish_belief_state,
+    publish_leading_event,
+    publish_alert,
+    StreamEventType,
+)
 
 
 router = APIRouter(prefix="/reactor", tags=["reactor"])
@@ -25,13 +37,93 @@ router = APIRouter(prefix="/reactor", tags=["reactor"])
 _reactor_service: Optional[ReactorService] = None
 _belief_service: Optional[BeliefMachineService] = None
 
+# Event loop reference for async callbacks
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_event_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """Get or create event loop reference."""
+    global _event_loop
+    try:
+        _event_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    return _event_loop
+
+
+# =============================================================================
+# WebSocket Callback Adapters (v5.28)
+# =============================================================================
+
+def _on_reaction_callback(reaction: Dict):
+    """
+    Callback for reaction events - publishes to WebSocket.
+
+    Called by ReactorService when a reaction is classified.
+    """
+    loop = _get_event_loop()
+    if loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            publish_reaction(reaction.get('token_id', ''), reaction),
+            loop
+        )
+
+
+def _on_state_change_callback(change: Dict):
+    """
+    Callback for state changes - publishes to WebSocket.
+
+    Called by ReactorService when belief state transitions.
+    """
+    loop = _get_event_loop()
+    if loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            publish_belief_state(change.get('token_id', ''), change),
+            loop
+        )
+
+
+def _on_leading_event_callback(event: Dict):
+    """
+    Callback for leading events - publishes to WebSocket.
+
+    Called by ReactorService when leading event detected.
+    """
+    loop = _get_event_loop()
+    if loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            publish_leading_event(event.get('token_id', ''), event),
+            loop
+        )
+
+
+def _on_alert_callback(alert: Dict):
+    """
+    Callback for alerts - publishes to WebSocket.
+
+    Called by ReactorService when alert generated.
+    """
+    loop = _get_event_loop()
+    if loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            publish_alert(alert, StreamEventType.ALERT_NEW),
+            loop
+        )
+
 
 def get_reactor_service() -> ReactorService:
-    """Get or create reactor service singleton."""
+    """Get or create reactor service singleton with WebSocket callbacks."""
     global _reactor_service
     if _reactor_service is None:
+        # v5.28: Wire up WebSocket callbacks
+        enable_ws = os.getenv("REACTOR_WEBSOCKET_ENABLED", "true").lower() == "true"
+
         _reactor_service = ReactorService(
-            persist_to_db=os.getenv("REACTOR_PERSIST_DB", "true").lower() == "true"
+            persist_to_db=os.getenv("REACTOR_PERSIST_DB", "true").lower() == "true",
+            on_reaction=_on_reaction_callback if enable_ws else None,
+            on_state_change=_on_state_change_callback if enable_ws else None,
+            on_leading_event=_on_leading_event_callback if enable_ws else None,
+            on_alert=_on_alert_callback if enable_ws else None,
         )
     return _reactor_service
 
