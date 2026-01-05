@@ -1,6 +1,8 @@
 """
 Belief Reaction System - FastAPI Backend
 启动命令: uvicorn backend.api.main:app --reload
+
+v5.24: Add security middleware (auth, throttle, audit)
 """
 
 from fastapi import FastAPI, Query, Response
@@ -8,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import time
 from typing import Optional
+import os
 
 # Import v1 routes
 from .routes import v1_router
@@ -17,6 +20,9 @@ from .stream import stream_manager
 
 # v5.12: Monitoring and metrics
 from backend.monitoring import get_metrics_registry, metrics_middleware
+
+# v5.24: Security middleware
+from .middleware import register_security_middleware
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -39,6 +45,15 @@ app.add_middleware(
 
 # v5.12: Apply metrics middleware
 metrics_middleware(app)
+
+# v5.24: Apply security middleware
+# Set REQUIRE_AUTH=true to enforce authentication
+register_security_middleware(
+    app,
+    require_auth=os.getenv("REQUIRE_AUTH", "false").lower() == "true",
+    enable_throttling=os.getenv("ENABLE_THROTTLING", "true").lower() == "true",
+    enable_audit=os.getenv("ENABLE_AUDIT", "true").lower() == "true",
+)
 
 # Store start time for uptime calculation
 APP_START_TIME = time.time()
