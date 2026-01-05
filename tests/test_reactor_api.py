@@ -197,14 +197,20 @@ class TestLeadingEventsEndpoint:
 
 
 # =============================================================================
-# Event Injection Tests
+# Event Injection Tests (v5.33: Enhanced security)
 # =============================================================================
 
 class TestEventInjection:
-    """Test /reactor/events endpoint (event injection)"""
+    """Test /reactor/events endpoint (event injection)
+
+    Security requirements (v5.33):
+    1. REACTOR_ALLOW_INJECTION env var must be "true"
+    2. Request must have ADMIN role with dangerous:inject permission
+    3. All attempts are logged to audit trail
+    """
 
     def test_injection_disabled_by_default(self, client):
-        """Test that event injection is disabled by default"""
+        """Test that event injection is disabled by default (env check)"""
         response = client.post("/reactor/events", json={
             "event_type": "trade",
             "token_id": "test_token",
@@ -215,20 +221,101 @@ class TestEventInjection:
         assert "disabled" in response.json()["detail"].lower()
 
     @patch.dict("os.environ", {"REACTOR_ALLOW_INJECTION": "true"})
-    def test_injection_enabled(self, client):
-        """Test event injection when enabled"""
-        # Need to reimport to pick up env var
+    def test_injection_requires_permission(self, client):
+        """Test that injection requires dangerous:inject permission (v5.33)"""
+        # Even with env var enabled, should fail without ADMIN role
         response = client.post("/reactor/events", json={
-            "event_type": "book",
-            "token_id": "injection_test",
-            "payload": {
-                "bids": [{"price": "0.50", "size": 100}],
-                "asks": [{"price": "0.51", "size": 100}],
-            },
+            "event_type": "trade",
+            "token_id": "test_token",
+            "payload": {"price": "0.50", "size": 100, "side": "BUY"},
         })
 
-        # Either success or still disabled depending on timing
-        assert response.status_code in [200, 403]
+        # Should be denied due to missing permission (403)
+        assert response.status_code == 403
+        assert "permission" in response.json()["detail"].lower()
+
+    @patch.dict("os.environ", {"REACTOR_ALLOW_INJECTION": "true"})
+    def test_injection_with_admin_role(self, client):
+        """Test injection succeeds with ADMIN role (v5.33)"""
+        # Mock the request state to have ADMIN role
+        from unittest.mock import patch
+
+        # Patch check_permission to return True (simulating ADMIN role)
+        with patch('backend.api.routes.reactor.check_permission', return_value=True):
+            response = client.post("/reactor/events", json={
+                "event_type": "book",
+                "token_id": "injection_test_admin",
+                "payload": {
+                    "bids": [{"price": "0.50", "size": 100}],
+                    "asks": [{"price": "0.51", "size": 100}],
+                },
+            })
+
+            # Should succeed with ADMIN permission
+            assert response.status_code == 200
+            assert response.json()["success"] is True
+
+    def test_injection_audit_logging_on_deny(self, client):
+        """Test that denied injection attempts are logged (v5.33)"""
+        from backend.security import get_audit_logger, AuditAction
+
+        audit_logger = get_audit_logger()
+
+        # Make request (should be denied due to env var being false)
+        response = client.post("/reactor/events", json={
+            "event_type": "trade",
+            "token_id": "audit_test_token",
+            "payload": {"price": "0.50", "size": 100, "side": "BUY"},
+        })
+
+        assert response.status_code == 403
+
+        # Query for injection denied entries specifically
+        entries = audit_logger.query(
+            action=AuditAction.DATA_INJECTION_DENIED,
+            limit=10
+        )
+        assert len(entries) > 0, "No DATA_INJECTION_DENIED audit entries found"
+
+        # Verify the entry details
+        latest = entries[0]
+        assert latest.resource_id == "audit_test_token"
+        assert latest.result == "denied"
+        assert "injection_disabled" in latest.details.get("reason", "")
+
+    @patch.dict("os.environ", {"REACTOR_ALLOW_INJECTION": "true"})
+    def test_injection_audit_logging_on_success(self, client):
+        """Test that successful injection is logged as DANGEROUS operation (v5.33)"""
+        from backend.security import get_audit_logger, AuditAction
+        from unittest.mock import patch
+
+        audit_logger = get_audit_logger()
+
+        # Mock ADMIN permission
+        with patch('backend.api.routes.reactor.check_permission', return_value=True):
+            response = client.post("/reactor/events", json={
+                "event_type": "book",
+                "token_id": "audit_success_test",
+                "payload": {
+                    "bids": [{"price": "0.50", "size": 100}],
+                    "asks": [{"price": "0.51", "size": 100}],
+                },
+            })
+
+            assert response.status_code == 200
+
+        # Query for dangerous injection entries specifically
+        entries = audit_logger.query(
+            action=AuditAction.DANGEROUS_EVENT_INJECTION,
+            limit=10
+        )
+        assert len(entries) > 0, "No DANGEROUS_EVENT_INJECTION audit entries found"
+
+        # Verify the entry details
+        latest = entries[0]
+        assert latest.resource_id == "audit_success_test"
+        assert latest.result == "success"
+        assert latest.details.get("event_type") == "book"
 
 
 # =============================================================================

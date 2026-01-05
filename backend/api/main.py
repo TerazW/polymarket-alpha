@@ -33,11 +33,62 @@ from backend.monitoring import get_metrics_registry, metrics_middleware
 # v5.24: Security middleware
 from .middleware import register_security_middleware
 
+# v5.33: OpenAPI tags for API organization
+# See docs/adr/002-api-endpoint-separation.md
+openapi_tags = [
+    {
+        "name": "Data",
+        "description": "Read-only market data endpoints. Available to all authenticated users.",
+    },
+    {
+        "name": "Reactor",
+        "description": "Reaction engine state and events. Read endpoints for all users.",
+    },
+    {
+        "name": "Evidence",
+        "description": "Evidence bundle operations and replay catalog.",
+    },
+    {
+        "name": "Alerts",
+        "description": "Alert viewing and management. Write operations require operator/analyst role.",
+    },
+    {
+        "name": "System",
+        "description": "**ADMIN ONLY** - System lifecycle control (start/stop/restart).",
+    },
+    {
+        "name": "Collector",
+        "description": "**ADMIN ONLY** - Data collection service control.",
+    },
+    {
+        "name": "Dangerous",
+        "description": "**RESTRICTED** - Dangerous operations requiring explicit permission and env flag.",
+    },
+]
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="Belief Reaction System",
-    description="人类信念反应感知系统 - 检测预测市场中的信念变化",
-    version="1.0.0"
+    description="""
+人类信念反应感知系统 - 检测预测市场中的信念变化
+
+## API Organization
+
+### User-Facing (Data) APIs
+- **Data** - Read market radar, health
+- **Reactor** - Reaction events, belief states, markets
+- **Evidence** - Evidence bundles, replay catalog
+- **Alerts** - Alert list, acknowledgment
+
+### Operational (Admin) APIs
+- **System** - System start/stop/restart (requires ADMIN role)
+- **Collector** - Collector control (requires ADMIN role)
+- **Dangerous** - Event injection (requires ADMIN + permission + env flag)
+
+See [ADR-002](docs/adr/002-api-endpoint-separation.md) for details.
+    """,
+    version="5.33.0",
+    openapi_tags=openapi_tags,
 )
 
 # Register v1 API routes
@@ -112,15 +163,34 @@ def prometheus_metrics():
 
 @app.get("/api/reaction-types")
 def get_reaction_types():
-    """获取 6 种反应类型"""
+    """
+    获取 7 种反应类型（按优先级排序）
+
+    MUST match poc/models.py ReactionType exactly.
+    """
     return {
         "reaction_types": [
-            {"code": "HOLD", "name": "防守", "meaning": "快速补单，信念坚定", "color": "#22c55e"},
-            {"code": "DELAY", "name": "犹豫", "meaning": "部分/慢速补单，信念动摇", "color": "#eab308"},
-            {"code": "PULL", "name": "撤退", "meaning": "立即取消，信念破裂", "color": "#a855f7"},
-            {"code": "VACUUM", "name": "真空", "meaning": "流动性完全消失", "color": "#ef4444"},
-            {"code": "CHASE", "name": "追价", "meaning": "锚点移动，信念重新定价", "color": "#06b6d4"},
-            {"code": "FAKE", "name": "诱导", "meaning": "冲击后反而加单", "color": "#3b82f6"},
+            # Priority 1 - Highest (system classifies this first)
+            {"code": "VACUUM", "priority": 1, "name": "真空",
+             "meaning": "流动性完全消失", "color": "#ef4444"},
+            # Priority 2
+            {"code": "SWEEP", "priority": 2, "name": "扫单",
+             "meaning": "多档被扫/快速重定价", "color": "#f97316"},
+            # Priority 3
+            {"code": "CHASE", "priority": 3, "name": "追价",
+             "meaning": "锚点移动，信念重新定价", "color": "#06b6d4"},
+            # Priority 4
+            {"code": "PULL", "priority": 4, "name": "撤退",
+             "meaning": "立即取消，信念破裂", "color": "#a855f7"},
+            # Priority 5
+            {"code": "HOLD", "priority": 5, "name": "防守",
+             "meaning": "快速补单，信念坚定", "color": "#22c55e"},
+            # Priority 6
+            {"code": "DELAYED", "priority": 6, "name": "犹豫",
+             "meaning": "部分/慢速补单，信念动摇", "color": "#eab308"},
+            # Priority 7 - Lowest
+            {"code": "NO_IMPACT", "priority": 7, "name": "无影响",
+             "meaning": "冲击过小，无实质反应", "color": "#9ca3af"},
         ]
     }
 

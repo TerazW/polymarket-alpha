@@ -57,11 +57,18 @@ class AuditAction(str, Enum):
     DATA_READ = "data.read"
     DATA_EXPORT = "data.export"
     DATA_REPLAY = "data.replay"
+    DATA_INJECTION = "data.injection"         # v5.33: Event injection (dangerous)
+    DATA_INJECTION_DENIED = "data.injection_denied"
 
     # Admin Operations
     ADMIN_CONFIG_CHANGE = "admin.config_change"
     ADMIN_ACL_GRANT = "admin.acl_grant"
     ADMIN_ACL_REVOKE = "admin.acl_revoke"
+
+    # Dangerous Operations (require special authorization)
+    DANGEROUS_EVENT_INJECTION = "dangerous.event_injection"
+    DANGEROUS_SYSTEM_RESTART = "dangerous.system_restart"
+    DANGEROUS_DATA_DELETE = "dangerous.data_delete"
 
     # System Events
     SYSTEM_STARTUP = "system.startup"

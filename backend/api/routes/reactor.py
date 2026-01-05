@@ -7,19 +7,29 @@ Provides API endpoints for reactor service:
 - GET /reactor/states - All market belief states
 - GET /reactor/state/{token_id} - Single market state
 - GET /reactor/leading-events - Recent leading events
-- POST /reactor/events - Inject test events (dev only)
+- POST /reactor/events - Inject test events (dev only, ADMIN only)
 
 v5.28: WebSocket integration for real-time event broadcasting
+v5.33: Enhanced security for /events endpoint (ACL + audit)
 """
 
-from fastapi import APIRouter, Query, HTTPException, Depends
+from fastapi import APIRouter, Query, HTTPException, Depends, Request
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from enum import Enum
 import os
 import asyncio
+import time
 
 from backend.reactor.service import ReactorService, BeliefMachineService
+
+# v5.33: Security imports for event injection endpoint
+from backend.security import (
+    get_audit_logger,
+    AuditAction,
+    check_permission,
+    Permission,
+)
 
 # v5.28: Import WebSocket publishing functions
 from backend.api.stream import (
@@ -473,27 +483,90 @@ async def get_market_summary(token_id: str):
 
 
 @router.post("/events", response_model=EventInjectionResponse)
-async def inject_event(request: EventInjectionRequest):
+async def inject_event(
+    request: EventInjectionRequest,
+    http_request: Request,
+):
     """
-    Inject a test event into the reactor (dev/test only).
+    Inject a test event into the reactor.
 
-    **WARNING**: This endpoint should be disabled in production.
+    **DANGEROUS OPERATION** - Requires:
+    1. Environment: REACTOR_ALLOW_INJECTION=true
+    2. Authentication: Valid API key with ADMIN role
+    3. Permission: dangerous:inject
+
+    All injection attempts are logged to audit trail.
 
     Event types:
     - book: Order book snapshot
     - trade: Trade execution
     - price_change: Price level update
+
+    Returns:
+    - EventInjectionResponse with success status
     """
-    # Check if injection is enabled
+    audit_logger = get_audit_logger()
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    user_agent = http_request.headers.get("user-agent", "unknown")
+
+    # Extract roles from request state (set by auth middleware)
+    roles = getattr(http_request.state, "roles", [])
+    api_key_id = getattr(http_request.state, "api_key_id", "anonymous")
+
+    # Security Check 1: Environment flag
     if os.getenv("REACTOR_ALLOW_INJECTION", "false").lower() != "true":
+        # Log denied attempt
+        audit_logger.log(
+            action=AuditAction.DATA_INJECTION_DENIED,
+            actor_type="key",
+            actor_id=api_key_id,
+            resource_type="reactor",
+            resource_id=request.token_id,
+            result="denied",
+            details={
+                "reason": "injection_disabled",
+                "event_type": request.event_type,
+            },
+            ip_address=client_ip,
+            user_agent=user_agent,
+        )
         raise HTTPException(
             status_code=403,
             detail="Event injection disabled. Set REACTOR_ALLOW_INJECTION=true to enable."
         )
 
+    # Security Check 2: Permission check (ADMIN only)
+    has_permission = check_permission(
+        roles=roles,
+        required_permission="dangerous:inject",
+    )
+
+    if not has_permission:
+        # Log authorization failure
+        audit_logger.log(
+            action=AuditAction.AUTHZ_DENIED,
+            actor_type="key",
+            actor_id=api_key_id,
+            resource_type="reactor",
+            resource_id=request.token_id,
+            result="denied",
+            details={
+                "reason": "insufficient_permission",
+                "required": "dangerous:inject",
+                "roles": roles,
+                "event_type": request.event_type,
+            },
+            ip_address=client_ip,
+            user_agent=user_agent,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Permission denied. Event injection requires ADMIN role with dangerous:inject permission."
+        )
+
+    # Process the event
     service = get_reactor_service()
 
-    import time
     event_data = {
         'event_type': request.event_type,
         'token_id': request.token_id,
@@ -501,12 +574,51 @@ async def inject_event(request: EventInjectionRequest):
         'server_ts': request.server_ts or int(time.time() * 1000),
     }
 
-    await service.process_event(event_data)
+    try:
+        await service.process_event(event_data)
 
-    return EventInjectionResponse(
-        success=True,
-        message=f"Event {request.event_type} injected for {request.token_id}"
-    )
+        # Log successful injection (DANGEROUS operation)
+        audit_logger.log(
+            action=AuditAction.DANGEROUS_EVENT_INJECTION,
+            actor_type="key",
+            actor_id=api_key_id,
+            resource_type="reactor",
+            resource_id=request.token_id,
+            result="success",
+            details={
+                "event_type": request.event_type,
+                "payload_size": len(str(request.payload)),
+                "server_ts": event_data['server_ts'],
+            },
+            ip_address=client_ip,
+            user_agent=user_agent,
+        )
+
+        return EventInjectionResponse(
+            success=True,
+            message=f"Event {request.event_type} injected for {request.token_id}"
+        )
+
+    except Exception as e:
+        # Log failed injection
+        audit_logger.log(
+            action=AuditAction.DANGEROUS_EVENT_INJECTION,
+            actor_type="key",
+            actor_id=api_key_id,
+            resource_type="reactor",
+            resource_id=request.token_id,
+            result="failure",
+            details={
+                "event_type": request.event_type,
+                "error": str(e),
+            },
+            ip_address=client_ip,
+            user_agent=user_agent,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Event injection failed: {str(e)}"
+        )
 
 
 @router.post("/start")
