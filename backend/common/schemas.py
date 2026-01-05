@@ -25,15 +25,18 @@ class ReactionType(str, Enum):
     Seven atomic reaction types - the system's core vocabulary.
     Ordered by priority (higher priority checked first during classification).
 
+    These describe OBSERVABLE post-shock market behavior only.
+    They do NOT encode intent, expectation, valuation, or direction.
+
     MUST match poc/models.py ReactionType exactly.
     """
-    VACUUM = "VACUUM"       # 1. Highest: liquidity completely vanishes
-    SWEEP = "SWEEP"         # 2. Multiple levels swept / rapid repricing
-    CHASE = "CHASE"         # 3. Anchor moved, belief repricing
-    PULL = "PULL"           # 4. Retreat: cancels immediately after shock
-    HOLD = "HOLD"           # 5. Defend: refills quickly after shock
-    DELAYED = "DELAYED"     # 6. Hesitate: partial/slow refill
-    NO_IMPACT = "NO_IMPACT" # 7. Drop too small, no meaningful reaction
+    VACUUM = "VACUUM"       # 1. Liquidity falls below threshold for sustained duration
+    SWEEP = "SWEEP"         # 2. Consecutive trades remove liquidity across multiple levels
+    CHASE = "CHASE"         # 3. Liquidity reappears only at shifted levels, persisting
+    PULL = "PULL"           # 4. Liquidity cancelled immediately following shock
+    HOLD = "HOLD"           # 5. Liquidity replenished within bounded time window
+    DELAYED = "DELAYED"     # 6. Liquidity partially replenished with measurable delay
+    NO_IMPACT = "NO_IMPACT" # 7. Observed changes do not exceed reaction thresholds
 
 
 class BeliefState(str, Enum):
