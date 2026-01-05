@@ -207,6 +207,9 @@ export interface EvidenceResponse {
 
   // Heatmap tiles manifest
   tiles_manifest: TilesManifest;
+
+  // v5.3: Cryptographic hash for evidence verification
+  bundle_hash?: string;
 }
 
 // =============================================================================

@@ -5,6 +5,9 @@ import type { EvidenceResponse, ShockEvent, ReactionEvent, LeadingEvent, StateCh
 import { REACTION_COLORS, STATE_COLORS } from '@/types/api';
 import { getHeatmapTiles, type HeatmapTileMeta } from '@/lib/api';
 import { HeatmapRenderer } from './HeatmapRenderer';
+import { HashVerificationBadge } from './HashVerification';
+import TileStalenessIndicator from './TileStalenessIndicator';
+import { useTokenStream } from '@/hooks/useStream';
 
 interface EvidencePlayerProps {
   evidence: EvidenceResponse;
@@ -12,6 +15,10 @@ interface EvidencePlayerProps {
   selectedEventId: string | null;
   onTimeChange: (time: number) => void;
   onEventClick: (eventId: string, timestamp: number) => void;
+  /** Enable real-time updates via WebSocket */
+  enableRealtime?: boolean;
+  /** Callback when new real-time event arrives */
+  onRealtimeEvent?: (event: { type: string; data: unknown }) => void;
 }
 
 export function EvidencePlayer({
@@ -20,12 +27,43 @@ export function EvidencePlayer({
   selectedEventId,
   onTimeChange,
   onEventClick,
+  enableRealtime = false,
+  onRealtimeEvent,
 }: EvidencePlayerProps) {
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
   const [tiles, setTiles] = useState<HeatmapTileMeta[]>([]);
   const [tilesLoading, setTilesLoading] = useState(false);
+  const [realtimeEventCount, setRealtimeEventCount] = useState(0);
+
+  // Real-time WebSocket stream (optional)
+  const { isConnected, connectionState } = useTokenStream(
+    enableRealtime ? evidence.token_id : '',
+    {
+      onShock: (payload) => {
+        setRealtimeEventCount((c) => c + 1);
+        onRealtimeEvent?.({ type: 'shock', data: payload });
+      },
+      onReaction: (payload) => {
+        setRealtimeEventCount((c) => c + 1);
+        onRealtimeEvent?.({ type: 'reaction', data: payload });
+      },
+      onBeliefState: (payload) => {
+        setRealtimeEventCount((c) => c + 1);
+        onRealtimeEvent?.({ type: 'belief_state', data: payload });
+      },
+      onAlert: (payload) => {
+        setRealtimeEventCount((c) => c + 1);
+        onRealtimeEvent?.({ type: 'alert', data: payload });
+      },
+    }
+  );
+
+  // Get tile end time for staleness indicator
+  const tileEndTime = tiles.length > 0
+    ? Math.max(...tiles.map((t) => t.t_end))
+    : evidence.window_end;
 
   // Fetch tiles when evidence changes
   useEffect(() => {
@@ -117,6 +155,61 @@ export function EvidencePlayer({
 
   return (
     <div ref={containerRef} className="flex-1 flex flex-col p-4">
+      {/* Status Bar - Hash, Staleness, Connection */}
+      <div className="flex items-center justify-between mb-2 px-2">
+        <div className="flex items-center gap-3">
+          {/* Hash Verification */}
+          {evidence.bundle_hash && (
+            <HashVerificationBadge
+              storedHash={evidence.bundle_hash}
+              computedHash={evidence.bundle_hash} // Pre-verified from server
+            />
+          )}
+
+          {/* Tile Staleness */}
+          <TileStalenessIndicator
+            tileEndTime={tileEndTime}
+            warningThresholdMs={10000}
+            criticalThresholdMs={30000}
+          />
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Real-time Connection Status */}
+          {enableRealtime && (
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="relative flex h-2 w-2">
+                {isConnected && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                )}
+                <span
+                  className={`relative inline-flex rounded-full h-2 w-2 ${
+                    connectionState === 'connected' ? 'bg-green-500' :
+                    connectionState === 'connecting' ? 'bg-yellow-500' :
+                    connectionState === 'reconnecting' ? 'bg-orange-500' :
+                    'bg-gray-400'
+                  }`}
+                />
+              </span>
+              <span className={`${isConnected ? 'text-green-400' : 'text-gray-400'}`}>
+                {connectionState === 'connected' ? 'Live' :
+                 connectionState === 'connecting' ? 'Connecting...' :
+                 connectionState === 'reconnecting' ? 'Reconnecting...' :
+                 'Offline'}
+              </span>
+              {realtimeEventCount > 0 && (
+                <span className="text-gray-500">({realtimeEventCount})</span>
+              )}
+            </div>
+          )}
+
+          {/* Tile count */}
+          <span className="text-xs text-gray-500">
+            {tiles.length} tiles
+          </span>
+        </div>
+      </div>
+
       {/* Heatmap */}
       <div
         className="flex-1 relative bg-gray-800 rounded-lg overflow-hidden cursor-crosshair"
