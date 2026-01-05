@@ -24,6 +24,12 @@ from .routes.collector import router as collector_router
 # v5.32: Import system routes
 from .routes.system import router as system_router
 
+# v5.35: Import admin routes
+from .routes.admin import router as admin_router
+
+# v5.35: Import events routes (multi-market event aggregation)
+from .routes.events import router as events_router
+
 # v5.9: WebSocket stream manager
 from .stream import stream_manager
 
@@ -64,6 +70,14 @@ openapi_tags = [
         "name": "Dangerous",
         "description": "**RESTRICTED** - Dangerous operations requiring explicit permission and env flag.",
     },
+    {
+        "name": "admin",
+        "description": "**ADMIN ONLY** - API key management, ACL configuration, system administration.",
+    },
+    {
+        "name": "events",
+        "description": "Event-level aggregation for multi-market events (e.g., nominations, championships).",
+    },
 ]
 
 # 创建 FastAPI 应用
@@ -102,6 +116,12 @@ app.include_router(collector_router)
 
 # v5.32: Register system routes
 app.include_router(system_router)
+
+# v5.35: Register admin routes
+app.include_router(admin_router)
+
+# v5.35: Register events routes
+app.include_router(events_router)
 
 # 允许前端跨域访问
 app.add_middleware(

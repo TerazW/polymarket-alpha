@@ -118,7 +118,7 @@ class TestSchemaModels:
     def test_radar_row_creation(self):
         """RadarRow should be creatable with required fields."""
         try:
-            from backend.api.schemas.v1 import RadarRow, MarketSummary, DataHealth, BeliefState
+            from backend.api.schemas.v1 import RadarRow, MarketSummary, DataHealth, BeliefState, EvidenceGrade
         except ImportError:
             pytest.skip("Schema imports not available")
 
@@ -141,6 +141,7 @@ class TestSchemaModels:
             belief_state=BeliefState.STABLE,
             state_since_ts=now_ms,
             state_severity=0,
+            evidence_grade=EvidenceGrade.A,  # v5.34 required field
             confidence=85,
             fragile_index_10m=0.0,
             data_health=health,

@@ -70,8 +70,17 @@ class AuditAction(str, Enum):
     AUTH_LOGOUT = "auth.logout"
     AUTH_FAILED = "auth.failed"
     AUTH_KEY_CREATED = "auth.key_created"
+    AUTH_KEY_UPDATED = "auth.key_updated"
     AUTH_KEY_REVOKED = "auth.key_revoked"
     AUTH_KEY_DELETED = "auth.key_deleted"
+
+    # Aliases for compatibility (v5.35)
+    KEY_CREATED = "auth.key_created"
+    KEY_UPDATED = "auth.key_updated"
+    KEY_REVOKED = "auth.key_revoked"
+    KEY_DELETED = "auth.key_deleted"
+    ACL_GRANTED = "admin.acl_grant"
+    ACL_REVOKED = "admin.acl_revoke"
 
     # Authorization
     AUTHZ_DENIED = "authz.denied"

@@ -128,6 +128,7 @@ async def deep_health_check():
 def get_radar(
     event_id: Optional[int] = Query(None, ge=1, description="Filter by event id"),
     tag: Optional[str] = Query(None, description="Optional tag/segment filter"),
+    outcome: Optional[Literal["YES", "NO", "BOTH"]] = Query("YES", description="Token outcome filter: YES (default), NO, or BOTH"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     sort: Literal["fragile_index_10m", "leading_rate_10m", "confidence", "last_critical_ts", "state_severity"] = Query("fragile_index_10m"),
@@ -136,12 +137,50 @@ def get_radar(
     """
     Multi-market radar list for overview sorting.
     Returns markets with belief states and metrics.
+
+    v5.35: Support for both YES and NO token tracking.
+    - outcome=YES (default): Only YES tokens
+    - outcome=NO: Only NO tokens
+    - outcome=BOTH: Both YES and NO tokens (doubles the results per market)
     """
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
+            # Build query based on outcome filter
+            # v5.35: Support YES, NO, or BOTH token tracking
+            if outcome == "BOTH":
+                token_select = """
+                    SELECT m.yes_token_id as token_id, 'YES' as outcome,
+                           m.condition_id, m.question as title, m.slug as market_slug,
+                           m.tick_size, m.volume_24h, m.liquidity, m.created_at
+                    FROM markets m
+                    WHERE m.active = true AND m.closed = false AND m.yes_token_id IS NOT NULL
+                    UNION ALL
+                    SELECT m.no_token_id as token_id, 'NO' as outcome,
+                           m.condition_id, m.question as title, m.slug as market_slug,
+                           m.tick_size, m.volume_24h, m.liquidity, m.created_at
+                    FROM markets m
+                    WHERE m.active = true AND m.closed = false AND m.no_token_id IS NOT NULL
+                """
+            elif outcome == "NO":
+                token_select = """
+                    SELECT m.no_token_id as token_id, 'NO' as outcome,
+                           m.condition_id, m.question as title, m.slug as market_slug,
+                           m.tick_size, m.volume_24h, m.liquidity, m.created_at
+                    FROM markets m
+                    WHERE m.active = true AND m.closed = false AND m.no_token_id IS NOT NULL
+                """
+            else:  # YES (default)
+                token_select = """
+                    SELECT m.yes_token_id as token_id, 'YES' as outcome,
+                           m.condition_id, m.question as title, m.slug as market_slug,
+                           m.tick_size, m.volume_24h, m.liquidity, m.created_at
+                    FROM markets m
+                    WHERE m.active = true AND m.closed = false AND m.yes_token_id IS NOT NULL
+                """
+
             # Get markets with latest belief states
-            cur.execute("""
+            cur.execute(f"""
                 WITH latest_states AS (
                     SELECT DISTINCT ON (token_id)
                         token_id,
@@ -150,28 +189,31 @@ def get_radar(
                     FROM belief_states
                     ORDER BY token_id, ts DESC
                 ),
+                market_tokens AS (
+                    {token_select}
+                ),
                 market_metrics AS (
                     SELECT
-                        m.yes_token_id as token_id,
-                        m.condition_id,
-                        m.question as title,
-                        m.slug as market_slug,
-                        m.tick_size,
-                        m.volume_24h,
-                        m.liquidity,
+                        mt.token_id,
+                        mt.outcome,
+                        mt.condition_id,
+                        mt.title,
+                        mt.market_slug,
+                        mt.tick_size,
+                        mt.volume_24h,
+                        mt.liquidity,
                         COALESCE(ls.new_state, 'STABLE') as belief_state,
-                        COALESCE(ls.state_ts, m.created_at) as state_since_ts,
+                        COALESCE(ls.state_ts, mt.created_at) as state_since_ts,
                         -- Count leading events in last 10 min
                         (SELECT COUNT(*) FROM leading_events le
-                         WHERE le.token_id = m.yes_token_id
+                         WHERE le.token_id = mt.token_id
                          AND le.ts > NOW() - INTERVAL '10 minutes') as leading_count_10m,
                         -- Count reactions in last 10 min
                         (SELECT COUNT(*) FROM reaction_events re
-                         WHERE re.token_id = m.yes_token_id
+                         WHERE re.token_id = mt.token_id
                          AND re.ts > NOW() - INTERVAL '10 minutes') as reaction_count_10m
-                    FROM markets m
-                    LEFT JOIN latest_states ls ON ls.token_id = m.yes_token_id
-                    WHERE m.active = true AND m.closed = false
+                    FROM market_tokens mt
+                    LEFT JOIN latest_states ls ON ls.token_id = mt.token_id
                 )
                 SELECT * FROM market_metrics
                 ORDER BY
@@ -187,11 +229,24 @@ def get_radar(
 
             rows = cur.fetchall()
 
-            # Get total count
-            cur.execute("""
-                SELECT COUNT(*) FROM markets
-                WHERE active = true AND closed = false
-            """)
+            # Get total count based on outcome filter (v5.35)
+            if outcome == "BOTH":
+                cur.execute("""
+                    SELECT
+                        (SELECT COUNT(*) FROM markets WHERE active = true AND closed = false AND yes_token_id IS NOT NULL) +
+                        (SELECT COUNT(*) FROM markets WHERE active = true AND closed = false AND no_token_id IS NOT NULL)
+                    as count
+                """)
+            elif outcome == "NO":
+                cur.execute("""
+                    SELECT COUNT(*) FROM markets
+                    WHERE active = true AND closed = false AND no_token_id IS NOT NULL
+                """)
+            else:  # YES
+                cur.execute("""
+                    SELECT COUNT(*) FROM markets
+                    WHERE active = true AND closed = false AND yes_token_id IS NOT NULL
+                """)
             total = cur.fetchone()['count']
 
         conn.close()
@@ -233,7 +288,7 @@ def get_radar(
                     condition_id=row['condition_id'] or '',
                     title=row['title'] or 'Unknown Market',
                     market_slug=row['market_slug'],
-                    outcome='YES',
+                    outcome=row.get('outcome', 'YES'),  # v5.35: Support YES/NO
                     tick_size=float(row['tick_size'] or 0.01),
                     last_price=None,
                 ),

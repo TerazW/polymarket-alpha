@@ -86,11 +86,23 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "PUT /v1/alerts/*/resolve": "alerts:resolve",
     "POST /v1/replay/trigger": "replay:trigger",
 
-    # Admin endpoints
+    # Admin endpoints (v1)
     "GET /v1/admin/keys": "admin:keys",
     "POST /v1/admin/keys": "admin:keys",
     "DELETE /v1/admin/keys/*": "admin:keys",
     "GET /v1/admin/audit": "admin:audit",
+
+    # Admin endpoints (v5.35 - /admin prefix)
+    "GET /admin/keys": "admin:keys",
+    "POST /admin/keys": "admin:keys",
+    "GET /admin/keys/*": "admin:keys",
+    "PUT /admin/keys/*/roles": "admin:keys",
+    "DELETE /admin/keys/*": "admin:keys",
+    "GET /admin/acl": "admin:keys",
+    "POST /admin/acl": "admin:keys",
+    "DELETE /admin/acl/*": "admin:keys",
+    "GET /admin/roles": "admin:keys",
+    "GET /admin/permissions": "admin:keys",
 }
 
 # Endpoints that don't require authentication
@@ -99,6 +111,7 @@ PUBLIC_ENDPOINTS = {
     "GET /v1/health",
     "GET /v1/health/deep",
     "GET /metrics",
+    "POST /admin/bootstrap",  # v5.35: Allow bootstrap without auth (has own protection)
 }
 
 

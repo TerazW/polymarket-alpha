@@ -481,3 +481,256 @@ class TestAlertingIntegration:
         results = await route_alert(alert)
         # Should have at least one destination from default router
         assert len(results) >= 1
+
+
+# =============================================================================
+# Email Destination Tests
+# =============================================================================
+
+class TestEmailDestination:
+    """Test EmailDestination"""
+
+    def test_email_destination_creation(self):
+        """EmailDestination should be created with correct config"""
+        from backend.alerting import EmailDestination, AlertPriority
+
+        dest = EmailDestination(
+            smtp_host="smtp.example.com",
+            smtp_port=587,
+            smtp_user="user@example.com",
+            smtp_password="password",
+            to_addrs=["admin@example.com"],
+            min_priority=AlertPriority.HIGH,
+        )
+
+        assert dest.smtp_host == "smtp.example.com"
+        assert dest.smtp_port == 587
+        assert dest.min_priority == AlertPriority.HIGH
+
+    def test_email_destination_matches(self):
+        """EmailDestination should filter by priority correctly"""
+        from backend.alerting import EmailDestination, AlertPayload, AlertPriority, AlertCategory
+
+        dest = EmailDestination(
+            smtp_host="smtp.example.com",
+            min_priority=AlertPriority.HIGH,
+        )
+
+        high_alert = AlertPayload(
+            alert_id="1", category=AlertCategory.SYSTEM,
+            priority=AlertPriority.HIGH, title="", message=""
+        )
+        low_alert = AlertPayload(
+            alert_id="2", category=AlertCategory.SYSTEM,
+            priority=AlertPriority.LOW, title="", message=""
+        )
+
+        assert dest.matches(high_alert) is True
+        assert dest.matches(low_alert) is False
+
+    def test_email_destination_priority_recipients(self):
+        """EmailDestination should route to priority-based recipients"""
+        from backend.alerting import EmailDestination, AlertPayload, AlertPriority, AlertCategory
+
+        dest = EmailDestination(
+            smtp_host="smtp.example.com",
+            to_addrs=["general@example.com"],
+            priority_recipients={
+                AlertPriority.CRITICAL: ["oncall@example.com"],
+            },
+        )
+
+        critical_alert = AlertPayload(
+            alert_id="1", category=AlertCategory.HASH_MISMATCH,
+            priority=AlertPriority.CRITICAL, title="", message=""
+        )
+
+        recipients = dest._get_recipients(critical_alert)
+        assert "general@example.com" in recipients
+        assert "oncall@example.com" in recipients
+
+
+# =============================================================================
+# Evidence Grade Validation Tests (ADR-004)
+# =============================================================================
+
+class TestEvidenceGradeValidation:
+    """Test evidence grade → alert severity policy enforcement"""
+
+    def test_grade_a_allows_all_severities(self):
+        """Grade A should allow all severity levels"""
+        from backend.alerting.evidence_grade import (
+            validate_alert_severity, EvidenceGrade, AlertSeverity
+        )
+
+        for severity in AlertSeverity:
+            result = validate_alert_severity(EvidenceGrade.A, severity)
+            assert result.allowed is True
+            assert result.downgraded is False
+            assert result.final_severity == severity
+
+    def test_grade_b_allows_all_severities(self):
+        """Grade B should allow all severity levels"""
+        from backend.alerting.evidence_grade import (
+            validate_alert_severity, EvidenceGrade, AlertSeverity
+        )
+
+        for severity in AlertSeverity:
+            result = validate_alert_severity(EvidenceGrade.B, severity)
+            assert result.allowed is True
+            assert result.final_severity == severity
+
+    def test_grade_c_downgrades_high_severities(self):
+        """Grade C should downgrade CRITICAL/HIGH to MEDIUM"""
+        from backend.alerting.evidence_grade import (
+            validate_alert_severity, EvidenceGrade, AlertSeverity
+        )
+
+        # CRITICAL should be downgraded
+        result = validate_alert_severity(EvidenceGrade.C, AlertSeverity.CRITICAL)
+        assert result.downgraded is True
+        assert result.final_severity == AlertSeverity.MEDIUM
+
+        # HIGH should be downgraded
+        result = validate_alert_severity(EvidenceGrade.C, AlertSeverity.HIGH)
+        assert result.downgraded is True
+        assert result.final_severity == AlertSeverity.MEDIUM
+
+        # MEDIUM/LOW should pass through
+        result = validate_alert_severity(EvidenceGrade.C, AlertSeverity.MEDIUM)
+        assert result.downgraded is False
+        assert result.final_severity == AlertSeverity.MEDIUM
+
+    def test_grade_d_only_allows_low(self):
+        """Grade D should only allow LOW severity"""
+        from backend.alerting.evidence_grade import (
+            validate_alert_severity, EvidenceGrade, AlertSeverity
+        )
+
+        # CRITICAL should be downgraded to LOW
+        result = validate_alert_severity(EvidenceGrade.D, AlertSeverity.CRITICAL)
+        assert result.downgraded is True
+        assert result.final_severity == AlertSeverity.LOW
+
+        # LOW should pass through
+        result = validate_alert_severity(EvidenceGrade.D, AlertSeverity.LOW)
+        assert result.downgraded is False
+        assert result.final_severity == AlertSeverity.LOW
+
+    def test_auto_downgrade_disabled_rejects(self):
+        """When auto_downgrade=False, invalid severities should be rejected"""
+        from backend.alerting.evidence_grade import (
+            validate_alert_severity, EvidenceGrade, AlertSeverity
+        )
+
+        result = validate_alert_severity(
+            EvidenceGrade.D,
+            AlertSeverity.CRITICAL,
+            auto_downgrade=False
+        )
+        assert result.allowed is False
+        assert result.downgraded is False
+
+    def test_compute_evidence_grade(self):
+        """compute_evidence_grade should return correct grades"""
+        from backend.alerting.evidence_grade import compute_evidence_grade, EvidenceGrade
+
+        # Perfect data = Grade A
+        assert compute_evidence_grade() == EvidenceGrade.A
+
+        # Minor coverage issue = Grade B
+        assert compute_evidence_grade(coverage_ratio=0.92) == EvidenceGrade.B
+
+        # Gaps = Grade C
+        assert compute_evidence_grade(has_gaps=True) == EvidenceGrade.C
+
+        # Tainted windows = Grade C
+        assert compute_evidence_grade(tainted_windows=1) == EvidenceGrade.C
+
+        # Hash verification failed = Grade D
+        assert compute_evidence_grade(hash_verified=False) == EvidenceGrade.D
+
+        # Many tainted windows = Grade D
+        assert compute_evidence_grade(tainted_windows=5) == EvidenceGrade.D
+
+    def test_apply_grade_policy_convenience(self):
+        """apply_grade_policy should work with string inputs"""
+        from backend.alerting.evidence_grade import apply_grade_policy
+
+        # Grade A + CRITICAL = CRITICAL
+        severity, downgraded, reason = apply_grade_policy("CRITICAL", "A")
+        assert severity == "CRITICAL"
+        assert downgraded is False
+
+        # Grade D + CRITICAL = LOW (downgraded)
+        severity, downgraded, reason = apply_grade_policy("CRITICAL", "D")
+        assert severity == "LOW"
+        assert downgraded is True
+
+    def test_requires_manual_escalation(self):
+        """requires_manual_escalation should identify cases needing human review"""
+        from backend.alerting.evidence_grade import (
+            requires_manual_escalation, EvidenceGrade, AlertSeverity
+        )
+
+        # Grade D always requires manual review
+        assert requires_manual_escalation(EvidenceGrade.D, AlertSeverity.LOW) is True
+
+        # Grade C with MEDIUM requires escalation
+        assert requires_manual_escalation(EvidenceGrade.C, AlertSeverity.MEDIUM) is True
+
+        # Grade A/B with any severity = no escalation needed
+        assert requires_manual_escalation(EvidenceGrade.A, AlertSeverity.CRITICAL) is False
+        assert requires_manual_escalation(EvidenceGrade.B, AlertSeverity.HIGH) is False
+
+
+# =============================================================================
+# Router Factory Tests with Email
+# =============================================================================
+
+class TestRouterFactoryEmail:
+    """Test router factory with email configuration"""
+
+    def test_create_router_with_email(self):
+        """create_router_from_config should create email destination"""
+        from backend.alerting import create_router_from_config, EmailDestination
+
+        router = create_router_from_config({
+            "email": {
+                "smtp_host": "smtp.example.com",
+                "smtp_port": 587,
+                "smtp_user": "user@example.com",
+                "smtp_password": "password",
+                "from_addr": "alerts@example.com",
+                "to_addrs": ["admin@example.com"],
+                "min_priority": "high",
+            }
+        })
+
+        assert len(router.destinations) == 1
+        assert isinstance(router.destinations[0], EmailDestination)
+
+    def test_create_router_with_all_destinations(self):
+        """create_router_from_config should create multiple destinations"""
+        from backend.alerting import create_router_from_config
+
+        router = create_router_from_config({
+            "slack": {
+                "webhook_url": "https://hooks.slack.com/test",
+            },
+            "email": {
+                "smtp_host": "smtp.example.com",
+                "to_addrs": ["admin@example.com"],
+            },
+            "webhook": {
+                "url": "https://example.com/webhook",
+            },
+            "websocket": {
+                "enabled": True,
+            },
+            "log": {
+                "enabled": True,
+            },
+        })
+
+        assert len(router.destinations) == 5

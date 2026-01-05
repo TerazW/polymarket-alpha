@@ -375,6 +375,170 @@ class WebSocketBroadcastDestination(AlertDestination):
 
 
 # =============================================================================
+# Email Destination (SMTP)
+# =============================================================================
+
+class EmailDestination(AlertDestination):
+    """
+    Send alerts via email using SMTP.
+
+    Supports:
+    - Multiple recipients
+    - Priority-based recipient groups
+    - HTML formatting
+    - Retry with backoff
+    """
+
+    def __init__(
+        self,
+        smtp_host: str,
+        smtp_port: int = 587,
+        smtp_user: Optional[str] = None,
+        smtp_password: Optional[str] = None,
+        from_addr: str = "alerts@belief-reaction.local",
+        to_addrs: Optional[List[str]] = None,
+        priority_recipients: Optional[Dict[AlertPriority, List[str]]] = None,
+        use_tls: bool = True,
+        min_priority: AlertPriority = AlertPriority.HIGH,
+        categories: Optional[List[AlertCategory]] = None,
+    ):
+        self.smtp_host = smtp_host
+        self.smtp_port = smtp_port
+        self.smtp_user = smtp_user
+        self.smtp_password = smtp_password
+        self.from_addr = from_addr
+        self.to_addrs = to_addrs or []
+        self.priority_recipients = priority_recipients or {}
+        self.use_tls = use_tls
+        self.min_priority = min_priority
+        self.categories = categories
+
+    def matches(self, alert: AlertPayload) -> bool:
+        priority_order = {AlertPriority.LOW: 0, AlertPriority.MEDIUM: 1,
+                         AlertPriority.HIGH: 2, AlertPriority.CRITICAL: 3}
+        if priority_order[alert.priority] < priority_order[self.min_priority]:
+            return False
+        if self.categories and alert.category not in self.categories:
+            return False
+        return True
+
+    def _get_recipients(self, alert: AlertPayload) -> List[str]:
+        """Get recipients based on alert priority"""
+        recipients = set(self.to_addrs)
+        if alert.priority in self.priority_recipients:
+            recipients.update(self.priority_recipients[alert.priority])
+        return list(recipients)
+
+    def _format_html(self, alert: AlertPayload) -> str:
+        """Format alert as HTML email body"""
+        priority_colors = {
+            AlertPriority.LOW: "#3b82f6",      # Blue
+            AlertPriority.MEDIUM: "#eab308",   # Yellow
+            AlertPriority.HIGH: "#f97316",     # Orange
+            AlertPriority.CRITICAL: "#ef4444", # Red
+        }
+        color = priority_colors.get(alert.priority, "#808080")
+
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }}
+                .alert-box {{ border-left: 4px solid {color}; padding: 16px; background: #f8f9fa; margin: 16px 0; }}
+                .priority {{ color: {color}; font-weight: bold; text-transform: uppercase; }}
+                .meta {{ color: #666; font-size: 12px; margin-top: 12px; }}
+                .evidence {{ background: #fff; padding: 12px; margin-top: 12px; border: 1px solid #ddd; }}
+            </style>
+        </head>
+        <body>
+            <h2>🔔 Belief Reaction Alert</h2>
+
+            <div class="alert-box">
+                <p class="priority">{alert.priority.value}</p>
+                <h3>{alert.title}</h3>
+                <p>{alert.message}</p>
+            </div>
+
+            <div class="meta">
+                <p><strong>Category:</strong> {alert.category.value}</p>
+                <p><strong>Alert ID:</strong> {alert.alert_id}</p>
+                <p><strong>Token:</strong> {alert.token_id or 'N/A'}</p>
+                <p><strong>Time:</strong> {datetime.fromtimestamp(alert.ts / 1000).isoformat()}</p>
+            </div>
+
+            {f'<div class="evidence"><strong>Evidence:</strong><br/><code>{json.dumps(alert.evidence_ref, indent=2)}</code></div>' if alert.evidence_ref else ''}
+
+            <hr/>
+            <p style="color: #999; font-size: 11px;">
+                This is an automated alert from Belief Reaction System.
+                <br/>Do not reply to this email.
+            </p>
+        </body>
+        </html>
+        """
+
+    async def send(self, alert: AlertPayload) -> bool:
+        """Send alert via email"""
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        recipients = self._get_recipients(alert)
+        if not recipients:
+            logger.warning(f"[EMAIL] No recipients for alert {alert.alert_id}")
+            return False
+
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"[{alert.priority.value.upper()}] {alert.title}"
+            msg["From"] = self.from_addr
+            msg["To"] = ", ".join(recipients)
+
+            # Plain text version
+            text_body = f"""
+Belief Reaction Alert
+=====================
+
+Priority: {alert.priority.value.upper()}
+Category: {alert.category.value}
+
+{alert.title}
+
+{alert.message}
+
+Token: {alert.token_id or 'N/A'}
+Alert ID: {alert.alert_id}
+Time: {datetime.fromtimestamp(alert.ts / 1000).isoformat()}
+            """
+            msg.attach(MIMEText(text_body, "plain"))
+
+            # HTML version
+            html_body = self._format_html(alert)
+            msg.attach(MIMEText(html_body, "html"))
+
+            # Send via SMTP (run in thread to not block)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._send_smtp, msg, recipients)
+
+            logger.info(f"[EMAIL] Alert {alert.alert_id} sent to {len(recipients)} recipients")
+            return True
+
+        except Exception as e:
+            logger.error(f"[EMAIL] Failed to send alert {alert.alert_id}: {e}")
+            return False
+
+    def _send_smtp(self, msg, recipients: List[str]):
+        """Synchronous SMTP send (called in executor)"""
+        with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+            if self.use_tls:
+                server.starttls()
+            if self.smtp_user and self.smtp_password:
+                server.login(self.smtp_user, self.smtp_password)
+            server.sendmail(self.from_addr, recipients, msg.as_string())
+
+
+# =============================================================================
 # Alert Router (Main Class)
 # =============================================================================
 
@@ -468,6 +632,16 @@ def create_router_from_config(config: Dict) -> AlertRouter:
             "url": "https://api.example.com/alerts",
             "headers": {"Authorization": "Bearer ..."}
         },
+        "email": {
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "smtp_user": "user@example.com",
+            "smtp_password": "password",
+            "from_addr": "alerts@example.com",
+            "to_addrs": ["admin@example.com"],
+            "priority_recipients": {"critical": ["oncall@example.com"]},
+            "min_priority": "high"
+        },
         "websocket": {
             "enabled": true
         },
@@ -503,6 +677,28 @@ def create_router_from_config(config: Dict) -> AlertRouter:
                 url=url,
                 headers=webhook_cfg.get("headers"),
                 min_priority=AlertPriority(webhook_cfg.get("min_priority", "low")),
+            ))
+
+    # Email (SMTP)
+    if email_cfg := config.get("email"):
+        if smtp_host := email_cfg.get("smtp_host"):
+            priority_recipients = {}
+            for priority_str, recipients in email_cfg.get("priority_recipients", {}).items():
+                try:
+                    priority_recipients[AlertPriority(priority_str)] = recipients
+                except ValueError:
+                    pass
+
+            router.add_destination(EmailDestination(
+                smtp_host=smtp_host,
+                smtp_port=email_cfg.get("smtp_port", 587),
+                smtp_user=email_cfg.get("smtp_user"),
+                smtp_password=email_cfg.get("smtp_password"),
+                from_addr=email_cfg.get("from_addr", "alerts@belief-reaction.local"),
+                to_addrs=email_cfg.get("to_addrs", []),
+                priority_recipients=priority_recipients,
+                use_tls=email_cfg.get("use_tls", True),
+                min_priority=AlertPriority(email_cfg.get("min_priority", "high")),
             ))
 
     # WebSocket broadcast

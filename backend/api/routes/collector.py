@@ -34,6 +34,13 @@ class TokensRequest(BaseModel):
     token_ids: List[str] = Field(..., min_length=1, description="Token IDs to add/remove")
 
 
+class MarketsRequest(BaseModel):
+    """Request to add markets by condition_id (v5.35)"""
+    condition_ids: List[str] = Field(..., min_length=1, description="Market condition IDs to add")
+    include_yes: bool = Field(True, description="Include YES tokens")
+    include_no: bool = Field(True, description="Include NO tokens")
+
+
 class CollectorStatusResponse(BaseModel):
     """Collector status response"""
     running: bool
@@ -277,6 +284,85 @@ async def remove_tokens(request: TokensRequest):
         removed=tokens_to_remove,
         current_count=len(service.token_ids),
     )
+
+
+@router.post("/markets", response_model=TokensModifyResponse)
+async def add_markets(request: MarketsRequest):
+    """
+    Add complete markets by condition_id (v5.35).
+
+    Looks up the market and adds both YES and NO token IDs.
+    This is the recommended way to track complete markets.
+
+    Args:
+        condition_ids: List of market condition IDs
+        include_yes: Whether to track YES tokens (default: True)
+        include_no: Whether to track NO tokens (default: True)
+    """
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    service = get_collector_service()
+
+    if service is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Collector not initialized. Start the collector first.",
+        )
+
+    if not request.include_yes and not request.include_no:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of include_yes or include_no must be True.",
+        )
+
+    # Look up token IDs from database
+    DB_CONFIG = {
+        'host': os.getenv('DB_HOST', '127.0.0.1'),
+        'port': int(os.getenv('DB_PORT', '5433')),
+        'database': os.getenv('DB_NAME', 'belief_reaction'),
+        'user': os.getenv('DB_USER', 'postgres'),
+        'password': os.getenv('DB_PASSWORD', 'postgres'),
+    }
+
+    try:
+        conn = psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
+        tokens_to_add = []
+
+        with conn.cursor() as cur:
+            for condition_id in request.condition_ids:
+                cur.execute("""
+                    SELECT yes_token_id, no_token_id
+                    FROM markets
+                    WHERE condition_id = %s
+                """, (condition_id,))
+                row = cur.fetchone()
+
+                if row:
+                    if request.include_yes and row['yes_token_id']:
+                        tokens_to_add.append(row['yes_token_id'])
+                    if request.include_no and row['no_token_id']:
+                        tokens_to_add.append(row['no_token_id'])
+
+        conn.close()
+
+        # Filter out already subscribed tokens
+        new_tokens = [t for t in tokens_to_add if t not in service.token_ids]
+
+        if new_tokens:
+            await service.add_tokens(new_tokens)
+
+        return TokensModifyResponse(
+            status="success",
+            added=new_tokens,
+            current_count=len(service.token_ids),
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to look up markets: {str(e)}",
+        )
 
 
 # =============================================================================
