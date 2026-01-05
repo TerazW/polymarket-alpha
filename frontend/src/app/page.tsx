@@ -160,7 +160,13 @@ export default function Dashboard() {
             <h1 className="text-3xl font-bold mb-2">Belief Reaction System</h1>
             <p className="text-gray-400">&quot;看存在没意义，看反应才有意义&quot;</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-4">
+            <Link
+              href="/replay"
+              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition-colors"
+            >
+              📜 Replay Catalog
+            </Link>
             {!useMockData && apiStatus !== 'unknown' && (
               <span className={`text-xs ${apiStatus === 'online' ? 'text-green-400' : 'text-red-400'}`}>
                 {apiStatus === 'online' ? '● API Online' : '○ API Offline'}

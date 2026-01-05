@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, use, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { ContextPanel } from '@/components/evidence/ContextPanel';
 import { EvidencePlayer } from '@/components/evidence/EvidencePlayer';
 import { TapePanel } from '@/components/evidence/TapePanel';
@@ -268,11 +269,15 @@ const MOCK_EVIDENCE: EvidenceResponse = {
 
 export default function MarketDetailPage({ params }: PageProps) {
   const { tokenId } = use(params);
+  const searchParams = useSearchParams();
+  const t0Param = searchParams.get('t0');
+  const initialT0 = t0Param ? parseInt(t0Param, 10) : Date.now();
+
   const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  const [currentTime, setCurrentTime] = useState<number>(Date.now());
+  const [currentTime, setCurrentTime] = useState<number>(initialT0);
   const [useMockData, setUseMockData] = useState(false);
   const [apiStatus, setApiStatus] = useState<'loading' | 'online' | 'offline'>('loading');
 
@@ -293,7 +298,8 @@ export default function MarketDetailPage({ params }: PageProps) {
     setLoading(true);
     try {
       // Try to fetch from API first
-      const t0 = Date.now();
+      // Use t0 from URL param or current time
+      const t0 = initialT0;
       const apiData = await getEvidence({
         token_id: tokenId,
         t0,
@@ -316,7 +322,7 @@ export default function MarketDetailPage({ params }: PageProps) {
     } finally {
       setLoading(false);
     }
-  }, [tokenId]);
+  }, [tokenId, initialT0]);
 
   useEffect(() => {
     if (useMockData) {
