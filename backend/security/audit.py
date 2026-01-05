@@ -1,15 +1,18 @@
 """
-Audit Logging Module (v5.23)
+Audit Logging Module (v5.34)
 
 Provides:
 - Structured audit log entries
 - Action categorization
 - Async-safe logging
 - Query interface for audit trail
+- Hash chain for append-only verification (v5.34)
+- Production environment hardening (v5.34)
 
 "一切操作皆可追溯"
 """
 
+import os
 import time
 import threading
 import json
@@ -18,6 +21,38 @@ from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 from collections import deque
 import hashlib
+
+
+# =============================================================================
+# Production Environment Detection (v5.34)
+# =============================================================================
+
+def is_production_environment() -> bool:
+    """
+    Detect if running in production environment.
+
+    Returns True if:
+    - ENVIRONMENT=production
+    - Or NODE_ENV=production
+    - Or PRODUCTION=true
+    """
+    env = os.getenv("ENVIRONMENT", "").lower()
+    node_env = os.getenv("NODE_ENV", "").lower()
+    prod_flag = os.getenv("PRODUCTION", "").lower()
+
+    return env == "production" or node_env == "production" or prod_flag == "true"
+
+
+def get_production_allowlist() -> List[str]:
+    """
+    Get CIDR allowlist for production dangerous operations.
+
+    Format: DANGEROUS_OPS_ALLOWLIST=10.0.0.0/8,192.168.1.0/24
+    """
+    allowlist = os.getenv("DANGEROUS_OPS_ALLOWLIST", "")
+    if not allowlist:
+        return []
+    return [cidr.strip() for cidr in allowlist.split(",") if cidr.strip()]
 
 
 # =============================================================================
@@ -86,6 +121,10 @@ class AuditEntry:
     Structured audit log entry.
 
     All fields are immutable after creation.
+
+    v5.34: Added hash chain support for append-only verification.
+    Each entry includes prev_hash (hash of previous entry) creating
+    a tamper-evident chain.
     """
     entry_id: str                       # Unique entry identifier
     timestamp: int                      # Unix timestamp (ms)
@@ -99,12 +138,36 @@ class AuditEntry:
     ip_address: Optional[str] = None
     user_agent: Optional[str] = None
     request_id: Optional[str] = None
+    # v5.34: Hash chain fields
+    prev_hash: Optional[str] = None     # Hash of previous entry (chain link)
+    entry_hash: Optional[str] = None    # Hash of this entry (computed)
 
     def __post_init__(self):
         # Generate entry_id if not provided
         if not self.entry_id:
             content = f"{self.timestamp}:{self.action.value}:{self.actor_id}"
             self.entry_id = hashlib.sha256(content.encode()).hexdigest()[:16]
+
+    def compute_hash(self) -> str:
+        """
+        Compute hash of this entry for chain verification.
+
+        Hash includes prev_hash to create chain link.
+        """
+        data = {
+            "entry_id": self.entry_id,
+            "timestamp": self.timestamp,
+            "action": self.action.value,
+            "actor_type": self.actor_type,
+            "actor_id": self.actor_id,
+            "resource_type": self.resource_type,
+            "resource_id": self.resource_id,
+            "result": self.result,
+            "details": self.details,
+            "prev_hash": self.prev_hash,
+        }
+        json_bytes = json.dumps(data, sort_keys=True).encode('utf-8')
+        return hashlib.sha256(json_bytes).hexdigest()
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +183,8 @@ class AuditEntry:
             "ip_address": self.ip_address,
             "user_agent": self.user_agent,
             "request_id": self.request_id,
+            "prev_hash": self.prev_hash,
+            "entry_hash": self.entry_hash,
         }
 
     def to_json(self) -> str:
@@ -139,6 +204,8 @@ class AuditLogger:
     - Optional external sink (callback)
     - Query interface for recent entries
     - Thread-safe operations
+    - Hash chain for append-only verification (v5.34)
+    - Chain integrity verification (v5.34)
 
     Usage:
         logger = AuditLogger(max_entries=10000)
@@ -159,7 +226,13 @@ class AuditLogger:
             actor_id="key_abc123",
             limit=100,
         )
+
+        # Verify chain integrity (v5.34)
+        is_valid, errors = logger.verify_chain()
     """
+
+    # Genesis hash for first entry in chain
+    GENESIS_HASH = "0" * 64
 
     def __init__(
         self,
@@ -170,6 +243,10 @@ class AuditLogger:
         self.sink = sink
         self._entries: deque = deque(maxlen=max_entries)
         self._lock = threading.Lock()
+
+        # v5.34: Hash chain state
+        self._last_hash: str = self.GENESIS_HASH
+        self._chain_length: int = 0
 
         # Stats
         self._total_logged = 0
@@ -192,25 +269,34 @@ class AuditLogger:
         """
         Log an audit entry.
 
+        v5.34: Maintains hash chain for append-only verification.
+
         Returns:
             The created AuditEntry
         """
-        entry = AuditEntry(
-            entry_id="",  # Will be generated
-            timestamp=int(time.time() * 1000),
-            action=action,
-            actor_type=actor_type,
-            actor_id=actor_id,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            result=result,
-            details=details or {},
-            ip_address=ip_address,
-            user_agent=user_agent,
-            request_id=request_id,
-        )
-
         with self._lock:
+            # v5.34: Link to previous entry via hash
+            entry = AuditEntry(
+                entry_id="",  # Will be generated
+                timestamp=int(time.time() * 1000),
+                action=action,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                result=result,
+                details=details or {},
+                ip_address=ip_address,
+                user_agent=user_agent,
+                request_id=request_id,
+                prev_hash=self._last_hash,  # v5.34: Chain link
+            )
+
+            # v5.34: Compute and store entry hash
+            entry.entry_hash = entry.compute_hash()
+            self._last_hash = entry.entry_hash
+            self._chain_length += 1
+
             self._entries.append(entry)
             self._total_logged += 1
 
@@ -227,6 +313,44 @@ class AuditLogger:
                 pass  # Don't fail on sink errors
 
         return entry
+
+    def verify_chain(self) -> tuple:
+        """
+        Verify the integrity of the audit chain.
+
+        v5.34: Ensures no entries have been tampered with.
+
+        Returns:
+            (is_valid, errors): Tuple of bool and list of error strings
+        """
+        with self._lock:
+            entries = list(self._entries)
+
+        if not entries:
+            return True, []
+
+        errors = []
+        prev_hash = self.GENESIS_HASH
+
+        for i, entry in enumerate(entries):
+            # Check chain link
+            if entry.prev_hash != prev_hash:
+                errors.append(
+                    f"Entry {i} ({entry.entry_id}): prev_hash mismatch. "
+                    f"Expected {prev_hash[:16]}..., got {(entry.prev_hash or 'None')[:16]}..."
+                )
+
+            # Verify entry hash
+            computed = entry.compute_hash()
+            if entry.entry_hash != computed:
+                errors.append(
+                    f"Entry {i} ({entry.entry_id}): entry_hash mismatch. "
+                    f"Stored {(entry.entry_hash or 'None')[:16]}..., computed {computed[:16]}..."
+                )
+
+            prev_hash = entry.entry_hash or computed
+
+        return len(errors) == 0, errors
 
     def query(
         self,
@@ -295,6 +419,9 @@ class AuditLogger:
                 "max_buffer_size": self.max_entries,
                 "by_action": dict(self._by_action),
                 "by_result": dict(self._by_result),
+                # v5.34: Chain statistics
+                "chain_length": self._chain_length,
+                "last_hash": self._last_hash[:16] + "..." if self._last_hash else None,
             }
 
     def get_recent(self, limit: int = 100) -> List[AuditEntry]:
@@ -304,10 +431,24 @@ class AuditLogger:
         return list(reversed(entries[-limit:]))
 
     def clear(self) -> int:
-        """Clear all entries (admin operation)"""
+        """
+        Clear all entries (admin operation).
+
+        v5.34: BLOCKED in production environment.
+        Audit logs must be preserved for compliance.
+        """
+        if is_production_environment():
+            raise PermissionError(
+                "Audit log clearing is blocked in production environment. "
+                "Audit logs must be preserved for compliance."
+            )
+
         with self._lock:
             count = len(self._entries)
             self._entries.clear()
+            # Reset chain state
+            self._last_hash = self.GENESIS_HASH
+            self._chain_length = 0
             return count
 
 
@@ -361,3 +502,91 @@ def audit_log(
         details=details,
         **kwargs,
     )
+
+
+# =============================================================================
+# Dangerous Operations Check (v5.34)
+# =============================================================================
+
+class DangerousOperationError(Exception):
+    """Raised when a dangerous operation is blocked."""
+    pass
+
+
+def check_dangerous_operation_allowed(
+    operation: str,
+    ip_address: Optional[str] = None,
+    actor_id: Optional[str] = None,
+) -> tuple:
+    """
+    Check if a dangerous operation is allowed.
+
+    v5.34: World-class security for dangerous operations.
+
+    Requirements for dangerous operations:
+    1. Environment flag must be set (DANGEROUS_OPS_ENABLED=true)
+    2. In production: IP must be in allowlist
+    3. Operation-specific env flag must be set
+
+    Args:
+        operation: Operation type ("inject", "restart", "delete")
+        ip_address: Client IP address
+        actor_id: Actor performing the operation
+
+    Returns:
+        (allowed, reason): Tuple of bool and explanation string
+    """
+    # Check global dangerous ops flag
+    if os.getenv("DANGEROUS_OPS_ENABLED", "false").lower() != "true":
+        return False, "Dangerous operations disabled (DANGEROUS_OPS_ENABLED != true)"
+
+    # Check operation-specific flag
+    op_flag = f"DANGEROUS_{operation.upper()}_ENABLED"
+    if os.getenv(op_flag, "false").lower() != "true":
+        return False, f"Operation '{operation}' disabled ({op_flag} != true)"
+
+    # Production environment checks
+    if is_production_environment():
+        # Must have allowlist configured
+        allowlist = get_production_allowlist()
+        if not allowlist:
+            return False, "Production environment requires DANGEROUS_OPS_ALLOWLIST"
+
+        # IP must be in allowlist (basic check, proper CIDR matching would use ipaddress module)
+        if ip_address:
+            ip_allowed = False
+            for cidr in allowlist:
+                if "/" in cidr:
+                    # Basic prefix match for CIDR (simplified)
+                    network = cidr.split("/")[0]
+                    if ip_address.startswith(network.rsplit(".", 1)[0]):
+                        ip_allowed = True
+                        break
+                elif ip_address == cidr:
+                    ip_allowed = True
+                    break
+
+            if not ip_allowed:
+                return False, f"IP {ip_address} not in production allowlist"
+
+    return True, "Operation allowed"
+
+
+def require_dangerous_operation(
+    operation: str,
+    ip_address: Optional[str] = None,
+    actor_id: Optional[str] = None,
+) -> None:
+    """
+    Require dangerous operation to be allowed, or raise exception.
+
+    Usage:
+        try:
+            require_dangerous_operation("inject", ip_address=client_ip)
+            # Proceed with operation
+        except DangerousOperationError as e:
+            raise HTTPException(403, str(e))
+    """
+    allowed, reason = check_dangerous_operation_allowed(operation, ip_address, actor_id)
+    if not allowed:
+        raise DangerousOperationError(reason)

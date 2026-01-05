@@ -243,6 +243,47 @@ METRIC_TARGETS: Dict[str, MetricTarget] = {
         comparison="gt",
         unit="%",
     ),
+    # v5.34: World-class evidence-first metrics (from expert review)
+    "bundle_hash_stability_rate": MetricTarget(
+        name="bundle_hash_stability_rate",
+        description="Percentage of bundles with stable hash across recomputation",
+        target_value=100.0,  # Must be 100% (determinism requirement)
+        warning_threshold=100.0,  # No tolerance for instability
+        comparison="gt",
+        unit="%",
+    ),
+    "tainted_window_rate": MetricTarget(
+        name="tainted_window_rate",
+        description="Percentage of evidence windows marked as tainted (data quality issue)",
+        target_value=0.0,  # Target: no tainted windows
+        warning_threshold=1.0,  # Warning if > 1%
+        comparison="lt",
+        unit="%",
+    ),
+    "tiles_lag_seconds_p99": MetricTarget(
+        name="tiles_lag_seconds_p99",
+        description="99th percentile tile generation lag in seconds",
+        target_value=5.0,  # Target: < 5s
+        warning_threshold=10.0,  # Warning if > 10s
+        comparison="lt",
+        unit="s",
+    ),
+    "replay_classification_consistency": MetricTarget(
+        name="replay_classification_consistency",
+        description="Same evidence replay produces same reaction classification",
+        target_value=100.0,  # Must be 100% (determinism requirement)
+        warning_threshold=100.0,  # No tolerance for inconsistency
+        comparison="gt",
+        unit="%",
+    ),
+    "alert_noise_rate": MetricTarget(
+        name="alert_noise_rate",
+        description="Alerts that were not merged within suppression window (noise)",
+        target_value=5.0,  # Target: < 5% noise
+        warning_threshold=10.0,  # Warning if > 10%
+        comparison="lt",
+        unit="%",
+    ),
 }
 
 

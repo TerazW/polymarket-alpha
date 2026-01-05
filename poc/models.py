@@ -27,14 +27,16 @@ class ReactionType(Enum):
     """
     反应类型 - 系统的核心词汇表
     按优先级排序（分类时先检查优先级高的）
+
+    这些描述的是可观察的冲击后市场行为，不是意图、预期或方向。
     """
-    VACUUM = "VACUUM"       # 1. 最高优先级: 流动性完全消失
-    SWEEP = "SWEEP"         # 2. 多档被扫 / 快速重定价
-    CHASE = "CHASE"         # 3. 迁移但未必深度塌陷
-    PULL = "PULL"           # 4. 撤退: 立即取消
-    HOLD = "HOLD"           # 5. 防守: 快速补单
-    DELAYED = "DELAYED"     # 6. 犹豫/部分补单
-    NO_IMPACT = "NO_IMPACT" # 7. [v3] drop 太小，无意义 (防止 refill_ratio 爆炸)
+    VACUUM = "VACUUM"       # 1. 流动性低于阈值且持续
+    SWEEP = "SWEEP"         # 2. 连续成交移除多档流动性
+    CHASE = "CHASE"         # 3. 流动性仅在偏移后的价位重现
+    PULL = "PULL"           # 4. 冲击后流动性立即被取消（撤单）
+    HOLD = "HOLD"           # 5. 流动性在限定时间窗口内补充
+    DELAYED = "DELAYED"     # 6. 流动性延迟或部分补充
+    NO_IMPACT = "NO_IMPACT" # 7. 观察到的变化未超过反应阈值
 
 
 class LeadingEventType(Enum):
@@ -48,9 +50,15 @@ class LeadingEventType(Enum):
 
 
 class WindowType(Enum):
-    """反应窗口类型"""
-    FAST = "FAST"   # 8 秒窗口
-    SLOW = "SLOW"   # 30 秒窗口
+    """
+    反应窗口类型
+
+    FAST: 即时冲击后反应检测
+    SLOW: 持续性确认 / 延迟反应解决 / 冲击后稳定检查
+          注意：不是"趋势确认"，系统不确认趋势
+    """
+    FAST = "FAST"   # 8 秒窗口 - 即时反应
+    SLOW = "SLOW"   # 30 秒窗口 - 持续性确认
 
 
 class BeliefState(Enum):

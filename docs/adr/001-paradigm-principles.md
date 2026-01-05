@@ -3,6 +3,7 @@
 **Status:** Accepted
 **Date:** 2024-01-05
 **Authors:** System Architecture Team
+**Revised:** 2024-01-05 (v2 - Language cleanup for world-class evidence-first standards)
 
 ## Context
 
@@ -13,37 +14,49 @@ This document records the fundamental design principles of the Market Sensemakin
 > "看存在没意义，看反应才有意义"
 > "Observing existence is meaningless; observing reactions reveals meaning."
 
-Traditional order book analysis focuses on static snapshots—what orders exist at a moment. This system instead observes **reactions**: how the order book responds to external shocks (trades). The reaction pattern reveals the market maker's true belief state, which static analysis cannot capture.
+Traditional order book analysis focuses on static snapshots—what orders exist at a moment. This system instead observes **reactions**: how the order book responds to external shocks (trades). The reaction pattern reveals observable structural changes, which static analysis cannot capture.
+
+### Critical Constraint: NOT a Prediction System
+
+**This system does NOT predict price direction, value, probability, or expected return.**
+
+It only records and classifies observable market reactions to shocks. Any interpretation of "what the market will do" is explicitly out of scope and violates the system's paradigm.
 
 ## Decision
 
 We adopt the following paradigm principles as immutable constraints:
 
-### Principle 1: Reaction Classification (7 Atomic Types)
+---
 
-All observed market behavior must be classified into exactly 7 reaction types, ordered by severity:
+### Principle 1: Reaction Classification (7 Atomic, Evidence-Only Types)
 
-| Priority | Type | Chinese | Meaning |
-|----------|------|---------|---------|
-| 1 | VACUUM | 真空 | Complete liquidity disappearance |
-| 2 | SWEEP | 扫单 | Multiple levels swept / rapid repricing |
-| 3 | CHASE | 追价 | Anchor moved, belief repricing |
-| 4 | PULL | 撤退 | Immediate cancellation after shock |
-| 5 | HOLD | 防守 | Quick refill, firm belief defense |
-| 6 | DELAYED | 犹豫 | Partial/slow refill, wavering belief |
-| 7 | NO_IMPACT | 无影响 | Shock too small to matter |
+Reaction types describe **observable post-shock market behavior only**.
+They do NOT encode intent, expectation, valuation, or direction.
 
-**Rationale:** These 7 types form a complete vocabulary for describing market maker behavior. They are mutually exclusive and collectively exhaustive. The priority order ensures deterministic classification when multiple conditions apply.
+| Priority | Type | Evidence Definition |
+|----------|------|---------------------|
+| 1 | VACUUM | Liquidity at observed levels falls below absolute and relative thresholds for a sustained duration |
+| 2 | SWEEP | Consecutive trade executions remove liquidity across multiple adjacent price levels |
+| 3 | CHASE | Post-shock liquidity reappears only at shifted price levels, persisting beyond minimum duration |
+| 4 | PULL | Liquidity is cancelled immediately following a shock without proportional trade execution |
+| 5 | HOLD | Liquidity at the shocked level is replenished within a short, bounded time window |
+| 6 | DELAYED | Liquidity is partially replenished with measurable delay or reduced size |
+| 7 | NO_IMPACT | Observed changes do not exceed minimum reaction thresholds |
+
+**Rationale:** These 7 types form a complete vocabulary for describing observable market behavior. They are mutually exclusive and collectively exhaustive. The priority order ensures deterministic classification when multiple conditions apply.
 
 **Constraint:** The 7-type classification must be consistent between:
 - POC engine (`poc/models.py`)
 - Backend schemas (`backend/common/schemas.py`)
-- API responses (`/api/reaction-types`)
+- API responses (`/api/reactor/reactions`)
 - Frontend displays
 
-### Principle 2: Belief State Machine (4 States)
+---
 
-Market belief transitions through 4 discrete states:
+### Principle 2: Belief State Machine (4 Structural States)
+
+Belief states are **discrete structural summaries derived from reaction history**.
+They are NOT forecasts, probabilities, or trading recommendations.
 
 ```
 STABLE ──> FRAGILE ──> CRACKING ──> BROKEN
@@ -52,12 +65,12 @@ STABLE ──> FRAGILE ──> CRACKING ──> BROKEN
               (recovery possible)
 ```
 
-| State | Indicator | Meaning |
-|-------|-----------|---------|
-| STABLE | 🟢 | Strong defense, hold_ratio >= 70% |
-| FRAGILE | 🟡 | Wavering, single PULL or CHASE/SWEEP detected |
-| CRACKING | 🟠 | Breaking, VACUUM or multiple PULLs |
-| BROKEN | 🔴 | Collapsed, multi-anchor VACUUM or repeated warning signals |
+| State | Evidence Criteria |
+|-------|-------------------|
+| STABLE | Strong structural defense observed (hold_ratio >= 70%, no recent retreats) |
+| FRAGILE | Structural weakening signals detected (isolated retreat or level migration) |
+| CRACKING | Structural failure signals detected (vacuum or repeated retreats) |
+| BROKEN | Structural collapse signals detected (multi-anchor vacuum or repeated warning signals) |
 
 **State Transition Rules (Deterministic):**
 
@@ -82,12 +95,26 @@ STABLE (default):
   - All other cases
 ```
 
+---
+
 ### Principle 3: Determinism Guarantee
 
 > "同一证据包，不同机器回放结果必须相同"
 > "Same evidence bundle, different machines, identical replay results."
 
-The system must produce **bit-identical** outputs for identical inputs:
+The system must produce **bit-identical** outputs for identical inputs.
+
+**Determinism applies to:**
+- Reaction classification
+- Belief state transitions
+- Evidence bundle hashes
+
+**All computations must depend exclusively on:**
+- Canonicalized raw events (normalized, sorted)
+- Event timestamps (NOT wall-clock time)
+- Versioned configuration parameters
+
+**Implementation Requirements:**
 
 1. **Event Ordering:** Events with same timestamp must have stable sort order via `(ts, sort_seq, token_id, type)` tuple.
 
@@ -102,6 +129,8 @@ The system must produce **bit-identical** outputs for identical inputs:
 
 **Testing Requirement:** All determinism guarantees must have adversarial tests in `tests/adversarial/test_determinism.py` and `tests/adversarial/test_belief_state_replay.py`.
 
+---
+
 ### Principle 4: Evidence Trail Completeness
 
 Every state change must be traceable to source events:
@@ -114,7 +143,11 @@ StateChange
   └── evidence_refs[] (event IDs for replay)
 ```
 
-**Constraint:** No state change without evidence. The `evidence_refs` must point to actual events in the 30-minute rolling window.
+**Critical Constraint:** No state change is valid without a complete and replayable evidence trail. States without verifiable evidence are considered invalid.
+
+The `evidence_refs` must point to actual events in the 30-minute rolling window.
+
+---
 
 ### Principle 5: Anchor-Centric Analysis
 
@@ -127,7 +160,20 @@ Anchor selection criteria:
 
 Top K anchors (default K=5) per side (bid/ask) are tracked.
 
-### Principle 6: Security by Design
+---
+
+### Principle 6: Dual-Window Architecture
+
+| Window | Duration | Purpose |
+|--------|----------|---------|
+| FAST | 8 seconds | Immediate post-shock reaction detection |
+| SLOW | 30 seconds | Persistence confirmation / delayed reaction resolution / post-shock stabilization check |
+
+**Note:** SLOW window is NOT "trend confirmation" - the system does not confirm trends. It confirms whether observed reactions persist or resolve.
+
+---
+
+### Principle 7: Security by Design
 
 Dangerous operations require multiple authorization layers:
 
@@ -143,6 +189,8 @@ All dangerous operations are logged to audit trail with:
 - Operation details
 - Client IP and user agent
 
+---
+
 ## Consequences
 
 ### Positive
@@ -151,6 +199,7 @@ All dangerous operations are logged to audit trail with:
 2. **Reproducibility:** Replays produce identical results
 3. **Testability:** Deterministic rules enable comprehensive testing
 4. **Interpretability:** 7 reaction types + 4 states = human-understandable vocabulary
+5. **Non-drift:** Evidence-only language prevents paradigm corruption
 
 ### Negative
 
@@ -162,6 +211,8 @@ All dangerous operations are logged to audit trail with:
 
 1. **Learning Curve:** New developers must understand the paradigm
 2. **Documentation:** Principles must be kept in sync with implementation
+
+---
 
 ## Compliance Verification
 
@@ -176,8 +227,12 @@ The following tests verify compliance with these principles:
 | Anchor Analysis | `tests/test_leading_events.py` |
 | Security | `tests/test_reactor_api.py::TestEventInjection` |
 
+---
+
 ## References
 
+- [ADR-003: Language & Label Governance](./003-language-governance.md)
+- [ADR-004: Evidence Integrity Contract](./004-evidence-integrity.md)
 - [Belief Reaction System Whitebook](../Belief_Reaction_System_Whitebook.txt)
 - [Engineering Spec](../Belief_Reaction_System_Engineering_Spec.txt)
 - [Replay Spec](../REPLAY_SPEC.md)
