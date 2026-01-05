@@ -3,12 +3,18 @@ Belief Reaction System - v1 API Routes
 Implements OpenAPI spec endpoints
 """
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, WebSocket, WebSocketDisconnect
 from typing import Optional, Literal
 import time
 import base64
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+# v5.9: WebSocket stream support
+from ..stream import (
+    stream_manager, parse_subscription_message,
+    StreamEventType, StreamMessage, publish_alert
+)
 
 from ..schemas.v1 import (
     # Responses
@@ -777,3 +783,242 @@ def get_heatmap_tiles(
             ),
             tiles=[],
         )
+
+
+# =============================================================================
+# Alert ACK API (v5.9)
+# =============================================================================
+
+from pydantic import BaseModel
+
+
+class AlertAckRequest(BaseModel):
+    """Request body for acknowledging an alert"""
+    note: Optional[str] = None
+    acked_by: Optional[str] = None
+
+
+class AlertAckResponse(BaseModel):
+    """Response for alert acknowledgment"""
+    alert_id: str
+    status: AlertStatus
+    acked_at: int
+    acked_by: Optional[str] = None
+    note: Optional[str] = None
+
+
+@router.put("/alerts/{alert_id}/ack", response_model=AlertAckResponse)
+async def acknowledge_alert(
+    alert_id: str,
+    body: AlertAckRequest = None,
+):
+    """
+    Acknowledge an alert, changing its status from OPEN to ACKED.
+
+    - **alert_id**: The ID of the alert to acknowledge
+    - **note**: Optional note explaining the acknowledgment
+    - **acked_by**: Optional identifier of who acknowledged (user/system)
+    """
+    try:
+        conn = get_db_connection()
+        acked_at = int(time.time() * 1000)
+        note = body.note if body else None
+        acked_by = body.acked_by if body else None
+
+        with conn.cursor() as cur:
+            # Check if alert exists and is in OPEN state
+            cur.execute("""
+                SELECT alert_id, status, token_id, severity, summary
+                FROM alerts
+                WHERE alert_id = %s
+            """, (alert_id,))
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+            current_status = row['status']
+
+            if current_status == 'RESOLVED':
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Alert {alert_id} is already resolved and cannot be acknowledged"
+                )
+
+            # Update alert status
+            cur.execute("""
+                UPDATE alerts
+                SET status = 'ACKED',
+                    acked_at = to_timestamp(%s / 1000.0),
+                    acked_by = %s,
+                    ack_note = %s
+                WHERE alert_id = %s
+                RETURNING alert_id, status
+            """, (acked_at, acked_by, note, alert_id))
+
+            conn.commit()
+
+        conn.close()
+
+        # Broadcast alert update via WebSocket
+        await publish_alert(
+            {
+                "alert_id": alert_id,
+                "token_id": row['token_id'],
+                "status": "ACKED",
+                "severity": row['severity'],
+                "summary": row['summary'],
+                "acked_at": acked_at,
+                "acked_by": acked_by,
+            },
+            event_type=StreamEventType.ALERT_UPDATED
+        )
+
+        return AlertAckResponse(
+            alert_id=alert_id,
+            status=AlertStatus.ACKED,
+            acked_at=acked_at,
+            acked_by=acked_by,
+            note=note,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/alerts/{alert_id}/resolve", response_model=AlertAckResponse)
+async def resolve_alert(
+    alert_id: str,
+    body: AlertAckRequest = None,
+):
+    """
+    Resolve an alert, changing its status to RESOLVED.
+
+    - **alert_id**: The ID of the alert to resolve
+    - **note**: Optional note explaining the resolution
+    - **acked_by**: Optional identifier of who resolved (user/system)
+    """
+    try:
+        conn = get_db_connection()
+        resolved_at = int(time.time() * 1000)
+        note = body.note if body else None
+        resolved_by = body.acked_by if body else None
+
+        with conn.cursor() as cur:
+            # Check if alert exists
+            cur.execute("""
+                SELECT alert_id, status, token_id, severity, summary
+                FROM alerts
+                WHERE alert_id = %s
+            """, (alert_id,))
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+            # Update alert status
+            cur.execute("""
+                UPDATE alerts
+                SET status = 'RESOLVED',
+                    resolved_at = to_timestamp(%s / 1000.0),
+                    resolved_by = %s,
+                    resolve_note = %s
+                WHERE alert_id = %s
+                RETURNING alert_id, status
+            """, (resolved_at, resolved_by, note, alert_id))
+
+            conn.commit()
+
+        conn.close()
+
+        # Broadcast alert resolution via WebSocket
+        await publish_alert(
+            {
+                "alert_id": alert_id,
+                "token_id": row['token_id'],
+                "status": "RESOLVED",
+                "severity": row['severity'],
+                "summary": row['summary'],
+                "resolved_at": resolved_at,
+                "resolved_by": resolved_by,
+            },
+            event_type=StreamEventType.ALERT_RESOLVED
+        )
+
+        return AlertAckResponse(
+            alert_id=alert_id,
+            status=AlertStatus.RESOLVED,
+            acked_at=resolved_at,
+            acked_by=resolved_by,
+            note=note,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# WebSocket Stream API (v5.9)
+# =============================================================================
+
+@router.websocket("/stream")
+async def websocket_stream(websocket: WebSocket):
+    """
+    Real-time event stream via WebSocket.
+
+    Clients connect and receive events matching their subscription.
+
+    ## Connection Flow:
+    1. Connect to ws://host/v1/stream
+    2. Receive subscription.confirmed message
+    3. Optionally send subscription update:
+       ```json
+       {
+         "action": "subscribe",
+         "token_ids": ["token1", "token2"],
+         "event_types": ["shock", "alert.new"],
+         "min_severity": "HIGH"
+       }
+       ```
+    4. Receive events matching subscription
+
+    ## Event Types:
+    - shock: Shock detection events
+    - reaction: Reaction classification events
+    - leading_event: Leading indicator events
+    - belief_state: Belief state changes
+    - alert.new: New alerts
+    - alert.updated: Alert status changes
+    - alert.resolved: Alert resolutions
+    - tile.ready: New heatmap tile available
+    - data.gap: Data gap warning
+    - hash.mismatch: Hash verification failure
+    - heartbeat: Connection keepalive (every 30s)
+    """
+    conn_id = await stream_manager.connect(websocket)
+
+    try:
+        while True:
+            # Wait for messages from client (subscription updates)
+            data = await websocket.receive_text()
+
+            # Parse subscription update
+            subscription = parse_subscription_message(data)
+            if subscription:
+                await stream_manager.update_subscription(conn_id, subscription)
+            else:
+                # Unknown message, send error
+                await websocket.send_text(StreamMessage(
+                    type=StreamEventType.ERROR,
+                    payload={"message": "Invalid message format", "received": data[:100]}
+                ).to_json())
+
+    except WebSocketDisconnect:
+        await stream_manager.disconnect(conn_id)
+    except Exception as e:
+        print(f"[STREAM] Error in connection {conn_id}: {e}")
+        await stream_manager.disconnect(conn_id)
