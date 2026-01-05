@@ -10,20 +10,27 @@ Usage:
 This job:
 1. Fetches recent evidence bundles from database
 2. Verifies hash integrity for each
-3. Reports mismatches via alert/log
+3. Reports mismatches via alert router (Slack, WebSocket, etc.)
 4. Maintains audit trail
 
 "线上防腐层 - 自动化持续验证"
 """
 
 import argparse
+import asyncio
 import time
 import json
+import random
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 from backend.replay.verifier import BundleVerifier, VerificationStatus, VerificationResult
+from backend.alerting import (
+    AlertRouter, AlertPayload, AlertPriority, AlertCategory,
+    WebSocketBroadcastDestination, LogDestination, SlackDestination,
+    create_router_from_config, get_default_router
+)
 
 # Configure logging
 logging.basicConfig(
@@ -48,6 +55,7 @@ class BundleVerificationJob:
         sample_rate: float = 0.1,  # Verify 10% of bundles by default
         max_age_hours: int = 24,   # Only verify bundles from last 24h
         alert_on_mismatch: bool = True,
+        alert_router: Optional[AlertRouter] = None,
     ):
         self.db_config = db_config or {
             'host': '127.0.0.1',
@@ -59,6 +67,7 @@ class BundleVerificationJob:
         self.sample_rate = sample_rate
         self.max_age_hours = max_age_hours
         self.alert_on_mismatch = alert_on_mismatch
+        self.alert_router = alert_router or get_default_router()
 
         self.verifier = BundleVerifier()
 
@@ -74,7 +83,11 @@ class BundleVerificationJob:
         }
 
     def run_once(self) -> Dict[str, Any]:
-        """Run verification once"""
+        """Run verification once (sync wrapper)"""
+        return asyncio.get_event_loop().run_until_complete(self._run_once_async())
+
+    async def _run_once_async(self) -> Dict[str, Any]:
+        """Run verification once (async)"""
         run_start = datetime.now()
         logger.info(f"Starting bundle verification run at {run_start.isoformat()}")
 
@@ -97,13 +110,16 @@ class BundleVerificationJob:
                     self.stats["last_mismatch"] = datetime.now().isoformat()
 
                     if self.alert_on_mismatch:
-                        self._alert_mismatch(result)
+                        await self._alert_mismatch(result)
 
                 self.stats["bundles_checked"] += 1
 
         except Exception as e:
             logger.error(f"Verification run error: {e}")
             self.stats["errors"] += 1
+
+            # Alert on system error
+            await self._alert_system_error(str(e))
 
         self.stats["runs"] += 1
         self.stats["last_run"] = datetime.now().isoformat()
@@ -123,38 +139,78 @@ class BundleVerificationJob:
 
     def _fetch_bundles(self) -> List[Dict]:
         """Fetch bundles from database for verification"""
-        # TODO: Implement actual database fetch
-        # For now, return empty list as placeholder
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
 
-        # In production, this would:
-        # 1. Connect to database
-        # 2. Query evidence_bundles table for recent entries
-        # 3. Apply sampling if sample_rate < 1.0
-        # 4. Return list of (bundle_data, expected_hash) tuples
+            conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
+            cutoff = datetime.now() - timedelta(hours=self.max_age_hours)
 
-        logger.warning("Database fetch not implemented - returning empty list")
-        return []
+            with conn.cursor() as cur:
+                # Check if evidence_bundles table exists
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'evidence_bundles'
+                    )
+                """)
+                table_exists = cur.fetchone()['exists']
 
-        # Example implementation:
-        # import psycopg2
-        # from psycopg2.extras import RealDictCursor
-        #
-        # conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
-        # cutoff = datetime.now() - timedelta(hours=self.max_age_hours)
-        #
-        # with conn.cursor() as cur:
-        #     cur.execute("""
-        #         SELECT token_id, t0, bundle_json, bundle_hash
-        #         FROM evidence_bundles
-        #         WHERE created_at > %s
-        #         ORDER BY RANDOM()
-        #         LIMIT %s
-        #     """, (cutoff, int(1000 * self.sample_rate)))
-        #
-        #     rows = cur.fetchall()
-        #
-        # conn.close()
-        # return rows
+                if not table_exists:
+                    logger.warning("evidence_bundles table does not exist yet")
+                    conn.close()
+                    return []
+
+                # Calculate sample limit
+                cur.execute("SELECT COUNT(*) FROM evidence_bundles WHERE created_at > %s", (cutoff,))
+                total_count = cur.fetchone()['count']
+                sample_limit = max(1, int(total_count * self.sample_rate))
+
+                logger.info(f"Total bundles in range: {total_count}, sampling {sample_limit}")
+
+                # Fetch random sample of bundles
+                cur.execute("""
+                    SELECT
+                        bundle_id,
+                        token_id,
+                        t0,
+                        bundle_json,
+                        bundle_hash,
+                        created_at
+                    FROM evidence_bundles
+                    WHERE created_at > %s
+                    ORDER BY RANDOM()
+                    LIMIT %s
+                """, (cutoff, sample_limit))
+
+                rows = cur.fetchall()
+
+            conn.close()
+
+            # Convert to list of dicts
+            bundles = []
+            for row in rows:
+                bundle_json = row['bundle_json']
+                if isinstance(bundle_json, str):
+                    bundle_json = json.loads(bundle_json)
+
+                bundles.append({
+                    'bundle_id': row['bundle_id'],
+                    'token_id': row['token_id'],
+                    't0': row['t0'],
+                    'bundle_json': bundle_json,
+                    'bundle_hash': row['bundle_hash'],
+                    'created_at': row['created_at'],
+                })
+
+            return bundles
+
+        except ImportError:
+            logger.warning("psycopg2 not available - returning empty bundle list")
+            return []
+        except Exception as e:
+            logger.error(f"Error fetching bundles: {e}")
+            return []
 
     def _verify_bundle(self, bundle_data: Dict) -> VerificationResult:
         """Verify a single bundle"""
@@ -177,26 +233,74 @@ class BundleVerificationJob:
 
         return result
 
-    def _alert_mismatch(self, result: VerificationResult):
-        """Send alert for hash mismatch"""
-        logger.critical(
-            f"ALERT: Hash mismatch detected!\n"
-            f"Bundle: {result.bundle_id}\n"
-            f"Token: {result.token_id}\n"
-            f"T0: {result.t0}\n"
-            f"Expected: {result.expected_hash}\n"
-            f"Computed: {result.computed_hash}"
+    async def _alert_mismatch(self, result: VerificationResult):
+        """Send alert for hash mismatch via router"""
+        # Determine priority based on failure type
+        priority = AlertPriority.HIGH
+        if result.overall_status == VerificationStatus.CRITICAL_FAIL:
+            priority = AlertPriority.CRITICAL
+
+        # Build failure details
+        failed_checks = [
+            f"- {c.check_name}: {c.message}"
+            for c in result.checks
+            if c.status != VerificationStatus.PASS
+        ]
+        failure_details = "\n".join(failed_checks) if failed_checks else "Unknown failure"
+
+        alert = AlertPayload(
+            alert_id=f"hash_mismatch_{result.bundle_id}_{int(time.time())}",
+            category=AlertCategory.HASH_MISMATCH,
+            priority=priority,
+            title=f"Bundle Hash Mismatch: {result.bundle_id[:16]}...",
+            message=(
+                f"Evidence bundle verification failed!\n\n"
+                f"**Token:** `{result.token_id}`\n"
+                f"**T0:** {result.t0}\n"
+                f"**Expected:** `{result.expected_hash[:16]}...`\n"
+                f"**Computed:** `{result.computed_hash[:16]}...`\n\n"
+                f"**Failed Checks:**\n{failure_details}"
+            ),
+            token_id=result.token_id,
+            data={
+                "bundle_id": result.bundle_id,
+                "expected_hash": result.expected_hash,
+                "computed_hash": result.computed_hash,
+                "checks": [c.to_dict() for c in result.checks],
+            },
+            evidence_ref={
+                "token_id": result.token_id,
+                "t0": result.t0,
+            }
         )
 
-        # TODO: Send to alert system, Slack, PagerDuty, etc.
+        # Route to all configured destinations
+        routing_results = await self.alert_router.route(alert)
+        logger.info(f"Alert routed: {routing_results}")
+
+    async def _alert_system_error(self, error_msg: str):
+        """Send alert for system error"""
+        alert = AlertPayload(
+            alert_id=f"verify_error_{int(time.time())}",
+            category=AlertCategory.SYSTEM,
+            priority=AlertPriority.HIGH,
+            title="Bundle Verification Job Error",
+            message=f"The bundle verification job encountered an error:\n\n```\n{error_msg}\n```",
+            data={"error": error_msg},
+        )
+
+        await self.alert_router.route(alert)
 
     def run_continuous(self, interval_seconds: int = 3600):
         """Run verification continuously at given interval"""
         logger.info(f"Starting continuous verification (interval: {interval_seconds}s)")
 
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         while True:
             try:
-                self.run_once()
+                loop.run_until_complete(self._run_once_async())
             except Exception as e:
                 logger.error(f"Error in verification run: {e}")
 
@@ -240,18 +344,46 @@ def main():
         action='store_true',
         help='Disable alerts on mismatch'
     )
+    parser.add_argument(
+        '--slack-webhook',
+        type=str,
+        help='Slack webhook URL for alerts'
+    )
+    parser.add_argument(
+        '--config',
+        type=str,
+        help='Path to JSON config file for alert routing'
+    )
 
     args = parser.parse_args()
+
+    # Build alert router
+    if args.config:
+        with open(args.config) as f:
+            config = json.load(f)
+        router = create_router_from_config(config)
+    elif args.slack_webhook:
+        router = AlertRouter()
+        router.add_destination(SlackDestination(
+            webhook_url=args.slack_webhook,
+            min_priority=AlertPriority.HIGH
+        ))
+        router.add_destination(WebSocketBroadcastDestination())
+        router.add_destination(LogDestination())
+    else:
+        router = get_default_router()
 
     job = BundleVerificationJob(
         sample_rate=args.sample_rate,
         max_age_hours=args.max_age,
         alert_on_mismatch=not args.no_alert,
+        alert_router=router,
     )
 
     if args.once:
-        result = job.run_once()
-        print(json.dumps(result, indent=2))
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(job._run_once_async())
+        print(json.dumps(result, indent=2, default=str))
     else:
         job.run_continuous(interval_seconds=args.interval)
 
