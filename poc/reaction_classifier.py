@@ -28,6 +28,9 @@ from decimal import Decimal
 from typing import Optional, Dict, List, Tuple
 import time
 
+# v5.13: Determinism infrastructure
+from backend.common.determinism import deterministic_now
+
 from .models import (
     ShockEvent, ReactionEvent, ReactionMetrics, ReactionType, PriceLevel, WindowType
 )
@@ -414,10 +417,20 @@ class ReactionClassifier:
         reaction_type: ReactionType,
         window_type: WindowType
     ) -> ReactionEvent:
-        """Create a ReactionEvent from metrics."""
+        """
+        Create a ReactionEvent from metrics.
+
+        v5.13: Timestamp is based on shock timestamp + observation window,
+        not wall clock time. This ensures deterministic replay.
+        """
+        # v5.13: Use shock timestamp + window duration for determinism
+        # The reaction is classified after the observation window ends
+        window_ms = REACTION_FAST_WINDOW_MS if window_type == WindowType.FAST else REACTION_SLOW_WINDOW_MS
+        reaction_ts = shock.timestamp + window_ms
+
         return ReactionEvent(
             shock_id=shock.shock_id,
-            timestamp=int(time.time() * 1000),
+            timestamp=reaction_ts,
             token_id=shock.token_id,
             price=shock.price,
             side=shock.side,

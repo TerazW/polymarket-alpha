@@ -21,6 +21,9 @@ from dataclasses import dataclass, field
 import time
 import math
 
+# v5.13: Determinism infrastructure
+from backend.common.determinism import deterministic_now
+
 from .models import (
     LeadingEvent, LeadingEventType, AnchorLevel, PriceLevel
 )
@@ -722,9 +725,14 @@ class LeadingEventDetector:
         """获取当前 anchor 列表"""
         return self.anchor_tracker.get_anchors(token_id)
 
-    def get_recent_events(self, window_ms: int = 60000) -> List[LeadingEvent]:
-        """获取最近的领先事件"""
-        current_time = int(time.time() * 1000)
+    def get_recent_events(self, window_ms: int = 60000, reference_ts: int = None) -> List[LeadingEvent]:
+        """
+        获取最近的领先事件
+
+        v5.13: 支持传入参考时间以确保确定性
+        """
+        # v5.13: Use reference timestamp if provided, otherwise deterministic clock
+        current_time = reference_ts if reference_ts else deterministic_now(context="LeadingEventDetector.get_recent_events")
         cutoff = current_time - window_ms
         return [e for e in self.events if e.timestamp >= cutoff]
 

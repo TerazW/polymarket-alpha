@@ -16,6 +16,9 @@ from decimal import Decimal
 from typing import Optional, Dict, List, Callable, Set
 import time
 
+# v5.13: Determinism infrastructure
+from backend.common.determinism import deterministic_now
+
 from .models import (
     BeliefState, BeliefStateChange, ReactionEvent, ReactionType,
     PriceLevel, STATE_INDICATORS
@@ -89,10 +92,13 @@ class BeliefStateMachine:
         if new_state != self.state:
             old_state = self.state
             self.state = new_state
-            now = int(time.time() * 1000)
+            # v5.13: Use trigger event's timestamp for deterministic replay
+            # The state change logically happens at the same time as the trigger
+            change_ts = trigger.timestamp if hasattr(trigger, 'timestamp') and trigger.timestamp else \
+                        deterministic_now(context="BeliefStateMachine._evaluate_transition")
 
             change = BeliefStateChange(
-                timestamp=now,
+                timestamp=change_ts,
                 token_id=self.token_id,
                 old_state=old_state,
                 new_state=new_state,
@@ -101,7 +107,7 @@ class BeliefStateMachine:
             )
 
             self.state_changes.append(change)
-            self.last_transition_ts = now
+            self.last_transition_ts = change_ts
 
             if self.on_state_change:
                 self.on_state_change(change)

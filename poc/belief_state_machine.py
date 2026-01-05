@@ -21,6 +21,9 @@ from typing import Optional, Dict, List, Tuple, Set
 from dataclasses import dataclass, field
 import time
 
+# v5.13: Determinism infrastructure
+from backend.common.determinism import deterministic_now
+
 from .models import (
     BeliefState, BeliefStateChange, ReactionEvent, ReactionType,
     LeadingEvent, LeadingEventType, AnchorLevel, STATE_INDICATORS
@@ -380,9 +383,14 @@ class BeliefStateMachine:
         """获取状态上下文"""
         return self.contexts.get(token_id)
 
-    def get_recent_changes(self, window_ms: int = 300000) -> List[BeliefStateChange]:
-        """获取最近的状态变化"""
-        current_time = int(time.time() * 1000)
+    def get_recent_changes(self, window_ms: int = 300000, reference_ts: int = None) -> List[BeliefStateChange]:
+        """
+        获取最近的状态变化
+
+        v5.13: 支持传入参考时间以确保确定性
+        """
+        # v5.13: Use reference timestamp if provided, otherwise deterministic clock
+        current_time = reference_ts if reference_ts else deterministic_now(context="BeliefStateMachine.get_recent_changes")
         cutoff = current_time - window_ms
         return [c for c in self.state_changes if c.timestamp >= cutoff]
 

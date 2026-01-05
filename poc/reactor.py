@@ -23,6 +23,11 @@ from typing import Optional, Dict, List, Callable, Tuple
 import threading
 import time
 
+# v5.13: Determinism infrastructure
+from backend.common.determinism import (
+    get_event_clock, deterministic_now, ReplayContext, ProcessingMode
+)
+
 from .event_bus import EventBus, RawEvent, EventType
 from .models import (
     PriceLevel, TradeEvent, ShockEvent, ReactionEvent,
@@ -274,10 +279,17 @@ class Reactor:
             self.sample_thread.join(timeout=2)
 
     def _get_current_time(self) -> int:
-        """Get current time (milliseconds)"""
+        """
+        Get current time (milliseconds).
+
+        v5.13: Uses deterministic event clock.
+        In replay mode, returns the event timestamp set by process_event.
+        In live mode, uses wall clock but warns (for audit trail).
+        """
         if self.replay_mode:
             return self._current_time
-        return int(time.time() * 1000)
+        # v5.13: Use deterministic clock (will warn in LIVE mode)
+        return deterministic_now(context="Reactor._get_current_time")
 
     def _get_or_create_book(self, token_id: str) -> OrderBookState:
         if token_id not in self.order_books:
