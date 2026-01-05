@@ -3,9 +3,10 @@ Belief Reaction System - FastAPI Backend
 启动命令: uvicorn backend.api.main:app --reload
 """
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
+import time
 from typing import Optional
 
 # Import v1 routes
@@ -13,6 +14,9 @@ from .routes import v1_router
 
 # v5.9: WebSocket stream manager
 from .stream import stream_manager
+
+# v5.12: Monitoring and metrics
+from backend.monitoring import get_metrics_registry, metrics_middleware
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -32,6 +36,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# v5.12: Apply metrics middleware
+metrics_middleware(app)
+
+# Store start time for uptime calculation
+APP_START_TIME = time.time()
 
 
 # ============================================================================
@@ -53,6 +63,18 @@ def root():
 def health():
     """健康检查"""
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    """
+    Prometheus metrics endpoint.
+
+    Returns metrics in Prometheus text format for scraping.
+    """
+    registry = get_metrics_registry()
+    content = registry.export_prometheus()
+    return Response(content=content, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/api/reaction-types")
@@ -296,9 +318,11 @@ async def startup():
     print()
     print("  API 文档: http://localhost:8000/docs")
     print("  健康检查: http://localhost:8000/health")
+    print("  Metrics:  http://localhost:8000/metrics")
     print()
     print("  v1 Endpoints:")
     print("    GET  /v1/health         - Health check")
+    print("    GET  /v1/health/deep    - Deep health check")
     print("    GET  /v1/radar          - Market radar")
     print("    GET  /v1/evidence       - Evidence window")
     print("    GET  /v1/alerts         - Alerts list")
