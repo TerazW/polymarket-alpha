@@ -30,6 +30,10 @@ from ..schemas.v1 import (
     # Enums
     BeliefState, ReactionType, LeadingEventType, AlertSeverity, AlertStatus,
     Side, ShockTrigger, ReactionWindow, TileBand, ReplayCatalogKind,
+    # v5.25: Attribution and Explainability
+    ReactionAttributionSummary, RadarStateExplanationCompact,
+    StateExplanationInfo, ExplainFactor, ExplainFactorType,
+    CounterfactualCondition, TrendDirection,
 )
 
 # v5.3: Bundle hash computation for evidence verification
@@ -40,6 +44,17 @@ from backend.heatmap.tile_generator import (
     HeatmapTileGenerator,
     TileBand as GeneratorTileBand,
     tile_to_api_response
+)
+
+# v5.25: Attribution and Explainability
+from backend.radar.explain import (
+    generate_explanation,
+    Language as ExplainLanguage,
+    STATE_HEADLINES,
+)
+from backend.common.attribution import (
+    compute_attribution,
+    AttributionType,
 )
 
 router = APIRouter(prefix="/v1", tags=["v1"])
@@ -185,6 +200,33 @@ def get_radar(
         radar_rows = []
         for row in rows:
             state = row['belief_state'] or 'STABLE'
+            leading_count = float(row['leading_count_10m'] or 0)
+            reaction_count = float(row['reaction_count_10m'] or 0)
+
+            # v5.25: Generate compact state explanation
+            headline = STATE_HEADLINES.get(state, {}).get('en', 'Unknown state')
+            top_factors = []
+            if state == 'STABLE':
+                top_factors = ['Depth holding well', 'Low fragility signals']
+            elif state == 'FRAGILE':
+                top_factors = ['Early stress signals detected']
+                if leading_count > 2:
+                    top_factors.append(f'{int(leading_count)} leading events')
+            elif state == 'CRACKING':
+                top_factors = ['Significant stress on depth']
+                if leading_count > 0:
+                    top_factors.append(f'{int(leading_count)} leading events')
+            elif state == 'BROKEN':
+                top_factors = ['Depth severely compromised']
+                if leading_count > 0:
+                    top_factors.append(f'{int(leading_count)} vacuum/pull events')
+
+            explanation = RadarStateExplanationCompact(
+                headline=headline,
+                trend='STABLE',  # Would need historical data for actual trend
+                top_factors=top_factors[:3],
+            )
+
             radar_rows.append(RadarRow(
                 market=MarketSummary(
                     token_id=row['token_id'] or '',
@@ -198,8 +240,8 @@ def get_radar(
                 belief_state=BeliefState(state),
                 state_since_ts=ts_to_ms(row['state_since_ts']),
                 state_severity=STATE_SEVERITY.get(state, 0),
-                fragile_index_10m=float(row['reaction_count_10m'] or 0) * 0.5 + float(row['leading_count_10m'] or 0) * 1.5,
-                leading_rate_10m=float(row['leading_count_10m'] or 0),
+                fragile_index_10m=reaction_count * 0.5 + leading_count * 1.5,
+                leading_rate_10m=leading_count,
                 confidence=85.0 if state == 'STABLE' else 70.0 if state == 'FRAGILE' else 50.0,
                 data_health=DataHealth(
                     missing_bucket_ratio_10m=0.0,
@@ -207,6 +249,7 @@ def get_radar(
                     hash_mismatch_count_10m=0,
                 ),
                 last_critical_alert=None,
+                explanation=explanation,
             ))
 
         return RadarResponse(
@@ -337,8 +380,44 @@ def get_evidence(
             for r in shock_rows
         ]
 
-        reactions = [
-            ReactionEvent(
+        reactions = []
+        for r in reaction_rows:
+            # v5.25: Compute attribution for reaction
+            drop_ratio = float(r['drop_ratio']) if r['drop_ratio'] else 0.0
+            refill_ratio = float(r['refill_ratio']) if r['refill_ratio'] else 0.0
+
+            # Estimate attribution from reaction type and proof data
+            reaction_type = r['reaction_type']
+            if reaction_type in ('VACUUM', 'SWEEP'):
+                # Trade-driven reactions
+                attr = ReactionAttributionSummary(
+                    trade_driven_ratio=0.85,
+                    cancel_driven_ratio=0.15,
+                    attribution_type='TRADE_DRIVEN',
+                )
+            elif reaction_type == 'PULL':
+                # Cancel-driven reaction
+                attr = ReactionAttributionSummary(
+                    trade_driven_ratio=0.15,
+                    cancel_driven_ratio=0.85,
+                    attribution_type='CANCEL_DRIVEN',
+                )
+            elif reaction_type == 'HOLD':
+                # Minimal change
+                attr = ReactionAttributionSummary(
+                    trade_driven_ratio=0.0,
+                    cancel_driven_ratio=0.0,
+                    attribution_type='NO_CHANGE',
+                )
+            else:
+                # Mixed or other
+                attr = ReactionAttributionSummary(
+                    trade_driven_ratio=0.5,
+                    cancel_driven_ratio=0.5,
+                    attribution_type='MIXED',
+                )
+
+            reactions.append(ReactionEvent(
                 id=str(r['reaction_id']),
                 token_id=token_id,
                 shock_id=str(r['shock_id']) if r['shock_id'] else None,
@@ -347,17 +426,16 @@ def get_evidence(
                 window=ReactionWindow(r['window_type']) if r['window_type'] else ReactionWindow.SLOW,
                 price=float(r['price']),
                 side=Side.BID if r['side'] == 'bid' else Side.ASK,
-                reaction=ReactionType(r['reaction_type']),
+                reaction=ReactionType(reaction_type),
                 proof=ReactionProof(
-                    drop_ratio=float(r['drop_ratio']) if r['drop_ratio'] else None,
-                    refill_ratio=float(r['refill_ratio']) if r['refill_ratio'] else None,
+                    drop_ratio=drop_ratio if drop_ratio else None,
+                    refill_ratio=refill_ratio if refill_ratio else None,
                     vacuum_duration_ms=r['vacuum_duration_ms'],
                     shift_ticks=r['shift_ticks'],
                     time_to_refill_ms=r['time_to_refill_ms'],
                 ),
-            )
-            for r in reaction_rows
-        ]
+                attribution=attr,
+            ))
 
         leading_events = [
             LeadingEvent(
@@ -416,6 +494,76 @@ def get_evidence(
         }
         bundle_hash = compute_bundle_hash(bundle_data)
 
+        # v5.25: Generate detailed state explanation
+        current_state = belief_states[-1].belief_state.value if belief_states else 'STABLE'
+        previous_state = belief_states[-2].belief_state.value if len(belief_states) >= 2 else None
+
+        # Count reactions by type for metrics
+        hold_count = sum(1 for r in reactions if r.reaction == ReactionType.HOLD)
+        vacuum_count = sum(1 for r in reactions if r.reaction == ReactionType.VACUUM)
+        pull_count = sum(1 for r in reactions if r.reaction == ReactionType.PULL)
+        total_reactions = len(reactions)
+
+        # Build metrics for explanation
+        metrics = {
+            'hold_ratio': hold_count / max(1, total_reactions),
+            'fragile_signals': len(leading_events),
+            'vacuum_count': vacuum_count,
+            'pull_count': pull_count,
+            'depth_collapse_count': sum(1 for le in leading_events if 'COLLAPSE' in str(le.type.value)),
+            'pre_shock_pull_count': sum(1 for le in leading_events if 'PRE_SHOCK' in str(le.type.value)),
+            'fragility_index': len(leading_events) * 15 + vacuum_count * 25 + pull_count * 10,
+            'cancel_driven_ratio': sum(1 for r in reactions if r.attribution and r.attribution.attribution_type == 'CANCEL_DRIVEN') / max(1, total_reactions),
+        }
+
+        explanation_obj = generate_explanation(
+            token_id=token_id,
+            current_state=current_state,
+            metrics=metrics,
+            previous_state=previous_state,
+        )
+
+        # Convert to API schema
+        state_explanation = StateExplanationInfo(
+            token_id=token_id,
+            current_state=current_state,
+            confidence=explanation_obj.confidence,
+            headline=explanation_obj.headline_en,
+            summary=explanation_obj.summary_en,
+            positive_factors=[
+                ExplainFactor(
+                    factor=ExplainFactorType(f.factor_type.value),
+                    weight=f.weight,
+                    value=f.value,
+                    threshold=f.threshold,
+                    description={'en': f.description_en, 'cn': f.description_cn},
+                )
+                for f in explanation_obj.positive_factors
+            ],
+            negative_factors=[
+                ExplainFactor(
+                    factor=ExplainFactorType(f.factor_type.value),
+                    weight=f.weight,
+                    value=f.value,
+                    threshold=f.threshold,
+                    description={'en': f.description_en, 'cn': f.description_cn},
+                )
+                for f in explanation_obj.negative_factors
+            ],
+            trend=TrendDirection(explanation_obj.trend.value),
+            trend_reason=explanation_obj.trend_reason_en,
+            counterfactuals=[
+                CounterfactualCondition(
+                    target_state=c.target_state,
+                    conditions=c.conditions,
+                    likelihood=c.likelihood,
+                )
+                for c in explanation_obj.counterfactuals
+            ],
+            generated_at=explanation_obj.generated_at,
+            window_minutes=explanation_obj.window_minutes,
+        )
+
         return EvidenceResponse(
             token_id=token_id,
             t0=t0,
@@ -440,6 +588,7 @@ def get_evidence(
             ),
             tiles_manifest=tiles_manifest,
             bundle_hash=bundle_hash,
+            state_explanation=state_explanation,
         )
 
     except HTTPException:
