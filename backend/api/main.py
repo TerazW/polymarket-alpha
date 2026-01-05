@@ -18,6 +18,9 @@ from .routes import v1_router
 # v5.27: Import reactor routes
 from .routes.reactor import router as reactor_router
 
+# v5.30: Import collector routes
+from .routes.collector import router as collector_router
+
 # v5.9: WebSocket stream manager
 from .stream import stream_manager
 
@@ -39,6 +42,9 @@ app.include_router(v1_router)
 
 # v5.27: Register reactor routes
 app.include_router(reactor_router)
+
+# v5.30: Register collector routes
+app.include_router(collector_router)
 
 # 允许前端跨域访问
 app.add_middleware(
@@ -360,6 +366,16 @@ async def startup():
     print("    GET  /reactor/markets   - Tracked markets")
     print("    POST /reactor/start     - Start reactor")
     print("    POST /reactor/stop      - Stop reactor")
+    print()
+    print("  Collector Endpoints (v5.30):")
+    print("    GET  /collector/health  - Collector health")
+    print("    GET  /collector/status  - Connection status")
+    print("    GET  /collector/stats   - Collector statistics")
+    print("    GET  /collector/tokens  - Subscribed tokens")
+    print("    POST /collector/start   - Start collector")
+    print("    POST /collector/stop    - Stop collector")
+    print("    POST /collector/tokens  - Add tokens")
+    print("    DELETE /collector/tokens - Remove tokens")
     print()
 
 
