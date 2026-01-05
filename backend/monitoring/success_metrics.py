@@ -218,6 +218,31 @@ METRIC_TARGETS: Dict[str, MetricTarget] = {
         comparison="lt",
         unit="s",
     ),
+    # v5.33: Evidence system health indicators
+    "bundle_completeness": MetricTarget(
+        name="bundle_completeness",
+        description="Percentage of bundles with all required fields",
+        target_value=100.0,  # 100%
+        warning_threshold=99.0,  # 99%
+        comparison="gt",
+        unit="%",
+    ),
+    "evidence_production_rate": MetricTarget(
+        name="evidence_production_rate",
+        description="Evidence bundles produced per hour",
+        target_value=10.0,  # At least 10 bundles/hour when active
+        warning_threshold=5.0,  # Warning if < 5
+        comparison="gt",
+        unit="/hr",
+    ),
+    "state_transition_consistency": MetricTarget(
+        name="state_transition_consistency",
+        description="Percentage of replays producing consistent state transitions",
+        target_value=100.0,  # Must be 100% (determinism requirement)
+        warning_threshold=100.0,  # No tolerance for inconsistency
+        comparison="gt",
+        unit="%",
+    ),
 }
 
 
@@ -335,6 +360,19 @@ class SuccessMetricsTracker:
         freshness_result = await self._collect_data_freshness()
         if freshness_result:
             results.append(freshness_result)
+
+        # v5.33: Collect evidence system health indicators
+        completeness_result = await self._collect_bundle_completeness()
+        if completeness_result:
+            results.append(completeness_result)
+
+        production_result = await self._collect_evidence_production_rate()
+        if production_result:
+            results.append(production_result)
+
+        consistency_result = await self._collect_state_consistency()
+        if consistency_result:
+            results.append(consistency_result)
 
         # Determine overall status
         overall = MetricStatus.PASSING
@@ -638,6 +676,246 @@ class SuccessMetricsTracker:
             logger.warning(f"Failed to collect data freshness: {e}")
             return MetricResult(
                 name="data_freshness",
+                value=float('nan'),
+                status=MetricStatus.UNKNOWN,
+                target=target.target_value,
+                unit=target.unit,
+                measured_at=now,
+                details={"error": str(e)},
+            )
+
+    # =========================================================================
+    # v5.33: Evidence System Health Indicators
+    # =========================================================================
+
+    async def _collect_bundle_completeness(self) -> Optional[MetricResult]:
+        """
+        Collect bundle completeness (% bundles with all required fields).
+
+        Required fields: token_id, t0, window, bundle_hash, trades
+        """
+        now = int(time.time() * 1000)
+        target = METRIC_TARGETS["bundle_completeness"]
+
+        conn = self._get_conn()
+        if not conn:
+            return MetricResult(
+                name="bundle_completeness",
+                value=float('nan'),
+                status=MetricStatus.UNKNOWN,
+                target=target.target_value,
+                unit=target.unit,
+                measured_at=now,
+                details={"reason": "Database unavailable"},
+            )
+
+        try:
+            with conn.cursor() as cur:
+                # Count complete bundles vs total
+                cur.execute("""
+                    SELECT
+                        COUNT(*) as total,
+                        COUNT(CASE WHEN
+                            token_id IS NOT NULL AND
+                            t0 IS NOT NULL AND
+                            window_from_ts IS NOT NULL AND
+                            window_to_ts IS NOT NULL AND
+                            bundle_hash IS NOT NULL
+                        THEN 1 END) as complete
+                    FROM evidence_bundles
+                    WHERE created_at > NOW() - INTERVAL '24 hours'
+                """)
+                row = cur.fetchone()
+
+                total = row[0] if row else 0
+                complete = row[1] if row else 0
+
+                if total == 0:
+                    rate = 100.0  # No bundles = 100% complete by definition
+                else:
+                    rate = (complete / total) * 100
+
+                status = target.evaluate(rate)
+
+                return MetricResult(
+                    name="bundle_completeness",
+                    value=rate,
+                    status=status,
+                    target=target.target_value,
+                    unit=target.unit,
+                    measured_at=now,
+                    details={
+                        "total_bundles": total,
+                        "complete_bundles": complete,
+                        "incomplete_bundles": total - complete,
+                    },
+                )
+
+        except Exception as e:
+            logger.warning(f"Failed to collect bundle completeness: {e}")
+            return MetricResult(
+                name="bundle_completeness",
+                value=float('nan'),
+                status=MetricStatus.UNKNOWN,
+                target=target.target_value,
+                unit=target.unit,
+                measured_at=now,
+                details={"error": str(e)},
+            )
+
+    async def _collect_evidence_production_rate(self) -> Optional[MetricResult]:
+        """
+        Collect evidence production rate (bundles per hour).
+        """
+        now = int(time.time() * 1000)
+        target = METRIC_TARGETS["evidence_production_rate"]
+
+        conn = self._get_conn()
+        if not conn:
+            return MetricResult(
+                name="evidence_production_rate",
+                value=float('nan'),
+                status=MetricStatus.UNKNOWN,
+                target=target.target_value,
+                unit=target.unit,
+                measured_at=now,
+                details={"reason": "Database unavailable"},
+            )
+
+        try:
+            with conn.cursor() as cur:
+                # Count bundles in last hour
+                cur.execute("""
+                    SELECT COUNT(*) as count
+                    FROM evidence_bundles
+                    WHERE created_at > NOW() - INTERVAL '1 hour'
+                """)
+                row = cur.fetchone()
+                bundles_per_hour = row[0] if row else 0
+
+                # Get activity status
+                cur.execute("""
+                    SELECT COUNT(*) as recent
+                    FROM trade_ticks
+                    WHERE ts > NOW() - INTERVAL '5 minutes'
+                """)
+                activity_row = cur.fetchone()
+                is_active = (activity_row[0] if activity_row else 0) > 0
+
+                # If no recent data activity, skip this metric (system idle)
+                if not is_active:
+                    return MetricResult(
+                        name="evidence_production_rate",
+                        value=float('nan'),
+                        status=MetricStatus.UNKNOWN,
+                        target=target.target_value,
+                        unit=target.unit,
+                        measured_at=now,
+                        details={
+                            "reason": "System idle (no recent data)",
+                            "bundles_last_hour": bundles_per_hour,
+                        },
+                    )
+
+                status = target.evaluate(bundles_per_hour)
+
+                return MetricResult(
+                    name="evidence_production_rate",
+                    value=bundles_per_hour,
+                    status=status,
+                    target=target.target_value,
+                    unit=target.unit,
+                    measured_at=now,
+                    details={
+                        "bundles_last_hour": bundles_per_hour,
+                        "system_active": is_active,
+                    },
+                )
+
+        except Exception as e:
+            logger.warning(f"Failed to collect evidence production rate: {e}")
+            return MetricResult(
+                name="evidence_production_rate",
+                value=float('nan'),
+                status=MetricStatus.UNKNOWN,
+                target=target.target_value,
+                unit=target.unit,
+                measured_at=now,
+                details={"error": str(e)},
+            )
+
+    async def _collect_state_consistency(self) -> Optional[MetricResult]:
+        """
+        Collect state transition consistency (% replays with consistent states).
+
+        This is the most critical evidence health indicator:
+        "同一证据包，不同机器回放结果必须相同"
+        """
+        now = int(time.time() * 1000)
+        target = METRIC_TARGETS["state_transition_consistency"]
+
+        conn = self._get_conn()
+        if not conn:
+            return MetricResult(
+                name="state_transition_consistency",
+                value=float('nan'),
+                status=MetricStatus.UNKNOWN,
+                target=target.target_value,
+                unit=target.unit,
+                measured_at=now,
+                details={"reason": "Database unavailable"},
+            )
+
+        try:
+            with conn.cursor() as cur:
+                # Check replay verification results for state consistency
+                cur.execute("""
+                    SELECT
+                        COUNT(*) as total,
+                        COUNT(CASE WHEN
+                            status = 'passed' AND
+                            (details->>'state_consistent')::boolean = true
+                        THEN 1 END) as consistent
+                    FROM verification_results
+                    WHERE verified_at > NOW() - INTERVAL '24 hours'
+                    AND check_type = 'replay'
+                """)
+                row = cur.fetchone()
+
+                total = row[0] if row else 0
+                consistent = row[1] if row else 0
+
+                if total == 0:
+                    # No replay verifications - assume 100% (determinism tests cover this)
+                    rate = 100.0
+                else:
+                    rate = (consistent / total) * 100
+
+                status = target.evaluate(rate)
+
+                # Any inconsistency is a critical failure
+                if rate < 100.0 and total > 0:
+                    status = MetricStatus.FAILING
+
+                return MetricResult(
+                    name="state_transition_consistency",
+                    value=rate,
+                    status=status,
+                    target=target.target_value,
+                    unit=target.unit,
+                    measured_at=now,
+                    details={
+                        "total_replays": total,
+                        "consistent_replays": consistent,
+                        "inconsistent_replays": total - consistent,
+                        "critical": rate < 100.0 and total > 0,
+                    },
+                )
+
+        except Exception as e:
+            logger.warning(f"Failed to collect state consistency: {e}")
+            return MetricResult(
+                name="state_transition_consistency",
                 value=float('nan'),
                 status=MetricStatus.UNKNOWN,
                 target=target.target_value,

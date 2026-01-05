@@ -45,6 +45,11 @@ class Permission(str, Enum):
     ADMIN_CONFIG = "admin:config"       # Modify configuration
     ADMIN_AUDIT = "admin:audit"         # View audit logs
 
+    # Dangerous operations (v5.33 - require explicit ADMIN + env flag)
+    DANGEROUS_INJECT = "dangerous:inject"       # Event injection
+    DANGEROUS_RESTART = "dangerous:restart"     # System restart
+    DANGEROUS_DELETE = "dangerous:delete"       # Data deletion
+
     # Wildcard
     ALL = "*"
 

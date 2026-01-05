@@ -21,13 +21,19 @@ from pydantic import BaseModel, Field
 # =============================================================================
 
 class ReactionType(str, Enum):
-    """Six atomic reaction types - the system's vocabulary."""
-    HOLD = "HOLD"       # Defend: refills quickly after shock
-    DELAY = "DELAY"     # Hesitate: partial/slow refill
-    PULL = "PULL"       # Retreat: cancels immediately after shock
-    VACUUM = "VACUUM"   # Vacuum: liquidity completely vanishes
-    CHASE = "CHASE"     # Chase: anchor moved, belief repricing
-    FAKE = "FAKE"       # Anchor: adds more after shock (psychological)
+    """
+    Seven atomic reaction types - the system's core vocabulary.
+    Ordered by priority (higher priority checked first during classification).
+
+    MUST match poc/models.py ReactionType exactly.
+    """
+    VACUUM = "VACUUM"       # 1. Highest: liquidity completely vanishes
+    SWEEP = "SWEEP"         # 2. Multiple levels swept / rapid repricing
+    CHASE = "CHASE"         # 3. Anchor moved, belief repricing
+    PULL = "PULL"           # 4. Retreat: cancels immediately after shock
+    HOLD = "HOLD"           # 5. Defend: refills quickly after shock
+    DELAYED = "DELAYED"     # 6. Hesitate: partial/slow refill
+    NO_IMPACT = "NO_IMPACT" # 7. Drop too small, no meaningful reaction
 
 
 class BeliefState(str, Enum):

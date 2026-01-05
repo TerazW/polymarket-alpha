@@ -1,0 +1,292 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "feature/*"]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ==========================================================================
+  # Unit Tests - Basic functionality
+  # ==========================================================================
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/ \
+            --ignore=tests/adversarial \
+            -v --tb=short \
+            --junitxml=junit-unit.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: junit-unit.xml
+
+  # ==========================================================================
+  # GATE: Determinism Tests - Required for merge
+  # ==========================================================================
+  determinism-gate:
+    name: "GATE: Determinism"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run determinism tests
+        run: |
+          echo "=========================================="
+          echo "DETERMINISM GATE"
+          echo "=========================================="
+          echo "Testing: Same inputs -> Same outputs"
+          echo ""
+          python -m pytest tests/adversarial/test_determinism.py \
+            tests/adversarial/test_belief_state_replay.py \
+            -v --tb=short \
+            --junitxml=junit-determinism.xml
+
+      - name: Verify bundle hash reproducibility
+        run: |
+          echo "Testing bundle hash reproducibility..."
+          python -c "
+          from backend.evidence.bundle_hash import compute_bundle_hash
+          import json
+
+          bundle = {
+              'token_id': 'test',
+              't0': 1704067200000,
+              'trades': [{'ts': 1704067200000, 'price': 0.72, 'size': 100}],
+          }
+
+          # Compute hash 10 times
+          hashes = [compute_bundle_hash(bundle) for _ in range(10)]
+
+          if len(set(hashes)) != 1:
+              print('ERROR: Hash varies across runs!')
+              print(f'Hashes: {hashes}')
+              exit(1)
+
+          print(f'SUCCESS: Hash is reproducible: {hashes[0][:16]}...')
+          "
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: determinism-test-results
+          path: junit-determinism.xml
+
+  # ==========================================================================
+  # GATE: Adversarial Tests - Required for merge
+  # ==========================================================================
+  adversarial-gate:
+    name: "GATE: Adversarial"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run adversarial tests
+        run: |
+          echo "=========================================="
+          echo "ADVERSARIAL GATE"
+          echo "=========================================="
+          echo "Testing: Edge cases, manipulation resistance"
+          echo ""
+          python -m pytest tests/adversarial/ \
+            -v --tb=short \
+            --junitxml=junit-adversarial.xml
+
+      - name: Report adversarial coverage
+        run: |
+          echo ""
+          echo "Adversarial Test Categories:"
+          echo "- Determinism: Event ordering, hash stability"
+          echo "- Edge Cases: Zero values, overflow, boundaries"
+          echo "- Manipulation: Spoofing, layering, wash trading"
+          echo "- Belief States: State transition verification"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: adversarial-test-results
+          path: junit-adversarial.xml
+
+  # ==========================================================================
+  # GATE: Security Tests - Required for merge
+  # ==========================================================================
+  security-gate:
+    name: "GATE: Security"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run security tests
+        run: |
+          echo "=========================================="
+          echo "SECURITY GATE"
+          echo "=========================================="
+          echo "Testing: ACL, audit logging, injection protection"
+          echo ""
+          python -m pytest tests/test_security.py \
+            tests/test_reactor_api.py::TestEventInjection \
+            -v --tb=short \
+            --junitxml=junit-security.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-test-results
+          path: junit-security.xml
+
+  # ==========================================================================
+  # All Gates Summary - Final check
+  # ==========================================================================
+  all-gates:
+    name: All Gates Passed
+    runs-on: ubuntu-latest
+    needs:
+      - unit-tests
+      - determinism-gate
+      - adversarial-gate
+      - security-gate
+
+    steps:
+      - name: All gates passed
+        run: |
+          echo "=========================================="
+          echo "ALL GATES PASSED"
+          echo "=========================================="
+          echo ""
+          echo "Unit Tests:     PASSED"
+          echo "Determinism:    PASSED"
+          echo "Adversarial:    PASSED"
+          echo "Security:       PASSED"
+          echo ""
+          echo "Ready for merge."
+
+  # ==========================================================================
+  # Integration Tests (Optional - for main branch only)
+  # ==========================================================================
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: all-gates
+    if: github.ref == 'refs/heads/main'
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: belief_reaction
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run integration tests
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5433
+          DB_NAME: belief_reaction
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+        run: |
+          python -m pytest tests/integration/ \
+            -v --tb=short \
+            --junitxml=junit-integration.xml || true
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: junit-integration.xml
