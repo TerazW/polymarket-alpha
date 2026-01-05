@@ -16,10 +16,18 @@ Usage:
 import time
 from datetime import datetime, timedelta
 from typing import List, Optional
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 from .tile_generator import HeatmapTileGenerator, TileBand
+
+# Optional psycopg2 import
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    HAS_PSYCOPG2 = True
+except ImportError:
+    HAS_PSYCOPG2 = False
+    psycopg2 = None
+    RealDictCursor = None
 
 
 # Database config
@@ -47,6 +55,9 @@ def get_active_tokens(db_config: dict, limit: int = 50) -> List[str]:
     2. Recent shock/reaction events
     3. Non-STABLE belief state
     """
+    if not HAS_PSYCOPG2:
+        raise ImportError("psycopg2 is required for precompute functionality")
+
     conn = psycopg2.connect(**db_config, cursor_factory=RealDictCursor)
 
     try:

@@ -21,8 +21,9 @@ class TestTileBand:
             pytest.skip("psycopg2 not installed")
 
         assert TileBand.FULL.value == 'FULL'
-        assert TileBand.BID.value == 'BID'
-        assert TileBand.ASK.value == 'ASK'
+        assert TileBand.BEST_5.value == 'BEST_5'
+        assert TileBand.BEST_10.value == 'BEST_10'
+        assert TileBand.BEST_20.value == 'BEST_20'
 
 
 class TestHeatmapTile:
