@@ -3,6 +3,8 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import type { EvidenceResponse, ShockEvent, ReactionEvent, LeadingEvent, StateChange } from '@/types/api';
 import { REACTION_COLORS, STATE_COLORS } from '@/types/api';
+import { getHeatmapTiles, type HeatmapTileMeta } from '@/lib/api';
+import { HeatmapRenderer } from './HeatmapRenderer';
 
 interface EvidencePlayerProps {
   evidence: EvidenceResponse;
@@ -19,9 +21,49 @@ export function EvidencePlayer({
   onTimeChange,
   onEventClick,
 }: EvidencePlayerProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
+  const [tiles, setTiles] = useState<HeatmapTileMeta[]>([]);
+  const [tilesLoading, setTilesLoading] = useState(false);
+
+  // Fetch tiles when evidence changes
+  useEffect(() => {
+    if (!evidence.token_id) return;
+
+    let cancelled = false;
+    setTilesLoading(true);
+
+    async function fetchTiles() {
+      try {
+        const response = await getHeatmapTiles({
+          token_id: evidence.token_id,
+          from_ts: evidence.window_start,
+          to_ts: evidence.window_end,
+          lod: 250,
+        });
+
+        if (!cancelled) {
+          setTiles(response.tiles);
+        }
+      } catch (err) {
+        console.warn('Failed to fetch heatmap tiles:', err);
+        if (!cancelled) {
+          setTiles([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setTilesLoading(false);
+        }
+      }
+    }
+
+    fetchTiles();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [evidence.token_id, evidence.window_start, evidence.window_end]);
 
   // Resize observer
   useEffect(() => {
@@ -37,25 +79,26 @@ export function EvidencePlayer({
     return () => observer.disconnect();
   }, []);
 
-  // Draw heatmap
+  // Draw overlay (events, anchors, state changes) on top of heatmap
   useEffect(() => {
-    const canvas = canvasRef.current;
+    const canvas = overlayCanvasRef.current;
     if (!canvas) return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    drawHeatmap(ctx, evidence, dimensions, currentTime);
+    // Clear overlay
+    ctx.clearRect(0, 0, dimensions.width, dimensions.height);
+
+    // Draw overlay elements
     drawOverlay(ctx, evidence, dimensions, currentTime, selectedEventId);
   }, [evidence, dimensions, currentTime, selectedEventId]);
 
   // Handle click on heatmap
   const handleCanvasClick = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-
-      const rect = canvas.getBoundingClientRect();
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const container = e.currentTarget;
+      const rect = container.getBoundingClientRect();
       const x = e.clientX - rect.left;
 
       // Convert x to time
@@ -67,17 +110,45 @@ export function EvidencePlayer({
     [evidence, dimensions, onTimeChange]
   );
 
+  // Get price range from tiles manifest or defaults
+  const priceMin = parseFloat(evidence.tiles_manifest.normalization.price_min);
+  const priceMax = parseFloat(evidence.tiles_manifest.normalization.price_max);
+  const tickSize = parseFloat(evidence.tiles_manifest.normalization.tick_size);
+
   return (
     <div ref={containerRef} className="flex-1 flex flex-col p-4">
       {/* Heatmap */}
-      <div className="flex-1 relative bg-gray-800 rounded-lg overflow-hidden">
-        <canvas
-          ref={canvasRef}
+      <div
+        className="flex-1 relative bg-gray-800 rounded-lg overflow-hidden cursor-crosshair"
+        onClick={handleCanvasClick}
+      >
+        {/* Heatmap layer (rendered from tiles or placeholder) */}
+        <HeatmapRenderer
+          tiles={tiles}
+          windowStart={evidence.window_start}
+          windowEnd={evidence.window_end}
+          priceMin={priceMin}
+          priceMax={priceMax}
+          tickSize={tickSize}
           width={dimensions.width}
           height={dimensions.height}
-          onClick={handleCanvasClick}
-          className="w-full h-full cursor-crosshair"
+          currentTime={currentTime}
         />
+
+        {/* Overlay layer (events, anchors) */}
+        <canvas
+          ref={overlayCanvasRef}
+          width={dimensions.width}
+          height={dimensions.height}
+          className="absolute inset-0 pointer-events-none"
+        />
+
+        {/* Loading indicator */}
+        {tilesLoading && (
+          <div className="absolute top-2 left-2 px-2 py-1 bg-blue-600/80 rounded text-xs">
+            Loading tiles...
+          </div>
+        )}
 
         {/* Current time indicator */}
         <div
@@ -107,74 +178,6 @@ export function EvidencePlayer({
       </div>
     </div>
   );
-}
-
-// Draw heatmap (Canvas2D prototype)
-function drawHeatmap(
-  ctx: CanvasRenderingContext2D,
-  evidence: EvidenceResponse,
-  dimensions: { width: number; height: number },
-  currentTime: number
-) {
-  const { width, height } = dimensions;
-
-  // Clear
-  ctx.fillStyle = '#1f2937'; // gray-800
-  ctx.fillRect(0, 0, width, height);
-
-  // Generate mock heatmap data (in real implementation, this comes from tiles)
-  const timeRange = evidence.window_end - evidence.window_start;
-  const priceMin = parseFloat(evidence.tiles_manifest.normalization.price_min);
-  const priceMax = parseFloat(evidence.tiles_manifest.normalization.price_max);
-  const tickSize = parseFloat(evidence.tiles_manifest.normalization.tick_size);
-  const priceSteps = Math.round((priceMax - priceMin) / tickSize);
-
-  const bucketWidth = 4; // pixels per time bucket
-  const bucketHeight = height / priceSteps;
-  const timeBuckets = Math.ceil(width / bucketWidth);
-
-  // Draw mock depth data
-  for (let t = 0; t < timeBuckets; t++) {
-    const bucketTime = evidence.window_start + (t / timeBuckets) * timeRange;
-
-    for (let p = 0; p < priceSteps; p++) {
-      const price = priceMin + p * tickSize;
-      const isBid = price < 0.72; // mock: bid below 72%, ask above
-
-      // Generate mock depth with some patterns
-      let depth = Math.random() * 0.5;
-
-      // Add anchor strength
-      evidence.anchors.forEach((anchor) => {
-        if (Math.abs(parseFloat(anchor.price) - price) < tickSize * 2) {
-          depth += anchor.score * 0.5;
-        }
-      });
-
-      // Reduce depth near shocks
-      evidence.shocks.forEach((shock) => {
-        if (
-          Math.abs(shock.timestamp - bucketTime) < 10000 &&
-          Math.abs(parseFloat(shock.price) - price) < tickSize * 3
-        ) {
-          depth *= 0.3;
-        }
-      });
-
-      // Color based on side and depth
-      const intensity = Math.min(1, depth);
-      const x = t * bucketWidth;
-      const y = height - (p + 1) * bucketHeight;
-
-      if (isBid) {
-        ctx.fillStyle = `rgba(34, 197, 94, ${intensity * 0.8})`; // green
-      } else {
-        ctx.fillStyle = `rgba(239, 68, 68, ${intensity * 0.8})`; // red
-      }
-
-      ctx.fillRect(x, y, bucketWidth - 1, bucketHeight - 1);
-    }
-  }
 }
 
 // Draw overlay (events, anchors, state changes)
