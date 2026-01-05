@@ -451,6 +451,132 @@ class AuditLogger:
             self._chain_length = 0
             return count
 
+    def compute_daily_anchor(self, date_str: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Compute daily anchor hash for external verification.
+
+        v5.34: World-class audit chain anchoring.
+
+        Daily anchors provide:
+        1. External verification point (can be stored outside DB)
+        2. Prevention of chain rewrite attacks
+        3. Compliance checkpoint
+
+        Args:
+            date_str: Date in YYYY-MM-DD format (defaults to today)
+
+        Returns:
+            {
+                "date": "2024-01-05",
+                "anchor_hash": "abc123...",
+                "entry_count": 150,
+                "first_entry_id": "...",
+                "last_entry_id": "...",
+                "computed_at": 1704456000000
+            }
+        """
+        import datetime
+
+        if date_str is None:
+            date_str = datetime.date.today().isoformat()
+
+        with self._lock:
+            entries = list(self._entries)
+
+        # Filter entries for the target date
+        target_start = int(datetime.datetime.fromisoformat(f"{date_str}T00:00:00").timestamp() * 1000)
+        target_end = int(datetime.datetime.fromisoformat(f"{date_str}T23:59:59").timestamp() * 1000)
+
+        day_entries = [e for e in entries if target_start <= e.timestamp <= target_end]
+
+        if not day_entries:
+            return {
+                "date": date_str,
+                "anchor_hash": None,
+                "entry_count": 0,
+                "first_entry_id": None,
+                "last_entry_id": None,
+                "computed_at": int(time.time() * 1000),
+            }
+
+        # Compute anchor hash from all entry hashes of the day
+        hash_chain = ":".join(e.entry_hash or e.compute_hash() for e in day_entries)
+        anchor_hash = hashlib.sha256(hash_chain.encode()).hexdigest()
+
+        return {
+            "date": date_str,
+            "anchor_hash": anchor_hash,
+            "entry_count": len(day_entries),
+            "first_entry_id": day_entries[0].entry_id,
+            "last_entry_id": day_entries[-1].entry_id,
+            "computed_at": int(time.time() * 1000),
+        }
+
+    def verify_daily_anchor(self, anchor: Dict[str, Any]) -> tuple:
+        """
+        Verify a daily anchor against current data.
+
+        v5.34: Detects if audit entries for a day have been modified.
+
+        Args:
+            anchor: Previously computed anchor from compute_daily_anchor()
+
+        Returns:
+            (is_valid, message): Tuple of bool and explanation
+        """
+        if not anchor or not anchor.get("anchor_hash"):
+            return True, "No anchor to verify (empty day)"
+
+        current = self.compute_daily_anchor(anchor["date"])
+
+        if current["anchor_hash"] != anchor["anchor_hash"]:
+            return False, (
+                f"Anchor mismatch for {anchor['date']}: "
+                f"stored={anchor['anchor_hash'][:16]}..., "
+                f"computed={current['anchor_hash'][:16]}..."
+            )
+
+        if current["entry_count"] != anchor["entry_count"]:
+            return False, (
+                f"Entry count mismatch for {anchor['date']}: "
+                f"stored={anchor['entry_count']}, computed={current['entry_count']}"
+            )
+
+        return True, f"Anchor verified for {anchor['date']}"
+
+
+# =============================================================================
+# Daily Anchor Storage (v5.34)
+# =============================================================================
+
+@dataclass
+class DailyAnchor:
+    """
+    Immutable daily anchor checkpoint.
+
+    v5.34: Store these externally (S3, external DB, printed log)
+    for tamper-evident audit trail verification.
+    """
+    date: str
+    anchor_hash: str
+    entry_count: int
+    first_entry_id: str
+    last_entry_id: str
+    computed_at: int
+
+    def to_dict(self) -> dict:
+        return {
+            "date": self.date,
+            "anchor_hash": self.anchor_hash,
+            "entry_count": self.entry_count,
+            "first_entry_id": self.first_entry_id,
+            "last_entry_id": self.last_entry_id,
+            "computed_at": self.computed_at,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True)
+
 
 # =============================================================================
 # Global Audit Logger Singleton

@@ -284,6 +284,23 @@ METRIC_TARGETS: Dict[str, MetricTarget] = {
         comparison="lt",
         unit="%",
     ),
+    # v5.34: World-class product-level metrics (from expert review)
+    "evidence_chain_coverage_rate": MetricTarget(
+        name="evidence_chain_coverage_rate",
+        description="Percentage of alerts with complete shock→reaction→state→alert chain",
+        target_value=100.0,  # Every alert must have complete evidence chain
+        warning_threshold=95.0,  # Warning if < 95%
+        comparison="gt",
+        unit="%",
+    ),
+    "grade_weighted_alert_accuracy": MetricTarget(
+        name="grade_weighted_alert_accuracy",
+        description="Alert accuracy counting only Grade A/B evidence (excludes tainted data)",
+        target_value=95.0,  # 95% accuracy on high-quality evidence
+        warning_threshold=90.0,  # Warning if < 90%
+        comparison="gt",
+        unit="%",
+    ),
 }
 
 

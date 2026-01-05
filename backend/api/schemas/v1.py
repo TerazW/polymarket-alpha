@@ -80,6 +80,28 @@ class ReplayCatalogKind(str, Enum):
     ALERT = "ALERT"
 
 
+# v5.34: Evidence Grade - mandatory quality indicator
+class EvidenceGrade(str, Enum):
+    """
+    Evidence quality grade - determines what actions can be taken.
+
+    v5.34: World-class evidence integrity requirement.
+
+    Grade A: Full integrity - all data complete, hashes verified
+    Grade B: Minor issues - small gaps but replayable
+    Grade C: Degraded - significant gaps, use with caution
+    Grade D: Tainted - data integrity compromised, manual review required
+
+    Alert Policy Binding:
+    - CRITICAL alerts ONLY allowed for Grade A/B evidence
+    - Grade C/D evidence can only trigger MEDIUM/LOW with manual confirmation
+    """
+    A = "A"  # Full integrity
+    B = "B"  # Minor issues
+    C = "C"  # Degraded
+    D = "D"  # Tainted
+
+
 # =============================================================================
 # Shared Components
 # =============================================================================
@@ -220,6 +242,7 @@ class RadarRow(BaseModel):
     belief_state: BeliefState
     state_since_ts: int
     state_severity: int = Field(..., ge=0, le=3, description="STABLE=0..BROKEN=3")
+    evidence_grade: EvidenceGrade = Field(..., description="v5.34: Evidence quality grade (A/B/C/D)")
     fragile_index_10m: float = Field(..., ge=0)
     leading_rate_10m: float = Field(..., ge=0)
     confidence: float = Field(..., ge=0, le=100)
@@ -262,6 +285,7 @@ class EvidenceResponse(BaseModel):
     t0: int
     window: EvidenceWindow
     market: MarketSummary
+    evidence_grade: EvidenceGrade = Field(..., description="v5.34: Evidence quality grade (A/B/C/D)")
     anchors: List[AnchorLevel]
     shocks: List[ShockEvent]
     reactions: List[ReactionEvent]
@@ -278,11 +302,18 @@ class EvidenceResponse(BaseModel):
 # =============================================================================
 
 class Alert(BaseModel):
-    """Alert notification"""
+    """
+    Alert notification
+
+    v5.34: evidence_grade determines allowed severity:
+    - Grade A/B: Can trigger any severity including CRITICAL
+    - Grade C/D: Can only trigger MEDIUM/LOW, requires manual confirmation for escalation
+    """
     alert_id: str
     token_id: str
     ts: int
     severity: AlertSeverity
+    evidence_grade: EvidenceGrade = Field(..., description="v5.34: Evidence quality grade")
     status: AlertStatus
     type: str
     summary: str
