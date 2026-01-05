@@ -15,6 +15,9 @@ import os
 # Import v1 routes
 from .routes import v1_router
 
+# v5.27: Import reactor routes
+from .routes.reactor import router as reactor_router
+
 # v5.9: WebSocket stream manager
 from .stream import stream_manager
 
@@ -33,6 +36,9 @@ app = FastAPI(
 
 # Register v1 API routes
 app.include_router(v1_router)
+
+# v5.27: Register reactor routes
+app.include_router(reactor_router)
 
 # 允许前端跨域访问
 app.add_middleware(
@@ -346,6 +352,14 @@ async def startup():
     print("    GET  /v1/heatmap/tiles  - Heatmap tiles")
     print("    GET  /v1/replay/catalog - Replay catalog")
     print("    WS   /v1/stream         - Real-time event stream")
+    print()
+    print("  Reactor Endpoints (v5.27):")
+    print("    GET  /reactor/stats     - Reactor statistics")
+    print("    GET  /reactor/states    - All belief states")
+    print("    GET  /reactor/reactions - Recent reactions")
+    print("    GET  /reactor/markets   - Tracked markets")
+    print("    POST /reactor/start     - Start reactor")
+    print("    POST /reactor/stop      - Stop reactor")
     print()
 
 
