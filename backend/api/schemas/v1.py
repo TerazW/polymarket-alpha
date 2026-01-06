@@ -46,6 +46,7 @@ class AlertSeverity(str, Enum):
 class AlertStatus(str, Enum):
     OPEN = "OPEN"
     ACKED = "ACKED"
+    MUTED = "MUTED"       # v5.36: Temporarily suppressed
     RESOLVED = "RESOLVED"
 
 

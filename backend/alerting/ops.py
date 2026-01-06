@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 class AlertStatus(str, Enum):
     """Alert lifecycle status"""
     OPEN = "OPEN"                    # Active alert
+    MUTED = "MUTED"                  # v5.36: Temporarily suppressed
     AUTO_RESOLVED = "AUTO_RESOLVED"  # System auto-closed
     MANUAL_RESOLVED = "MANUAL_RESOLVED"  # User closed
     SUPERSEDED = "SUPERSEDED"        # Replaced by newer alert
@@ -46,7 +47,10 @@ class ResolutionRule(str, Enum):
     CONDITION_CLEARED = "CONDITION_CLEARED"  # Alert condition no longer true
     SUPERSEDED_BY_NEW = "SUPERSEDED_BY_NEW"  # Newer alert for same condition
     TTL_EXPIRED = "TTL_EXPIRED"              # Exceeded time limit
+    MUTE_EXPIRED = "MUTE_EXPIRED"            # v5.36: Mute period expired
     MANUAL = "MANUAL"                        # User action
+    MUTE = "MUTE"                            # v5.36: User muted
+    UNMUTE = "UNMUTE"                        # v5.36: User unmuted
 
 
 # TTL by priority (milliseconds)
@@ -119,10 +123,21 @@ class ManagedAlert:
     superseded_by: Optional[str] = None
     merged_count: int = 0  # How many dupes were merged
     related_ids: List[str] = field(default_factory=list)
+    # v5.36: Mute support
+    muted_at: Optional[int] = None
+    muted_until: Optional[int] = None
+    muted_by: Optional[str] = None
+    mute_reason: str = ""
 
     @property
     def is_active(self) -> bool:
-        return self.status == AlertStatus.OPEN
+        """OPEN or MUTED alerts are considered active (not resolved)"""
+        return self.status in (AlertStatus.OPEN, AlertStatus.MUTED)
+
+    @property
+    def is_muted(self) -> bool:
+        """Check if alert is currently muted"""
+        return self.status == AlertStatus.MUTED
 
     @property
     def alert_id(self) -> str:
@@ -142,6 +157,11 @@ class ManagedAlert:
             "superseded_by": self.superseded_by,
             "merged_count": self.merged_count,
             "related_ids": self.related_ids,
+            # v5.36: Mute fields
+            "muted_at": self.muted_at,
+            "muted_until": self.muted_until,
+            "muted_by": self.muted_by,
+            "mute_reason": self.mute_reason,
         })
         return result
 
@@ -259,6 +279,9 @@ class AlertOpsManager:
             "auto_resolved": 0,
             "manual_resolved": 0,
             "expired": 0,
+            "muted": 0,           # v5.36
+            "unmuted": 0,         # v5.36
+            "mute_expired": 0,    # v5.36
         }
 
     # =========================================================================
@@ -404,6 +427,13 @@ class AlertOpsManager:
                     self.stats["auto_resolved"] += 1
                     resolved.append(managed)
 
+        # v5.36: Check mute expiration
+        for alert_id, managed in list(self.alerts.items()):
+            if managed.status == AlertStatus.MUTED and managed.muted_until:
+                if now >= managed.muted_until:
+                    self._unmute_internal(managed, now, expired=True)
+                    self.stats["mute_expired"] += 1
+
         return resolved
 
     def on_state_change(self, token_id: str, is_stable: bool, timestamp: int):
@@ -518,6 +548,123 @@ class AlertOpsManager:
             user_id
         )
         return True
+
+    # =========================================================================
+    # v5.36: Mute Operations
+    # =========================================================================
+
+    def mute(
+        self,
+        alert_id: str,
+        duration_ms: int,
+        reason: str = "User muted",
+        user_id: str = "user"
+    ) -> bool:
+        """
+        Mute an alert for a specified duration.
+
+        Args:
+            alert_id: Alert to mute
+            duration_ms: Mute duration in milliseconds (max 24h)
+            reason: Reason for muting
+            user_id: User performing the action
+
+        Returns:
+            True if successful
+        """
+        managed = self.alerts.get(alert_id)
+        if not managed:
+            return False
+
+        # Can only mute OPEN alerts
+        if managed.status != AlertStatus.OPEN:
+            return False
+
+        # Limit duration to 24 hours
+        max_duration = 24 * 60 * 60 * 1000
+        duration_ms = min(duration_ms, max_duration)
+
+        now = int(time.time() * 1000)
+        old_status = managed.status
+
+        managed.status = AlertStatus.MUTED
+        managed.muted_at = now
+        managed.muted_until = now + duration_ms
+        managed.muted_by = user_id
+        managed.mute_reason = reason
+        managed.last_updated_at = now
+
+        self._log_change(
+            managed, old_status, AlertStatus.MUTED,
+            ResolutionRule.MUTE,
+            f"Muted for {duration_ms // 60000} minutes: {reason}",
+            user_id,
+            evidence=[
+                f"Muted at: {datetime.fromtimestamp(now / 1000).isoformat()}",
+                f"Muted until: {datetime.fromtimestamp((now + duration_ms) / 1000).isoformat()}",
+            ]
+        )
+
+        self.stats["muted"] += 1
+        logger.info(f"[OPS] Alert {alert_id} muted for {duration_ms // 60000}min by {user_id}")
+        return True
+
+    def unmute(self, alert_id: str, user_id: str = "user") -> bool:
+        """
+        Manually unmute an alert before expiration.
+
+        Returns:
+            True if successful
+        """
+        managed = self.alerts.get(alert_id)
+        if not managed:
+            return False
+
+        if managed.status != AlertStatus.MUTED:
+            return False
+
+        now = int(time.time() * 1000)
+        self._unmute_internal(managed, now, expired=False, user_id=user_id)
+        self.stats["unmuted"] += 1
+        return True
+
+    def _unmute_internal(
+        self,
+        managed: ManagedAlert,
+        timestamp: int,
+        expired: bool = False,
+        user_id: str = "system"
+    ):
+        """Internal unmute logic"""
+        old_status = managed.status
+
+        managed.status = AlertStatus.OPEN
+        managed.last_updated_at = timestamp
+
+        rule = ResolutionRule.MUTE_EXPIRED if expired else ResolutionRule.UNMUTE
+        reason = "Mute period expired" if expired else "User unmuted"
+
+        self._log_change(
+            managed, old_status, AlertStatus.OPEN,
+            rule, reason, user_id,
+            evidence=[
+                f"Was muted at: {datetime.fromtimestamp(managed.muted_at / 1000).isoformat()}" if managed.muted_at else "",
+                f"Mute duration: {((timestamp - managed.muted_at) // 60000) if managed.muted_at else 0} minutes",
+            ]
+        )
+
+        logger.info(f"[OPS] Alert {managed.alert_id} unmuted ({'expired' if expired else 'manual'})")
+
+    def get_muted_alerts(self, token_id: Optional[str] = None) -> List[ManagedAlert]:
+        """Get all currently muted alerts"""
+        result = []
+        for managed in self.alerts.values():
+            if managed.status != AlertStatus.MUTED:
+                continue
+            if token_id and managed.payload.token_id != token_id:
+                continue
+            result.append(managed)
+        return result
 
     # =========================================================================
     # Internal Resolution

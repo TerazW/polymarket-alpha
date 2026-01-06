@@ -1066,6 +1066,32 @@ class AlertResolveResponse(BaseModel):
     false_positive_reason: Optional[str] = None
 
 
+# v5.36: Alert Mute request/response models
+class AlertMuteRequest(BaseModel):
+    """Request body for muting an alert"""
+    duration_minutes: int = Field(30, ge=1, le=1440, description="Mute duration in minutes (1-1440)")
+    reason: Optional[str] = None
+    muted_by: Optional[str] = None
+
+
+class AlertMuteResponse(BaseModel):
+    """Response for alert mute operation"""
+    alert_id: str
+    status: AlertStatus
+    muted_at: int
+    muted_until: int
+    muted_by: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class AlertUnmuteResponse(BaseModel):
+    """Response for alert unmute operation"""
+    alert_id: str
+    status: AlertStatus
+    unmuted_at: int
+    unmuted_by: Optional[str] = None
+
+
 @router.put("/alerts/{alert_id}/ack", response_model=AlertAckResponse)
 async def acknowledge_alert(
     alert_id: str,
@@ -1296,6 +1322,181 @@ async def resolve_alert(
             recovery_evidence=recovery_evidence,
             is_false_positive=is_false_positive,
             false_positive_reason=false_positive_reason,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Alert Mute API (v5.36)
+# =============================================================================
+
+@router.put("/alerts/{alert_id}/mute", response_model=AlertMuteResponse)
+async def mute_alert(
+    alert_id: str,
+    body: AlertMuteRequest = None,
+):
+    """
+    Mute an alert for a specified duration.
+
+    v5.36: Muting temporarily suppresses an alert without resolving it.
+    The alert will automatically unmute after the specified duration.
+
+    - **alert_id**: The ID of the alert to mute
+    - **duration_minutes**: How long to mute (1-1440 minutes, default: 30)
+    - **reason**: Optional reason for muting
+    - **muted_by**: Optional identifier of who muted (user/system)
+    """
+    try:
+        conn = get_db_connection()
+        now = int(time.time() * 1000)
+        duration_minutes = body.duration_minutes if body else 30
+        duration_ms = duration_minutes * 60 * 1000
+        muted_until = now + duration_ms
+        reason = body.reason if body else None
+        muted_by = body.muted_by if body else None
+
+        with conn.cursor() as cur:
+            # Check if alert exists and is in OPEN state
+            cur.execute("""
+                SELECT alert_id, status, token_id, severity, summary
+                FROM alerts
+                WHERE alert_id = %s
+            """, (alert_id,))
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+            current_status = row['status']
+
+            if current_status != 'OPEN':
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Alert {alert_id} is in {current_status} state and cannot be muted. Only OPEN alerts can be muted."
+                )
+
+            # Update alert status to MUTED
+            cur.execute("""
+                UPDATE alerts
+                SET status = 'MUTED',
+                    muted_at = to_timestamp(%s / 1000.0),
+                    muted_until = to_timestamp(%s / 1000.0),
+                    muted_by = %s,
+                    mute_reason = %s
+                WHERE alert_id = %s
+                RETURNING alert_id, status
+            """, (now, muted_until, muted_by, reason, alert_id))
+
+            conn.commit()
+
+        conn.close()
+
+        # Broadcast alert update via WebSocket
+        await publish_alert(
+            {
+                "alert_id": alert_id,
+                "token_id": row['token_id'],
+                "status": "MUTED",
+                "severity": row['severity'],
+                "summary": row['summary'],
+                "muted_at": now,
+                "muted_until": muted_until,
+                "muted_by": muted_by,
+            },
+            event_type=StreamEventType.ALERT_UPDATED
+        )
+
+        return AlertMuteResponse(
+            alert_id=alert_id,
+            status=AlertStatus.MUTED,
+            muted_at=now,
+            muted_until=muted_until,
+            muted_by=muted_by,
+            reason=reason,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/alerts/{alert_id}/unmute", response_model=AlertUnmuteResponse)
+async def unmute_alert(
+    alert_id: str,
+    unmuted_by: Optional[str] = Query(None, description="Who is unmuting"),
+):
+    """
+    Unmute an alert before its mute period expires.
+
+    v5.36: Manually unmutes a muted alert, returning it to OPEN state.
+
+    - **alert_id**: The ID of the alert to unmute
+    - **unmuted_by**: Optional identifier of who unmuted
+    """
+    try:
+        conn = get_db_connection()
+        now = int(time.time() * 1000)
+
+        with conn.cursor() as cur:
+            # Check if alert exists and is MUTED
+            cur.execute("""
+                SELECT alert_id, status, token_id, severity, summary
+                FROM alerts
+                WHERE alert_id = %s
+            """, (alert_id,))
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+            current_status = row['status']
+
+            if current_status != 'MUTED':
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Alert {alert_id} is in {current_status} state and cannot be unmuted. Only MUTED alerts can be unmuted."
+                )
+
+            # Update alert status back to OPEN
+            cur.execute("""
+                UPDATE alerts
+                SET status = 'OPEN',
+                    muted_at = NULL,
+                    muted_until = NULL,
+                    muted_by = NULL,
+                    mute_reason = NULL
+                WHERE alert_id = %s
+                RETURNING alert_id, status
+            """, (alert_id,))
+
+            conn.commit()
+
+        conn.close()
+
+        # Broadcast alert update via WebSocket
+        await publish_alert(
+            {
+                "alert_id": alert_id,
+                "token_id": row['token_id'],
+                "status": "OPEN",
+                "severity": row['severity'],
+                "summary": row['summary'],
+                "unmuted_at": now,
+                "unmuted_by": unmuted_by,
+            },
+            event_type=StreamEventType.ALERT_UPDATED
+        )
+
+        return AlertUnmuteResponse(
+            alert_id=alert_id,
+            status=AlertStatus.OPEN,
+            unmuted_at=now,
+            unmuted_by=unmuted_by,
         )
 
     except HTTPException:
