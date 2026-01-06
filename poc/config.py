@@ -143,9 +143,14 @@ TIME_BUCKET_MS = 250                 # 250ms 时间桶
 TIME_BUCKET_TOLERANCE_MS = 50        # 允许误差 ±50ms
 
 # =============================================================================
-# DATA RETENTION POLICIES (v3)
+# DATA RETENTION POLICIES (v3, updated v5.36)
 # =============================================================================
 RETENTION_RAW_EVENTS_DAYS = 7        # raw_events 保留 7 天 (用于 debug/回放)
 RETENTION_BOOK_BINS_250MS_DAYS = 14  # book_bins 250ms 保留 14 天
 RETENTION_BOOK_BINS_1S_DAYS = 90     # book_bins 1s 保留 90 天 (降采样)
 RETENTION_EVENTS_DAYS = 365          # shock/reaction/leading/belief 保留 1 年
+
+# v5.36: Tile LOD retention (high resolution short, low resolution long)
+RETENTION_TILES_250MS_HOURS = 48     # 250ms tiles: 48 hours
+RETENTION_TILES_1S_DAYS = 14         # 1s tiles: 14 days
+RETENTION_TILES_5S_DAYS = 180        # 5s tiles: 180 days (6 months)

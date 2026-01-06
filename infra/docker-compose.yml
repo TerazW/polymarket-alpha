@@ -1,27 +1,53 @@
 version: '3.8'
 
+# =============================================================================
+# Belief Reaction System - Production Docker Compose
+# =============================================================================
+#
+# Services:
+# 1. timescaledb - TimescaleDB for time-series data
+# 2. redis - Cache and pub/sub for real-time events
+# 3. collector - WebSocket data collection from Polymarket
+# 4. reactor - Shock/Reaction/BeliefState processing
+# 5. api - FastAPI REST + WebSocket endpoints
+# 6. tile_worker - Async heatmap tile generation
+#
+# Usage:
+#   docker-compose up -d              # Start all services
+#   docker-compose up -d timescaledb redis  # Start infra only
+#   docker-compose logs -f api        # Follow API logs
+#
+# =============================================================================
+
 services:
-  # TimescaleDB - 时序数据库，用于存储 heatmap 数据
+  # ===========================================================================
+  # Infrastructure
+  # ===========================================================================
+
+  # TimescaleDB - Time-series database
   timescaledb:
     image: timescale/timescaledb:latest-pg15
     container_name: belief-reaction-db
     ports:
-      - "5433:5432"  # 用 5433 避免和本机 PostgreSQL 冲突
+      - "5433:5432"
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
       POSTGRES_DB: belief_reaction
     volumes:
       - timescale_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./migrations:/docker-entrypoint-initdb.d/migrations
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - belief-network
 
-  # Redis - 用于实时事件推送和缓存（可选，MVP 阶段可以不用）
+  # Redis - Cache and pub/sub
   redis:
     image: redis:7-alpine
     container_name: belief-reaction-redis
@@ -30,8 +56,161 @@ services:
     volumes:
       - redis_data:/data
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - belief-network
+
+  # ===========================================================================
+  # Application Services
+  # ===========================================================================
+
+  # Collector - WebSocket data collection
+  collector:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.collector
+    container_name: belief-reaction-collector
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_NAME=belief_reaction
+      - REDIS_URL=redis://redis:6379
+      - POLYMARKET_WS_URL=${POLYMARKET_WS_URL:-wss://ws-subscriptions-clob.polymarket.com/ws/market}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - belief-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # Reactor - Event processing engine
+  reactor:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.reactor
+    container_name: belief-reaction-reactor
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_NAME=belief_reaction
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      collector:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - belief-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+
+  # API - REST + WebSocket endpoints
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    container_name: belief-reaction-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_NAME=belief_reaction
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - API_WORKERS=${API_WORKERS:-4}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - belief-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  # Tile Worker - Async heatmap tile generation
+  tile_worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.tile_worker
+    container_name: belief-reaction-tile-worker
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_NAME=belief_reaction
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TILE_WORKERS=${TILE_WORKERS:-2}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - belief-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+# =============================================================================
+# Networks
+# =============================================================================
+
+networks:
+  belief-network:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
 
 volumes:
   timescale_data:
+    driver: local
   redis_data:
+    driver: local
