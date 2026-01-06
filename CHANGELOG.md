@@ -107,8 +107,8 @@ TIME_BUCKET_MS = 250                 # 250ms time buckets
 - `baseline_size` using 500ms median (manipulation-resistant)
 
 ### Phase 3: Leading Events
-- `PRE_SHOCK_PULL`: No-trade withdrawals (information signal)
-- `DEPTH_COLLAPSE`: Multi-level synchronized collapse (panic signal)
+- `PRE_SHOCK_PULL`: No-trade withdrawals (leading evidence)
+- `DEPTH_COLLAPSE`: Multi-level synchronized collapse (structural evidence)
 - `AnchorLevelTracker`: Key price level identification
 
 ### Phase 4: Belief State Machine
@@ -134,8 +134,8 @@ TIME_BUCKET_MS = 250                 # 250ms time buckets
 
 | Type | Meaning | Detection Rule |
 |------|---------|----------------|
-| PRE_SHOCK_PULL | Information signal | 80%→20% drop without trades |
-| DEPTH_COLLAPSE | Panic signal | 3+ levels drop 60%+ within 1s std |
+| PRE_SHOCK_PULL | Leading evidence | 80%→20% drop without trades |
+| DEPTH_COLLAPSE | Structural evidence | 3+ levels drop 60%+ within 1s std |
 | GRADUAL_THINNING | Slow withdrawal | 40%+ depth drop in 60s, <10% trade-driven |
 
 ## Belief States
