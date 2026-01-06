@@ -1,22 +1,45 @@
 """
-API Middleware Integration (v5.24)
+API Middleware Integration (v5.24, v5.36 trace support)
 
-Integrates security, throttling, and audit logging into FastAPI.
+Integrates security, throttling, audit logging, and distributed tracing into FastAPI.
 
 Middleware order (executed first-to-last on request, last-to-first on response):
-1. AuditMiddleware - Log all requests
-2. AuthMiddleware - API key authentication
-3. ThrottleMiddleware - Rate limiting
+1. TraceMiddleware - Distributed tracing (v5.36)
+2. AuditMiddleware - Log all requests
+3. AuthMiddleware - API key authentication
+4. ThrottleMiddleware - Rate limiting
 
-"安全 → 限流 → 审计"
+"追踪 → 安全 → 限流 → 审计"
 """
 
 import time
+import uuid
+import contextvars
 from typing import Optional, Callable, Dict, Any
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import asyncio
+
+# v5.36: Context variable for trace ID propagation
+_trace_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('trace_id', default='')
+_span_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('span_id', default='')
+
+
+def get_trace_id() -> str:
+    """Get current trace ID from context"""
+    return _trace_id_var.get('')
+
+
+def get_span_id() -> str:
+    """Get current span ID from context"""
+    return _span_id_var.get('')
+
+
+def set_trace_context(trace_id: str, span_id: str) -> None:
+    """Set trace context (for testing or manual propagation)"""
+    _trace_id_var.set(trace_id)
+    _span_id_var.set(span_id)
 
 from backend.security.auth import (
     APIKeyManager,
@@ -141,6 +164,73 @@ def is_public_endpoint(method: str, path: str) -> bool:
 
 
 # =============================================================================
+# Trace Middleware (v5.36)
+# =============================================================================
+
+class TraceMiddleware(BaseHTTPMiddleware):
+    """
+    Distributed tracing middleware (v5.36).
+
+    Extracts or generates trace IDs for request correlation across services.
+    Supports W3C Trace Context (traceparent) and custom X-Trace-ID headers.
+
+    Sets:
+    - request.state.trace_id: Trace ID for the request chain
+    - request.state.span_id: Span ID for this specific request
+    - Context variables for access in any code path
+
+    Response headers:
+    - X-Trace-ID: The trace ID
+    - X-Span-ID: The span ID for this request
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Try to extract trace ID from headers
+        trace_id = None
+        parent_span_id = None
+
+        # Check W3C traceparent header first (format: version-traceid-parentid-flags)
+        traceparent = request.headers.get("traceparent")
+        if traceparent:
+            try:
+                parts = traceparent.split("-")
+                if len(parts) >= 3:
+                    trace_id = parts[1]
+                    parent_span_id = parts[2]
+            except (ValueError, IndexError):
+                pass
+
+        # Fallback to X-Trace-ID header
+        if not trace_id:
+            trace_id = request.headers.get("X-Trace-ID")
+
+        # Generate new trace ID if not provided
+        if not trace_id:
+            trace_id = uuid.uuid4().hex
+
+        # Always generate a new span ID for this request
+        span_id = uuid.uuid4().hex[:16]  # 16 hex chars = 8 bytes
+
+        # Store in request state
+        request.state.trace_id = trace_id
+        request.state.span_id = span_id
+        request.state.parent_span_id = parent_span_id
+
+        # Set context variables for access anywhere in the call stack
+        _trace_id_var.set(trace_id)
+        _span_id_var.set(span_id)
+
+        # Process request
+        response = await call_next(request)
+
+        # Add trace headers to response
+        response.headers["X-Trace-ID"] = trace_id
+        response.headers["X-Span-ID"] = span_id
+
+        return response
+
+
+# =============================================================================
 # Audit Middleware
 # =============================================================================
 
@@ -158,10 +248,13 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         start_time = time.time()
-        request_id = f"req_{int(start_time * 1000)}"
 
-        # Store request_id for other middleware
-        request.state.request_id = request_id
+        # v5.36: Use trace_id from TraceMiddleware, fallback to generated ID
+        trace_id = getattr(request.state, 'trace_id', None) or f"req_{int(start_time * 1000)}"
+        span_id = getattr(request.state, 'span_id', None) or ''
+
+        # Store request_id for backward compatibility
+        request.state.request_id = trace_id
 
         # Process request
         response = await call_next(request)
@@ -196,14 +289,17 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 "query": str(request.url.query),
                 "status_code": response.status_code,
                 "duration_ms": round(duration_ms, 2),
+                # v5.36: Add trace context
+                "trace_id": trace_id,
+                "span_id": span_id,
             },
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
-            request_id=request_id,
+            request_id=trace_id,
         )
 
-        # Add request ID to response headers
-        response.headers["X-Request-ID"] = request_id
+        # Add request ID to response headers (for backward compatibility)
+        response.headers["X-Request-ID"] = trace_id
 
         return response
 
@@ -409,19 +505,21 @@ def register_security_middleware(
     require_auth: bool = False,
     enable_throttling: bool = True,
     enable_audit: bool = True,
+    enable_tracing: bool = True,
 ) -> None:
     """
     Register all security middleware on a FastAPI app.
 
     Order matters! Middleware is executed in reverse order of registration.
-    We want: Request → Audit → Auth → Throttle → Handler
-    So we register: Throttle, Auth, Audit (reverse order)
+    We want: Request → Trace → Audit → Auth → Throttle → Handler
+    So we register: Throttle, Auth, Audit, Trace (reverse order)
 
     Args:
         app: FastAPI application
         require_auth: Whether to require authentication for all non-public endpoints
         enable_throttling: Whether to enable rate limiting
         enable_audit: Whether to enable audit logging
+        enable_tracing: Whether to enable distributed tracing (v5.36)
     """
     # Register in reverse order of desired execution
     if enable_throttling:
@@ -431,6 +529,10 @@ def register_security_middleware(
 
     if enable_audit:
         app.add_middleware(AuditMiddleware)
+
+    # v5.36: Trace middleware must be first (registered last)
+    if enable_tracing:
+        app.add_middleware(TraceMiddleware)
 
 
 # =============================================================================
