@@ -162,6 +162,20 @@ class AnchorLevel(BaseModel):
 # Event Schemas
 # =============================================================================
 
+class LatencyInfo(BaseModel):
+    """
+    Detection latency disclosure.
+
+    v5.36: Per expert review - "让用户明确知道你什么时候才知道"
+    Prevents system from being mistaken as "prediction".
+    """
+    event_ts: int = Field(..., description="When the market event occurred (ms)")
+    detected_ts: int = Field(..., description="When the system detected it (ms)")
+    detection_latency_ms: int = Field(..., description="Detection delay in ms")
+    window_type: Optional[str] = Field(None, description="FAST/SLOW/IMMEDIATE")
+    observation_end_ts: Optional[int] = Field(None, description="When observation window ended (ms)")
+
+
 class ShockEvent(BaseModel):
     """Shock detection event"""
     id: str
@@ -173,6 +187,8 @@ class ShockEvent(BaseModel):
     baseline_size: Optional[float] = None
     tick_size: float
     trigger: ShockTrigger
+    # v5.36: Latency disclosure
+    latency: Optional[LatencyInfo] = Field(None, description="v5.36: Detection latency disclosure")
 
 
 class ReactionProof(BaseModel):
@@ -204,6 +220,8 @@ class ReactionEvent(BaseModel):
     reaction: ReactionType
     proof: Optional[ReactionProof] = None
     attribution: Optional[ReactionAttributionSummary] = Field(None, description="v5.25: Attribution data")
+    # v5.36: Latency disclosure
+    latency: Optional[LatencyInfo] = Field(None, description="v5.36: Detection latency disclosure")
 
 
 class PriceBand(BaseModel):

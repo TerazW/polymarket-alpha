@@ -772,3 +772,214 @@ def get_event_detail(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Multi-Market Comparison API (v5.36)
+# =============================================================================
+
+class MarketTimePoint(BaseModel):
+    """Single time point for a market in comparison view"""
+    ts: int
+    belief_state: str
+    reaction_type: Optional[str] = None
+    price: Optional[float] = None
+    side: Optional[str] = None
+
+
+class MarketTimeSeries(BaseModel):
+    """Time series data for one market"""
+    token_id: str
+    question: str
+    outcome: str
+    points: List[MarketTimePoint]
+    state_changes: int = 0
+    reaction_count: int = 0
+
+
+class EventComparisonResponse(BaseModel):
+    """
+    Multi-market comparison with synchronized time axes.
+
+    v5.36: Per expert review - "为什么 A 崩了，B 没崩？"
+    Provides side-by-side comparison of market behaviors.
+    """
+    event_id: str
+    event_title: str
+    from_ts: int
+    to_ts: int
+    window_minutes: int
+    markets: List[MarketTimeSeries]
+    # Summary
+    divergence_detected: bool = Field(..., description="True if markets showed divergent behavior")
+    divergence_description: Optional[str] = None
+
+
+@router.get("/{event_id}/compare", response_model=EventComparisonResponse)
+def get_event_comparison(
+    event_id: str,
+    window_minutes: int = Query(60, ge=10, le=1440, description="Time window in minutes"),
+    bucket_ms: int = Query(60000, ge=10000, le=300000, description="Time bucket size in ms"),
+):
+    """
+    Get synchronized multi-market comparison for an event.
+
+    v5.36: Per expert review - enables side-by-side analysis.
+    Core question answered: "为什么 A 崩了，B 没崩？"
+
+    Returns parallel time series for all markets in the event,
+    aligned to the same time axis for direct comparison.
+    """
+    try:
+        conn = get_db_connection()
+        market_series = []
+
+        with conn.cursor() as cur:
+            # Get event info
+            cur.execute("""
+                SELECT event_id, COALESCE(event_title, question) as event_title
+                FROM markets WHERE event_id = %s LIMIT 1
+            """, (event_id,))
+            event_row = cur.fetchone()
+
+            if not event_row:
+                raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+
+            # Get all markets in event
+            cur.execute("""
+                SELECT yes_token_id, no_token_id, question
+                FROM markets
+                WHERE event_id = %s AND active = true AND closed = false
+            """, (event_id,))
+            markets = cur.fetchall()
+
+            if not markets:
+                raise HTTPException(status_code=404, detail=f"No active markets in event {event_id}")
+
+            # Calculate time range
+            to_ts_dt = "NOW()"
+            from_ts_dt = f"NOW() - INTERVAL '{window_minutes} minutes'"
+
+            # For each market, get state changes and reactions
+            for m in markets:
+                for outcome, token_id in [('YES', m['yes_token_id']), ('NO', m['no_token_id'])]:
+                    if not token_id:
+                        continue
+
+                    points = []
+
+                    # Get state changes
+                    cur.execute("""
+                        SELECT ts, new_state
+                        FROM belief_states
+                        WHERE token_id = %s
+                        AND ts > """ + from_ts_dt + """
+                        ORDER BY ts ASC
+                    """, (token_id,))
+                    state_changes = cur.fetchall()
+
+                    state_change_count = len(state_changes)
+
+                    for sc in state_changes:
+                        points.append(MarketTimePoint(
+                            ts=int(sc['ts'].timestamp() * 1000),
+                            belief_state=sc['new_state'],
+                            reaction_type=None,
+                        ))
+
+                    # Get reactions
+                    cur.execute("""
+                        SELECT ts, reaction_type, price, side
+                        FROM reaction_events
+                        WHERE token_id = %s
+                        AND ts > """ + from_ts_dt + """
+                        ORDER BY ts ASC
+                    """, (token_id,))
+                    reactions = cur.fetchall()
+
+                    reaction_count = len(reactions)
+
+                    for r in reactions:
+                        points.append(MarketTimePoint(
+                            ts=int(r['ts'].timestamp() * 1000),
+                            belief_state="",  # Will be filled from state context
+                            reaction_type=r['reaction_type'],
+                            price=float(r['price']) if r['price'] else None,
+                            side=r['side'],
+                        ))
+
+                    # Sort by timestamp
+                    points.sort(key=lambda p: p.ts)
+
+                    # Get current state
+                    cur.execute("""
+                        SELECT new_state FROM belief_states
+                        WHERE token_id = %s
+                        ORDER BY ts DESC LIMIT 1
+                    """, (token_id,))
+                    current_state_row = cur.fetchone()
+                    current_state = current_state_row['new_state'] if current_state_row else 'STABLE'
+
+                    # Fill in belief_state for reaction points (carry forward)
+                    last_state = current_state
+                    for i, p in enumerate(points):
+                        if p.belief_state:
+                            last_state = p.belief_state
+                        else:
+                            points[i] = MarketTimePoint(
+                                ts=p.ts,
+                                belief_state=last_state,
+                                reaction_type=p.reaction_type,
+                                price=p.price,
+                                side=p.side,
+                            )
+
+                    market_series.append(MarketTimeSeries(
+                        token_id=token_id,
+                        question=m['question'],
+                        outcome=outcome,
+                        points=points,
+                        state_changes=state_change_count,
+                        reaction_count=reaction_count,
+                    ))
+
+        conn.close()
+
+        # Calculate time range
+        import time
+        to_ts = int(time.time() * 1000)
+        from_ts = to_ts - (window_minutes * 60 * 1000)
+
+        # Detect divergence
+        divergence = False
+        divergence_desc = None
+
+        # Check if any market has BROKEN/CRACKING while others are STABLE
+        broken_markets = [m for m in market_series if any(p.belief_state in ('BROKEN', 'CRACKING') for p in m.points)]
+        stable_markets = [m for m in market_series if all(p.belief_state == 'STABLE' for p in m.points) or not m.points]
+
+        if broken_markets and stable_markets:
+            divergence = True
+            broken_names = [f"{m.question} ({m.outcome})" for m in broken_markets[:3]]
+            stable_names = [f"{m.question} ({m.outcome})" for m in stable_markets[:3]]
+            divergence_desc = (
+                f"Divergent behavior detected: {', '.join(broken_names)} showed stress "
+                f"while {', '.join(stable_names)} remained stable. "
+                f"This suggests market-specific factors rather than event-wide dynamics."
+            )
+
+        return EventComparisonResponse(
+            event_id=event_id,
+            event_title=event_row['event_title'],
+            from_ts=from_ts,
+            to_ts=to_ts,
+            window_minutes=window_minutes,
+            markets=market_series,
+            divergence_detected=divergence,
+            divergence_description=divergence_desc,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
