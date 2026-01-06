@@ -155,7 +155,7 @@ class TestExplainabilitySchemas:
         exp = StateExplanationInfo(
             token_id="token_123",
             current_state="FRAGILE",
-            confidence=70.0,
+            classification_confidence=70.0,
             headline="Early stress signals",
             summary="The market is showing early signs of stress.",
             positive_factors=[
@@ -187,7 +187,7 @@ class TestExplainabilitySchemas:
             window_minutes=10,
         )
         assert exp.current_state == "FRAGILE"
-        assert exp.confidence == 70.0
+        assert exp.classification_confidence == 70.0
         assert len(exp.positive_factors) == 1
         assert len(exp.negative_factors) == 1
         assert exp.trend == TrendDirection.WORSENING
@@ -222,7 +222,7 @@ class TestRadarIntegration:
             evidence_grade=EvidenceGrade.A,
             fragile_index_10m=5.0,
             leading_rate_10m=2.0,
-            confidence=85.0,
+            evidence_confidence=85.0,
             data_health=DataHealth(
                 missing_bucket_ratio_10m=0.0,
                 rebuild_count_10m=0,
@@ -251,7 +251,7 @@ class TestRadarIntegration:
             evidence_grade=EvidenceGrade.A,
             fragile_index_10m=5.0,
             leading_rate_10m=2.0,
-            confidence=85.0,
+            evidence_confidence=85.0,
             data_health=DataHealth(
                 missing_bucket_ratio_10m=0.0,
                 rebuild_count_10m=0,
@@ -288,10 +288,10 @@ class TestRadarIntegration:
                 belief_state=state,
                 state_since_ts=1704067200000,
                 state_severity=0,
-            evidence_grade=EvidenceGrade.A,
+                evidence_grade=EvidenceGrade.A,
                 fragile_index_10m=5.0,
                 leading_rate_10m=2.0,
-                confidence=85.0,
+                evidence_confidence=85.0,
                 data_health=DataHealth(
                     missing_bucket_ratio_10m=0.0,
                     rebuild_count_10m=0,
@@ -395,7 +395,7 @@ class TestEvidenceIntegration:
         explanation = StateExplanationInfo(
             token_id="token_abc",
             current_state="FRAGILE",
-            confidence=70.0,
+            classification_confidence=70.0,
             headline="Early stress signals",
             summary="The market is showing early signs of stress.",
             positive_factors=[],
@@ -434,7 +434,7 @@ class TestEvidenceIntegration:
 
         assert response.state_explanation is not None
         assert response.state_explanation.current_state == "FRAGILE"
-        assert response.state_explanation.confidence == 70.0
+        assert response.state_explanation.classification_confidence == 70.0
 
     def test_evidence_response_without_explanation(self):
         """Test EvidenceResponse works without explanation (backward compatible)"""
@@ -565,7 +565,7 @@ class TestSerialization:
         exp = StateExplanationInfo(
             token_id="token_123",
             current_state="FRAGILE",
-            confidence=70.0,
+            classification_confidence=70.0,
             headline="Early stress signals",
             summary="The market is showing early signs of stress.",
             positive_factors=[
@@ -586,7 +586,7 @@ class TestSerialization:
         data = exp.model_dump()
         assert data['token_id'] == "token_123"
         assert data['current_state'] == "FRAGILE"
-        assert data['confidence'] == 70.0
+        assert data['classification_confidence'] == 70.0
         assert len(data['positive_factors']) == 1
         assert data['positive_factors'][0]['factor'] == 'QUICK_REFILL'
 
@@ -612,7 +612,7 @@ class TestSerialization:
             evidence_grade=EvidenceGrade.A,
             fragile_index_10m=5.0,
             leading_rate_10m=2.0,
-            confidence=85.0,
+            evidence_confidence=85.0,
             data_health=DataHealth(
                 missing_bucket_ratio_10m=0.0,
                 rebuild_count_10m=0,
@@ -682,22 +682,22 @@ class TestValidation:
         exp = StateExplanationInfo(
             token_id="token_123",
             current_state="STABLE",
-            confidence=0.0,
+            classification_confidence=0.0,
             headline="Test",
             summary="Test",
             generated_at=1704067200000,
         )
-        assert exp.confidence == 0.0
+        assert exp.classification_confidence == 0.0
 
         exp = StateExplanationInfo(
             token_id="token_123",
             current_state="STABLE",
-            confidence=100.0,
+            classification_confidence=100.0,
             headline="Test",
             summary="Test",
             generated_at=1704067200000,
         )
-        assert exp.confidence == 100.0
+        assert exp.classification_confidence == 100.0
 
         # Invalid
         with pytest.raises(Exception):

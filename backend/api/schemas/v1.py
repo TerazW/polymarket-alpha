@@ -80,6 +80,22 @@ class ReplayCatalogKind(str, Enum):
     ALERT = "ALERT"
 
 
+# v5.36: False positive reason categories for algorithm improvement
+class FalsePositiveReason(str, Enum):
+    """
+    Reason categories for false positive alerts.
+    This data feeds back into algorithm improvement.
+
+    v5.36: False positive tracking is critical for algorithm evolution.
+    """
+    THIN_MARKET = "THIN_MARKET"      # Low liquidity caused false trigger
+    NOISE = "NOISE"                   # Random noise, not meaningful signal
+    MANIPULATION = "MANIPULATION"     # Detected manipulation pattern
+    STALE_DATA = "STALE_DATA"         # Data lag/staleness caused false trigger
+    THRESHOLD_TOO_SENSITIVE = "THRESHOLD_TOO_SENSITIVE"  # Need to adjust thresholds
+    OTHER = "OTHER"                   # Other reason (requires note)
+
+
 # v5.34: Evidence Grade - mandatory quality indicator
 class EvidenceGrade(str, Enum):
     """
@@ -245,7 +261,7 @@ class RadarRow(BaseModel):
     evidence_grade: EvidenceGrade = Field(..., description="v5.34: Evidence quality grade (A/B/C/D)")
     fragile_index_10m: float = Field(..., ge=0)
     leading_rate_10m: float = Field(..., ge=0)
-    confidence: float = Field(..., ge=0, le=100)
+    evidence_confidence: float = Field(..., ge=0, le=100, description="v5.36: Evidence completeness confidence (NOT market confidence)")
     data_health: DataHealth
     last_critical_alert: Optional[LastCriticalAlert] = None
     explanation: Optional[RadarStateExplanationCompact] = Field(None, description="v5.25: State explanation")
@@ -308,6 +324,10 @@ class Alert(BaseModel):
     v5.34: evidence_grade determines allowed severity:
     - Grade A/B: Can trigger any severity including CRITICAL
     - Grade C/D: Can only trigger MEDIUM/LOW, requires manual confirmation for escalation
+
+    v5.36: Recovery evidence required for resolution
+    - resolution requires system-generated recovery_evidence
+    - false_positive tracking for algorithm improvement
     """
     alert_id: str
     token_id: str
@@ -317,9 +337,16 @@ class Alert(BaseModel):
     status: AlertStatus
     type: str
     summary: str
-    confidence: float = Field(..., ge=0, le=100)
+    evidence_confidence: float = Field(..., ge=0, le=100, description="v5.36: Evidence completeness confidence (NOT market confidence)")
     evidence_ref: EvidenceRef
     payload: Optional[Dict[str, Any]] = None
+    # v5.36: Recovery evidence for resolution
+    recovery_evidence: Optional[List[str]] = Field(None, description="v5.36: System-generated evidence supporting resolution")
+    resolved_at: Optional[int] = Field(None, description="Timestamp when resolved")
+    resolved_by: Optional[str] = Field(None, description="Who resolved (user_id or 'system')")
+    # v5.36: False positive tracking
+    is_false_positive: bool = Field(False, description="v5.36: Marked as false positive")
+    false_positive_reason: Optional[str] = Field(None, description="v5.36: Reason for false positive (thin_market, noise, manipulation, other)")
 
 
 class AlertsResponse(BaseModel):
@@ -502,10 +529,15 @@ class CounterfactualCondition(BaseModel):
 
 
 class StateExplanationInfo(BaseModel):
-    """Complete explanation for a belief state"""
+    """
+    Complete explanation for a belief state.
+
+    v5.36: Renamed confidence → classification_confidence to avoid confusion.
+    This is the confidence in the state CLASSIFICATION, not in the evidence or market.
+    """
     token_id: str
     current_state: str
-    confidence: float = Field(..., ge=0, le=100)
+    classification_confidence: float = Field(..., ge=0, le=100, description="v5.36: Confidence in state classification (NOT evidence or market confidence)")
     headline: str
     summary: str
     positive_factors: List[ExplainFactor] = Field(default_factory=list)

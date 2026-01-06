@@ -4,7 +4,7 @@ Implements OpenAPI spec endpoints
 """
 
 from fastapi import APIRouter, Query, HTTPException, WebSocket, WebSocketDisconnect
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 import time
 import base64
 import psycopg2
@@ -297,7 +297,8 @@ def get_radar(
                 state_severity=STATE_SEVERITY.get(state, 0),
                 fragile_index_10m=reaction_count * 0.5 + leading_count * 1.5,
                 leading_rate_10m=leading_count,
-                confidence=85.0 if state == 'STABLE' else 70.0 if state == 'FRAGILE' else 50.0,
+                # v5.36: Renamed from confidence to evidence_confidence
+                evidence_confidence=85.0 if state == 'STABLE' else 70.0 if state == 'FRAGILE' else 50.0,
                 data_health=DataHealth(
                     missing_bucket_ratio_10m=0.0,
                     rebuild_count_10m=0,
@@ -582,7 +583,7 @@ def get_evidence(
         state_explanation = StateExplanationInfo(
             token_id=token_id,
             current_state=current_state,
-            confidence=explanation_obj.confidence,
+            classification_confidence=explanation_obj.confidence,
             headline=explanation_obj.headline_en,
             summary=explanation_obj.summary_en,
             positive_factors=[
@@ -1024,6 +1025,21 @@ class AlertAckRequest(BaseModel):
     acked_by: Optional[str] = None
 
 
+class AlertResolveRequest(BaseModel):
+    """
+    Request body for resolving an alert.
+
+    v5.36: Resolution must include either:
+    - System-generated recovery_evidence, OR
+    - is_false_positive=True with false_positive_reason
+    """
+    note: Optional[str] = None
+    resolved_by: Optional[str] = None
+    # v5.36: False positive tracking
+    is_false_positive: bool = False
+    false_positive_reason: Optional[str] = None  # Required if is_false_positive=True
+
+
 class AlertAckResponse(BaseModel):
     """Response for alert acknowledgment"""
     alert_id: str
@@ -1031,6 +1047,23 @@ class AlertAckResponse(BaseModel):
     acked_at: int
     acked_by: Optional[str] = None
     note: Optional[str] = None
+
+
+class AlertResolveResponse(BaseModel):
+    """
+    Response for alert resolution.
+
+    v5.36: Includes system-generated recovery evidence.
+    """
+    alert_id: str
+    status: AlertStatus
+    resolved_at: int
+    resolved_by: Optional[str] = None
+    note: Optional[str] = None
+    # v5.36: System-generated recovery evidence
+    recovery_evidence: List[str] = []
+    is_false_positive: bool = False
+    false_positive_reason: Optional[str] = None
 
 
 @router.put("/alerts/{alert_id}/ack", response_model=AlertAckResponse)
@@ -1114,28 +1147,43 @@ async def acknowledge_alert(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/alerts/{alert_id}/resolve", response_model=AlertAckResponse)
+@router.put("/alerts/{alert_id}/resolve", response_model=AlertResolveResponse)
 async def resolve_alert(
     alert_id: str,
-    body: AlertAckRequest = None,
+    body: AlertResolveRequest = None,
 ):
     """
     Resolve an alert, changing its status to RESOLVED.
 
+    v5.36: Resolution must include system-generated recovery evidence.
+    The system automatically queries current market state to generate evidence.
+
     - **alert_id**: The ID of the alert to resolve
     - **note**: Optional note explaining the resolution
-    - **acked_by**: Optional identifier of who resolved (user/system)
+    - **resolved_by**: Optional identifier of who resolved (user/system)
+    - **is_false_positive**: Mark as false positive (for algorithm improvement)
+    - **false_positive_reason**: Required if is_false_positive=True
     """
     try:
         conn = get_db_connection()
         resolved_at = int(time.time() * 1000)
         note = body.note if body else None
-        resolved_by = body.acked_by if body else None
+        resolved_by = body.resolved_by if body else None
+        is_false_positive = body.is_false_positive if body else False
+        false_positive_reason = body.false_positive_reason if body else None
+
+        # Validate false positive requires reason
+        if is_false_positive and not false_positive_reason:
+            raise HTTPException(
+                status_code=400,
+                detail="false_positive_reason is required when is_false_positive=True"
+            )
 
         with conn.cursor() as cur:
-            # Check if alert exists
+            # Check if alert exists and get details
             cur.execute("""
-                SELECT alert_id, status, token_id, severity, summary
+                SELECT alert_id, status, token_id, severity, summary, alert_type,
+                       evidence_token, evidence_t0
                 FROM alerts
                 WHERE alert_id = %s
             """, (alert_id,))
@@ -1144,16 +1192,80 @@ async def resolve_alert(
             if not row:
                 raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
 
-            # Update alert status
+            token_id = row['token_id']
+            alert_type = row['alert_type']
+
+            # v5.36: Generate recovery evidence from current state
+            recovery_evidence = []
+
+            if not is_false_positive:
+                # Query current belief state
+                cur.execute("""
+                    SELECT new_state, ts
+                    FROM belief_states
+                    WHERE token_id = %s
+                    ORDER BY ts DESC
+                    LIMIT 1
+                """, (token_id,))
+                current_state = cur.fetchone()
+
+                if current_state:
+                    state_name = current_state['new_state']
+                    state_ts = ts_to_ms(current_state['ts'])
+                    recovery_evidence.append(f"Current belief state: {state_name}")
+                    recovery_evidence.append(f"State last changed at: {state_ts}")
+
+                    # If recovering to STABLE or FRAGILE, it's a positive sign
+                    if state_name in ('STABLE', 'FRAGILE'):
+                        recovery_evidence.append(f"State has recovered from alert trigger condition")
+
+                # Query recent reactions (last 10 minutes)
+                cur.execute("""
+                    SELECT reaction_type, COUNT(*) as cnt
+                    FROM reaction_events
+                    WHERE token_id = %s
+                    AND ts > NOW() - INTERVAL '10 minutes'
+                    GROUP BY reaction_type
+                """, (token_id,))
+                reaction_counts = cur.fetchall()
+
+                if reaction_counts:
+                    total = sum(r['cnt'] for r in reaction_counts)
+                    hold_count = sum(r['cnt'] for r in reaction_counts if r['reaction_type'] == 'HOLD')
+                    if total > 0:
+                        hold_ratio = hold_count / total
+                        recovery_evidence.append(f"Recent HOLD ratio: {hold_ratio:.1%} ({hold_count}/{total} reactions)")
+                        if hold_ratio > 0.5:
+                            recovery_evidence.append("Depth defense active (HOLD > 50%)")
+
+                # If no evidence found, require explicit reason
+                if not recovery_evidence:
+                    recovery_evidence.append("No automatic recovery evidence found - manual resolution")
+                    recovery_evidence.append(f"Resolved by: {resolved_by or 'unknown'}")
+                    if note:
+                        recovery_evidence.append(f"Operator note: {note}")
+
+            else:
+                # False positive - record the reason
+                recovery_evidence.append(f"Marked as FALSE POSITIVE")
+                recovery_evidence.append(f"Reason: {false_positive_reason}")
+                if note:
+                    recovery_evidence.append(f"Additional note: {note}")
+
+            # Update alert status with recovery evidence
             cur.execute("""
                 UPDATE alerts
                 SET status = 'RESOLVED',
                     resolved_at = to_timestamp(%s / 1000.0),
                     resolved_by = %s,
-                    resolve_note = %s
+                    resolve_note = %s,
+                    recovery_evidence = %s,
+                    is_false_positive = %s,
+                    false_positive_reason = %s
                 WHERE alert_id = %s
                 RETURNING alert_id, status
-            """, (resolved_at, resolved_by, note, alert_id))
+            """, (resolved_at, resolved_by, note,
+                  recovery_evidence, is_false_positive, false_positive_reason, alert_id))
 
             conn.commit()
 
@@ -1169,16 +1281,21 @@ async def resolve_alert(
                 "summary": row['summary'],
                 "resolved_at": resolved_at,
                 "resolved_by": resolved_by,
+                "recovery_evidence": recovery_evidence,
+                "is_false_positive": is_false_positive,
             },
             event_type=StreamEventType.ALERT_RESOLVED
         )
 
-        return AlertAckResponse(
+        return AlertResolveResponse(
             alert_id=alert_id,
             status=AlertStatus.RESOLVED,
-            acked_at=resolved_at,
-            acked_by=resolved_by,
+            resolved_at=resolved_at,
+            resolved_by=resolved_by,
             note=note,
+            recovery_evidence=recovery_evidence,
+            is_false_positive=is_false_positive,
+            false_positive_reason=false_positive_reason,
         )
 
     except HTTPException:
