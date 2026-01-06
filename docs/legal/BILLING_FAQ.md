@@ -1,5 +1,8 @@
 # Billing FAQ
 
+**Market Sensemaking**
+**https://marketsensemaking.com**
+
 **Last Updated:** [DATE]
 
 ---
@@ -65,7 +68,7 @@ Yes. We reserve the right to change prices with 30 days advance notice. Price ch
 
 ### Is there startup or academic pricing?
 
-Contact us at [SALES_EMAIL] to discuss special pricing for:
+Contact us at sales@marketsensemaking.com to discuss special pricing for:
 - Startups (< 2 years old, < $1M funding)
 - Academic/research institutions
 - Non-profits
@@ -87,7 +90,7 @@ Contact us at [SALES_EMAIL] to discuss special pricing for:
 
 ### Is my payment information secure?
 
-Yes. We do NOT store your full credit card number. All payment processing is handled by [PAYMENT_PROCESSOR], a PCI-DSS compliant payment processor.
+Yes. We do NOT store your full credit card number. All payment processing is handled by Stripe, a PCI-DSS compliant payment processor.
 
 ### Can I change my payment method?
 
@@ -125,7 +128,7 @@ Go to Account Settings → Billing to view your next billing date.
 3. Confirm cancellation
 4. You'll receive a confirmation email
 
-Alternatively, email [SUPPORT_EMAIL] with your account email and request cancellation.
+Alternatively, email support@marketsensemaking.com with your account email and request cancellation.
 
 ### What happens after I cancel?
 
@@ -169,7 +172,7 @@ Refunds may be issued for:
 
 ### How do I request a refund?
 
-1. Email [SUPPORT_EMAIL] within 14 days of the charge
+1. Email support@marketsensemaking.com within 14 days of the charge
 2. Include: Account email, transaction date, reason for request
 3. We'll respond within 5 business days
 
@@ -247,7 +250,7 @@ Taxes are calculated at checkout based on your billing address. The final amount
 ### Can I get a tax exemption?
 
 If you're a tax-exempt organization:
-1. Email [BILLING_EMAIL] with your exemption certificate
+1. Email billing@marketsensemaking.com with your exemption certificate
 2. We'll update your account
 3. Future charges will exclude applicable taxes
 
@@ -277,7 +280,7 @@ Invoices are also emailed after each charge.
 
 ### Can I get a consolidated invoice?
 
-For Institution plans with multiple seats, contact [BILLING_EMAIL] for consolidated invoicing options.
+For Institution plans with multiple seats, contact billing@marketsensemaking.com for consolidated invoicing options.
 
 ### Can I update my billing details on invoices?
 
@@ -308,7 +311,7 @@ No. Monthly limits reset at the start of each billing period.
 
 ### Can I buy additional capacity?
 
-For one-time needs, contact [SALES_EMAIL]. For ongoing higher capacity, consider upgrading your plan.
+For one-time needs, contact sales@marketsensemaking.com. For ongoing higher capacity, consider upgrading your plan.
 
 ---
 
@@ -329,7 +332,7 @@ Common reasons and solutions:
 ### I was charged twice. What do I do?
 
 1. Check your invoice history to confirm
-2. Email [SUPPORT_EMAIL] with transaction details
+2. Email support@marketsensemaking.com with transaction details
 3. We'll investigate and refund any duplicates
 
 ### My subscription shows as inactive but I paid
@@ -337,14 +340,14 @@ Common reasons and solutions:
 1. Wait 5 minutes (processing delay)
 2. Refresh your browser / re-login
 3. Check spam folder for confirmation email
-4. Contact [SUPPORT_EMAIL] if still not resolved
+4. Contact support@marketsensemaking.com if still not resolved
 
 ### I can't access features I paid for
 
 1. Verify your plan in Account Settings → Billing
 2. Ensure billing is current (no failed payments)
 3. Log out and log back in
-4. Contact [SUPPORT_EMAIL] if the issue persists
+4. Contact support@marketsensemaking.com if the issue persists
 
 ---
 
@@ -352,17 +355,21 @@ Common reasons and solutions:
 
 ### Billing Support
 
-- **Email:** [BILLING_EMAIL]
+- **Email:** billing@marketsensemaking.com
 - **Response time:** 1-2 business days
 
 ### General Support
 
-- **Email:** [SUPPORT_EMAIL]
+- **Email:** support@marketsensemaking.com
 - **Response time:** Same day (business hours)
 
 ### Sales / Enterprise
 
-- **Email:** [SALES_EMAIL]
+- **Email:** sales@marketsensemaking.com
+
+### Website
+
+- **URL:** https://marketsensemaking.com
 
 ---
 
@@ -380,4 +387,21 @@ Common reasons and solutions:
 
 ---
 
-**For questions not covered here, contact [SUPPORT_EMAIL].**
+**For questions not covered here, contact support@marketsensemaking.com.**
+
+---
+
+<footer>
+
+**Market Sensemaking**
+
+Website: https://marketsensemaking.com
+Billing: billing@marketsensemaking.com
+Support: support@marketsensemaking.com
+Sales: sales@marketsensemaking.com
+
+© 2025 Market Sensemaking. All rights reserved.
+
+*Evidence-only. Not advice. Your decisions, your responsibility.*
+
+</footer>

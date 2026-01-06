@@ -1,5 +1,8 @@
 # Terms of Use
 
+**Market Sensemaking**
+**https://marketsensemaking.com**
+
 **Effective Date:** [DATE]
 **Last Updated:** [DATE]
 
@@ -7,7 +10,7 @@
 
 ## 1. Acceptance of Terms
 
-By accessing or using the Belief Reaction System service ("Service"), you agree to be bound by these Terms of Use ("Terms"). If you do not agree, do not use the Service.
+By accessing or using the Market Sensemaking service ("Service"), you agree to be bound by these Terms of Use ("Terms"). If you do not agree, do not use the Service.
 
 ---
 
@@ -110,7 +113,7 @@ You may cancel your subscription at any time. Access continues until the end of 
 
 ### 7.3 How to Cancel or Request Refund
 
-Contact: [SUPPORT_EMAIL]
+Contact: support@marketsensemaking.com
 
 ---
 
@@ -211,7 +214,7 @@ TO THE MAXIMUM EXTENT PERMITTED BY LAW:
 
 ## 13. Indemnification
 
-You agree to indemnify and hold harmless [COMPANY_NAME] and its affiliates, officers, employees, and agents from any claims, damages, losses, or expenses arising from:
+You agree to indemnify and hold harmless Market Sensemaking and its affiliates, officers, employees, and agents from any claims, damages, losses, or expenses arising from:
 
 - Your use of the Service
 - Your violation of these Terms
@@ -277,12 +280,12 @@ We may update these Terms. Continued use after changes constitutes acceptance. M
 
 ## 17. Governing Law & Disputes
 
-These Terms are governed by the laws of [JURISDICTION].
+These Terms are governed by the laws of Canada (Province of Ontario).
 
 Any disputes shall be resolved through:
 1. Good faith negotiation
 2. Mediation (if negotiation fails)
-3. Binding arbitration or court proceedings in [JURISDICTION]
+3. Binding arbitration or court proceedings in Ontario, Canada
 
 You waive any right to participate in class actions.
 
@@ -292,9 +295,9 @@ You waive any right to participate in class actions.
 
 For questions about these Terms:
 
-- **Email:** [LEGAL_EMAIL]
-- **Support:** [SUPPORT_EMAIL]
-- **Address:** [ADDRESS]
+- **Email:** legal@marketsensemaking.com
+- **Support:** support@marketsensemaking.com
+- **Website:** https://marketsensemaking.com
 
 ---
 
@@ -313,3 +316,19 @@ For questions about these Terms:
 ---
 
 **By using the Service, you acknowledge that you have read, understood, and agree to these Terms.**
+
+---
+
+<footer>
+
+**Market Sensemaking**
+
+Website: https://marketsensemaking.com
+Support: support@marketsensemaking.com
+Legal: legal@marketsensemaking.com
+
+© 2025 Market Sensemaking. All rights reserved.
+
+*Evidence-only. Not advice. Your decisions, your responsibility.*
+
+</footer>

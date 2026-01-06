@@ -1,5 +1,8 @@
 # Risk Disclosure
 
+**Market Sensemaking**
+**https://marketsensemaking.com**
+
 **Effective Date:** [DATE]
 **Last Updated:** [DATE]
 
@@ -7,7 +10,7 @@
 
 ## IMPORTANT: READ THIS BEFORE USING THE SERVICE
 
-This Risk Disclosure document explains the inherent limitations, risks, and uncertainties associated with using the Belief Reaction System service ("Service"). By using the Service, you acknowledge that you have read, understood, and accept these risks.
+This Risk Disclosure document explains the inherent limitations, risks, and uncertainties associated with using the Market Sensemaking service ("Service"). By using the Service, you acknowledge that you have read, understood, and accept these risks.
 
 ---
 
@@ -305,8 +308,9 @@ By using the Service, you acknowledge that:
 
 For questions about this Risk Disclosure:
 
-- **Email:** [SUPPORT_EMAIL]
-- **Legal:** [LEGAL_EMAIL]
+- **Support:** support@marketsensemaking.com
+- **Legal:** legal@marketsensemaking.com
+- **Website:** https://marketsensemaking.com
 
 ---
 
@@ -327,3 +331,19 @@ For questions about this Risk Disclosure:
 **THIS DOCUMENT DOES NOT CREATE ANY CONTRACTUAL OBLIGATIONS BEYOND THOSE IN THE TERMS OF USE.**
 
 **BY USING THE SERVICE, YOU CONFIRM THAT YOU HAVE READ, UNDERSTOOD, AND ACCEPT THIS RISK DISCLOSURE.**
+
+---
+
+<footer>
+
+**Market Sensemaking**
+
+Website: https://marketsensemaking.com
+Support: support@marketsensemaking.com
+Legal: legal@marketsensemaking.com
+
+© 2025 Market Sensemaking. All rights reserved.
+
+*Evidence-only. Not advice. Your decisions, your responsibility.*
+
+</footer>

@@ -1,5 +1,8 @@
 # Privacy Policy
 
+**Market Sensemaking**
+**https://marketsensemaking.com**
+
 **Effective Date:** [DATE]
 **Last Updated:** [DATE]
 
@@ -7,7 +10,7 @@
 
 ## Overview
 
-This Privacy Policy explains how [COMPANY_NAME] ("we", "us", "our") collects, uses, and protects your personal information when you use the Belief Reaction System service ("Service").
+This Privacy Policy explains how Market Sensemaking ("we", "us", "our") collects, uses, and protects your personal information when you use the Market Sensemaking service ("Service").
 
 We are committed to protecting your privacy and handling your data responsibly.
 
@@ -203,7 +206,7 @@ Object to processing based on legitimate interests.
 ### 5.7 Withdraw Consent
 Withdraw consent where processing is based on consent.
 
-To exercise these rights, contact: [PRIVACY_EMAIL]
+To exercise these rights, contact: privacy@marketsensemaking.com
 
 We will respond within 30 days (or as required by applicable law).
 
@@ -280,9 +283,9 @@ Material changes will be notified via:
 
 For privacy-related questions or to exercise your rights:
 
-- **Email:** [PRIVACY_EMAIL]
-- **Address:** [ADDRESS]
-- **Data Protection Officer:** [DPO_EMAIL] (if applicable)
+- **Privacy:** privacy@marketsensemaking.com
+- **Support:** support@marketsensemaking.com
+- **Website:** https://marketsensemaking.com
 
 ---
 
@@ -310,9 +313,25 @@ If you are a California resident, you have rights under CCPA including the right
 
 | Your Rights | How to Exercise |
 |-------------|-----------------|
-| Access, correct, delete, export | Contact [PRIVACY_EMAIL] |
+| Access, correct, delete, export | Contact privacy@marketsensemaking.com |
 | Response time | 30 days |
 
 ---
 
 **By using the Service, you acknowledge that you have read and understood this Privacy Policy.**
+
+---
+
+<footer>
+
+**Market Sensemaking**
+
+Website: https://marketsensemaking.com
+Privacy: privacy@marketsensemaking.com
+Support: support@marketsensemaking.com
+
+© 2025 Market Sensemaking. All rights reserved.
+
+*Evidence-only. Not advice. Your decisions, your responsibility.*
+
+</footer>
