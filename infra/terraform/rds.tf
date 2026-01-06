@@ -75,7 +75,7 @@ resource "aws_db_instance" "main" {
 
   # Engine
   engine               = "postgres"
-  engine_version       = "15.4"
+  engine_version       = "15"  # Use latest PostgreSQL 15 minor version
   instance_class       = var.db_instance_class
   parameter_group_name = aws_db_parameter_group.postgres.name
 
