@@ -622,13 +622,29 @@ def _generate_counterfactuals(
     current_state: str,
     metrics: Dict[str, Any],
 ) -> List[CounterfactualCondition]:
-    """Generate counterfactual conditions for reaching better states"""
+    """
+    Generate counterfactual conditions for state transitions.
+
+    v5.36: Enhanced per expert review - now includes BOTH directions:
+    1. What would make this better? (recovery path)
+    2. Why wasn't this worse? (anti-misuse, explains untriggered conditions)
+
+    The second direction is critical for preventing misuse:
+    "未判为 BROKEN：第二 anchor 未出现 VACUUM"
+    """
     counterfactuals = []
 
     hold_ratio = metrics.get("hold_ratio", 0.5)
     vacuum_count = metrics.get("vacuum_count", 0)
     pull_count = metrics.get("pull_count", 0)
     fragility_index = metrics.get("fragility_index", 50)
+    multi_anchor_vacuum = metrics.get("multi_anchor_vacuum", False)
+    depth_collapse = metrics.get("depth_collapse", False)
+    pre_shock_pull = metrics.get("pre_shock_pull", False)
+
+    # =========================================================================
+    # RECOVERY PATH: What would make this better?
+    # =========================================================================
 
     if current_state == "BROKEN":
         conditions = []
@@ -671,6 +687,65 @@ def _generate_counterfactuals(
             conditions=conditions,
             likelihood="high" if current_state == "FRAGILE" else "low",
         ))
+
+    # =========================================================================
+    # ANTI-MISUSE: Why wasn't this worse? (v5.36)
+    # =========================================================================
+
+    if current_state == "STABLE":
+        # Why not FRAGILE?
+        not_fragile_reasons = []
+        if hold_ratio >= 0.7:
+            not_fragile_reasons.append(f"Hold ratio {hold_ratio:.0%} ≥ 70% threshold")
+        if vacuum_count == 0:
+            not_fragile_reasons.append("No vacuum events detected")
+        if pull_count <= 1:
+            not_fragile_reasons.append(f"PULL reactions ({pull_count}) within normal range")
+        if fragility_index < 30:
+            not_fragile_reasons.append(f"Fragility index {fragility_index:.0f} < 30 threshold")
+
+        if not_fragile_reasons:
+            counterfactuals.append(CounterfactualCondition(
+                target_state="NOT_FRAGILE",
+                conditions=not_fragile_reasons,
+                likelihood="n/a",  # This is "why not" not "how to"
+            ))
+
+    if current_state in ["STABLE", "FRAGILE"]:
+        # Why not CRACKING?
+        not_cracking_reasons = []
+        if vacuum_count == 0:
+            not_cracking_reasons.append("No vacuum events at anchor levels")
+        if not depth_collapse:
+            not_cracking_reasons.append("No depth collapse detected")
+        if hold_ratio >= 0.5:
+            not_cracking_reasons.append(f"Hold ratio {hold_ratio:.0%} maintaining depth defense")
+
+        if not_cracking_reasons:
+            counterfactuals.append(CounterfactualCondition(
+                target_state="NOT_CRACKING",
+                conditions=not_cracking_reasons,
+                likelihood="n/a",
+            ))
+
+    if current_state in ["STABLE", "FRAGILE", "CRACKING"]:
+        # Why not BROKEN?
+        not_broken_reasons = []
+        if not multi_anchor_vacuum:
+            not_broken_reasons.append("Second anchor did not show vacuum")
+        if vacuum_count < 3:
+            not_broken_reasons.append(f"Vacuum count ({vacuum_count}) below BROKEN threshold (≥3)")
+        if hold_ratio >= 0.3:
+            not_broken_reasons.append(f"Hold ratio {hold_ratio:.0%} shows residual defense")
+        if not pre_shock_pull:
+            not_broken_reasons.append("No pre-shock pull pattern detected")
+
+        if not_broken_reasons:
+            counterfactuals.append(CounterfactualCondition(
+                target_state="NOT_BROKEN",
+                conditions=not_broken_reasons,
+                likelihood="n/a",
+            ))
 
     return counterfactuals
 

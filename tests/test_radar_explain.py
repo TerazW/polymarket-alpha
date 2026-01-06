@@ -485,7 +485,8 @@ class TestCounterfactuals:
 
         for cf in explanation.counterfactuals:
             assert len(cf.conditions) > 0
-            assert cf.likelihood in ["high", "medium", "low"]
+            # v5.36: "n/a" added for "why not worse" counterfactuals
+            assert cf.likelihood in ["high", "medium", "low", "n/a"]
 
 
 class TestExplainSingleEvent:

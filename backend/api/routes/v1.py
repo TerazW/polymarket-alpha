@@ -1016,7 +1016,7 @@ def get_heatmap_tiles(
 # Alert ACK API (v5.9)
 # =============================================================================
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AlertAckRequest(BaseModel):
@@ -1559,6 +1559,205 @@ def get_reaction_distribution(
             distribution=distribution,
             hold_dominant=hold_count > total / 2,
             stress_ratio=stress_count / max(1, total),
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Historical Similar Cases API (v5.36)
+# =============================================================================
+
+class SimilarCaseMatch(BaseModel):
+    """A historical case similar to the query pattern"""
+    match_id: str
+    token_id: str
+    market_title: Optional[str]
+    match_ts: int
+    similarity_score: float = Field(..., ge=0, le=1, description="Structural similarity 0-1")
+    pattern_summary: str = Field(..., description="Summary of the matched pattern")
+    reaction_sequence: List[str] = Field(..., description="Reaction types in sequence")
+    state_at_match: str
+    # v5.36: No outcome/result - only evidence
+    # This is critical: we never show what happened AFTER
+
+
+class SimilarCasesResponse(BaseModel):
+    """
+    Historical similar cases response.
+
+    v5.36: Per expert review - "不给结果，只给对齐后的证据"
+    Returns similar patterns WITHOUT any outcome/result information.
+    This prevents the system from being used as a prediction tool.
+    """
+    query_pattern: List[str] = Field(..., description="The query reaction sequence")
+    query_state: str
+    query_ts: int
+    matches: List[SimilarCaseMatch]
+    total_matches: int
+    search_window_days: int
+    # Paradigm enforcement
+    paradigm_note: str = Field(
+        default="Similar patterns identified. No outcomes shown - observe current evidence only.",
+        description="Reminder that this is NOT prediction"
+    )
+
+
+@router.get("/similar-cases", response_model=SimilarCasesResponse)
+def get_similar_cases(
+    token_id: str = Query(..., min_length=1, description="Token ID to find similar cases for"),
+    window_minutes: int = Query(30, ge=5, le=120, description="Window to extract pattern from"),
+    search_days: int = Query(30, ge=1, le=90, description="Days of history to search"),
+    max_results: int = Query(5, ge=1, le=20, description="Maximum matches to return"),
+):
+    """
+    Find historically similar reaction patterns.
+
+    v5.36: Per expert review - "世界级 sensemaking 产品的标志"
+
+    This endpoint finds cases where similar reaction sequences occurred,
+    allowing users to study comparable evidence. It does NOT predict outcomes.
+
+    The response intentionally excludes what happened AFTER the matched pattern.
+    Users must examine the evidence themselves.
+    """
+    try:
+        conn = get_db_connection()
+
+        with conn.cursor() as cur:
+            # Get current pattern for the token
+            cur.execute("""
+                SELECT reaction_type, ts, price, side
+                FROM reaction_events
+                WHERE token_id = %s
+                AND ts > NOW() - INTERVAL '%s minutes'
+                ORDER BY ts ASC
+            """, (token_id, window_minutes))
+            current_reactions = cur.fetchall()
+
+            if not current_reactions:
+                return SimilarCasesResponse(
+                    query_pattern=[],
+                    query_state="UNKNOWN",
+                    query_ts=int(time.time() * 1000),
+                    matches=[],
+                    total_matches=0,
+                    search_window_days=search_days,
+                )
+
+            query_pattern = [r['reaction_type'] for r in current_reactions]
+            query_ts = int(current_reactions[-1]['ts'].timestamp() * 1000) if current_reactions else int(time.time() * 1000)
+
+            # Get current state
+            cur.execute("""
+                SELECT new_state FROM belief_states
+                WHERE token_id = %s
+                ORDER BY ts DESC LIMIT 1
+            """, (token_id,))
+            state_row = cur.fetchone()
+            query_state = state_row['new_state'] if state_row else 'STABLE'
+
+            # Find similar patterns across all tokens in history
+            # Similarity is based on reaction type sequence
+            pattern_len = len(query_pattern)
+            if pattern_len < 2:
+                return SimilarCasesResponse(
+                    query_pattern=query_pattern,
+                    query_state=query_state,
+                    query_ts=query_ts,
+                    matches=[],
+                    total_matches=0,
+                    search_window_days=search_days,
+                    paradigm_note="Need at least 2 reactions to find similar patterns."
+                )
+
+            # Get historical reaction sequences
+            cur.execute("""
+                WITH reaction_windows AS (
+                    SELECT
+                        token_id,
+                        ts,
+                        reaction_type,
+                        price,
+                        LAG(reaction_type, 1) OVER (PARTITION BY token_id ORDER BY ts) as prev1,
+                        LAG(reaction_type, 2) OVER (PARTITION BY token_id ORDER BY ts) as prev2,
+                        LAG(reaction_type, 3) OVER (PARTITION BY token_id ORDER BY ts) as prev3
+                    FROM reaction_events
+                    WHERE ts > NOW() - INTERVAL '%s days'
+                    AND ts < NOW() - INTERVAL '1 hour'  -- Exclude very recent
+                    AND token_id != %s  -- Exclude same token
+                )
+                SELECT DISTINCT ON (token_id, DATE_TRUNC('hour', ts))
+                    token_id,
+                    ts,
+                    reaction_type,
+                    prev1, prev2, prev3
+                FROM reaction_windows
+                WHERE reaction_type IS NOT NULL
+                LIMIT 1000
+            """, (search_days, token_id))
+            historical = cur.fetchall()
+
+            matches = []
+
+            for h in historical:
+                # Build the historical sequence
+                hist_seq = []
+                for prev in [h['prev3'], h['prev2'], h['prev1'], h['reaction_type']]:
+                    if prev:
+                        hist_seq.append(prev)
+
+                if len(hist_seq) < 2:
+                    continue
+
+                # Calculate similarity (simple matching score)
+                min_len = min(len(query_pattern), len(hist_seq))
+                match_count = sum(1 for i in range(min_len)
+                                 if query_pattern[-(i+1)] == hist_seq[-(i+1)])
+                similarity = match_count / max(len(query_pattern), len(hist_seq))
+
+                if similarity >= 0.5:  # At least 50% similar
+                    # Get state at that time
+                    cur.execute("""
+                        SELECT new_state FROM belief_states
+                        WHERE token_id = %s AND ts <= %s
+                        ORDER BY ts DESC LIMIT 1
+                    """, (h['token_id'], h['ts']))
+                    hist_state = cur.fetchone()
+
+                    # Get market title
+                    cur.execute("""
+                        SELECT question FROM markets
+                        WHERE yes_token_id = %s OR no_token_id = %s
+                        LIMIT 1
+                    """, (h['token_id'], h['token_id']))
+                    market = cur.fetchone()
+
+                    matches.append(SimilarCaseMatch(
+                        match_id=f"match_{h['token_id']}_{int(h['ts'].timestamp())}",
+                        token_id=h['token_id'],
+                        market_title=market['question'] if market else None,
+                        match_ts=int(h['ts'].timestamp() * 1000),
+                        similarity_score=round(similarity, 2),
+                        pattern_summary=f"{' → '.join(hist_seq[-4:])}",
+                        reaction_sequence=hist_seq[-4:],
+                        state_at_match=hist_state['new_state'] if hist_state else 'UNKNOWN',
+                    ))
+
+            # Sort by similarity and limit
+            matches.sort(key=lambda m: m.similarity_score, reverse=True)
+            matches = matches[:max_results]
+
+        conn.close()
+
+        return SimilarCasesResponse(
+            query_pattern=query_pattern[-4:],  # Last 4 reactions
+            query_state=query_state,
+            query_ts=query_ts,
+            matches=matches,
+            total_matches=len(matches),
+            search_window_days=search_days,
         )
 
     except Exception as e:
