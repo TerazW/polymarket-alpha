@@ -20,6 +20,20 @@ resource "aws_acm_certificate" "main" {
   }
 }
 
+# NOTE: Certificate validation requires DNS records to be added manually to Cloudflare.
+# After first terraform apply, check the outputs for DNS validation records.
+# Add them to Cloudflare, then run terraform apply again.
+resource "aws_acm_certificate_validation" "main" {
+  certificate_arn = aws_acm_certificate.main.arn
+
+  # We don't use validation_record_fqdns because we're using Cloudflare DNS
+  # The validation will complete once DNS records are added manually
+
+  timeouts {
+    create = "45m"
+  }
+}
+
 # -----------------------------------------------------------------------------
 # Application Load Balancer
 # -----------------------------------------------------------------------------
@@ -156,12 +170,15 @@ resource "aws_lb_listener" "https" {
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate.main.arn
+  certificate_arn   = aws_acm_certificate_validation.main.certificate_arn
 
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.api.arn
   }
+
+  # Wait for certificate to be validated before creating listener
+  depends_on = [aws_acm_certificate_validation.main]
 
   tags = {
     Name = "${var.project_name}-https-listener"
