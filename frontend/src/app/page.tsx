@@ -80,7 +80,8 @@ function radarRowToMarket(row: RadarRow): Market {
     liquidity: 0,
     yes_price: row.market.last_price ?? null,
     state: row.belief_state,
-    confidence: row.confidence,
+    // v5.36: Use evidence_confidence, fallback to deprecated confidence
+    confidence: row.evidence_confidence ?? row.confidence,
     leading_rate_10m: row.leading_rate_10m,
   };
 }
