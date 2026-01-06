@@ -21,5 +21,5 @@ COPY utils/ ./utils/
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Run tile worker
-CMD ["python", "-m", "backend.heatmap.worker"]
+# Run tile worker (precompute service)
+CMD ["python", "-m", "backend.heatmap.precompute"]
