@@ -347,6 +347,7 @@ class Alert(BaseModel):
     v5.36: Recovery evidence required for resolution
     - resolution requires system-generated recovery_evidence
     - false_positive tracking for algorithm improvement
+    - counterfactual disclaimer for CRITICAL/HIGH alerts
     """
     alert_id: str
     token_id: str
@@ -366,6 +367,11 @@ class Alert(BaseModel):
     # v5.36: False positive tracking
     is_false_positive: bool = Field(False, description="v5.36: Marked as false positive")
     false_positive_reason: Optional[str] = Field(None, description="v5.36: Reason for false positive (thin_market, noise, manipulation, other)")
+    # v5.36: Counterfactual disclaimer (required for CRITICAL/HIGH)
+    disclaimer: str = Field(
+        default="This alert indicates observed belief instability. It does NOT imply outcome direction or trading recommendation.",
+        description="v5.36: Counterfactual disclaimer - alerts are evidence, not predictions"
+    )
 
 
 class AlertsResponse(BaseModel):

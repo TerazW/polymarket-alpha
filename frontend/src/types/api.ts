@@ -279,7 +279,13 @@ export interface Alert {
   status: 'open' | 'ack' | 'resolved';
   ack_by?: string;
   ack_at?: number;
+
+  // v5.36: Counterfactual disclaimer
+  disclaimer: string;
 }
+
+// v5.36: Default alert disclaimer
+export const ALERT_DISCLAIMER = "This alert indicates observed belief instability. It does NOT imply outcome direction or trading recommendation.";
 
 export interface AlertsResponse {
   alerts: Alert[];
