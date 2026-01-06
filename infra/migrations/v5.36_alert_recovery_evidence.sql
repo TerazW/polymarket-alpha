@@ -40,6 +40,24 @@ ADD COLUMN IF NOT EXISTS acked_by TEXT;
 ALTER TABLE alerts
 ADD COLUMN IF NOT EXISTS ack_note TEXT;
 
+-- v5.36: Add mute support columns
+ALTER TABLE alerts
+ADD COLUMN IF NOT EXISTS muted_at TIMESTAMPTZ;
+
+ALTER TABLE alerts
+ADD COLUMN IF NOT EXISTS muted_until TIMESTAMPTZ;
+
+ALTER TABLE alerts
+ADD COLUMN IF NOT EXISTS muted_by TEXT;
+
+ALTER TABLE alerts
+ADD COLUMN IF NOT EXISTS mute_reason TEXT;
+
+-- Create index on muted alerts for auto-unmute job
+CREATE INDEX IF NOT EXISTS idx_alerts_muted_until
+ON alerts(muted_until)
+WHERE status = 'MUTED';
+
 -- Create index on false positives for analysis
 CREATE INDEX IF NOT EXISTS idx_alerts_false_positive
 ON alerts(is_false_positive, false_positive_reason)
@@ -63,6 +81,10 @@ ORDER BY count DESC;
 COMMENT ON COLUMN alerts.recovery_evidence IS 'v5.36: System-generated evidence supporting resolution';
 COMMENT ON COLUMN alerts.is_false_positive IS 'v5.36: Marked as false positive for algorithm improvement';
 COMMENT ON COLUMN alerts.false_positive_reason IS 'v5.36: Reason category (THIN_MARKET, NOISE, MANIPULATION, STALE_DATA, THRESHOLD_TOO_SENSITIVE, OTHER)';
+COMMENT ON COLUMN alerts.muted_at IS 'v5.36: When the alert was muted';
+COMMENT ON COLUMN alerts.muted_until IS 'v5.36: When the mute expires (auto-unmute)';
+COMMENT ON COLUMN alerts.muted_by IS 'v5.36: Who muted the alert';
+COMMENT ON COLUMN alerts.mute_reason IS 'v5.36: Reason for muting';
 
 -- ============================================================================
 -- Notes

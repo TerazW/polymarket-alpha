@@ -210,6 +210,9 @@ export interface EvidenceResponse {
 
   // v5.3: Cryptographic hash for evidence verification
   bundle_hash?: string;
+
+  // v5.36: Evidence grade for data quality
+  evidence_grade?: 'A' | 'B' | 'C' | 'D';
 }
 
 // =============================================================================

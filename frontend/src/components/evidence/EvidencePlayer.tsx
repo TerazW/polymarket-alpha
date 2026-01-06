@@ -7,6 +7,7 @@ import { getHeatmapTiles, type HeatmapTileMeta } from '@/lib/api';
 import { HeatmapRenderer } from './HeatmapRenderer';
 import { HashVerificationBadge } from './HashVerification';
 import TileStalenessIndicator from './TileStalenessIndicator';
+import { EvidenceDisclaimer } from './EvidenceDisclaimer';
 import { useTokenStream } from '@/hooks/useStream';
 
 interface EvidencePlayerProps {
@@ -257,6 +258,14 @@ export function EvidencePlayer({
           priceMax={parseFloat(evidence.tiles_manifest.normalization.price_max)}
           height={dimensions.height}
         />
+
+        {/* v5.36: Evidence disclaimer watermark */}
+        <EvidenceDisclaimer position="bottom-left" compact />
+
+        {/* v5.36: STALE/TAINTED data overlay */}
+        {evidence.evidence_grade && ['C', 'D'].includes(evidence.evidence_grade) && (
+          <DataDegradationOverlay grade={evidence.evidence_grade} />
+        )}
       </div>
 
       {/* Timeline with events */}
@@ -517,4 +526,60 @@ function formatTime(ts: number): string {
     minute: '2-digit',
     second: '2-digit',
   });
+}
+
+/**
+ * v5.36: Data Degradation Overlay
+ *
+ * Shows prominent STALE or TAINTED warning when evidence grade is C or D.
+ * This ensures users are aware of data quality issues.
+ */
+function DataDegradationOverlay({ grade }: { grade: string }) {
+  const isTainted = grade === 'D';
+  const label = isTainted ? 'TAINTED' : 'STALE';
+  const color = isTainted ? 'rgba(239, 68, 68, 0.15)' : 'rgba(234, 179, 8, 0.12)';
+  const borderColor = isTainted ? 'rgb(239, 68, 68)' : 'rgb(234, 179, 8)';
+  const textColor = isTainted ? 'text-red-400' : 'text-yellow-400';
+
+  return (
+    <>
+      {/* Semi-transparent overlay */}
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{ backgroundColor: color }}
+      />
+
+      {/* Diagonal stripes pattern for TAINTED */}
+      {isTainted && (
+        <div
+          className="absolute inset-0 pointer-events-none opacity-10"
+          style={{
+            backgroundImage: `repeating-linear-gradient(
+              45deg,
+              transparent,
+              transparent 10px,
+              rgba(239, 68, 68, 0.3) 10px,
+              rgba(239, 68, 68, 0.3) 20px
+            )`,
+          }}
+        />
+      )}
+
+      {/* Status badge */}
+      <div
+        className={`absolute top-2 right-14 px-3 py-1.5 rounded-lg border-2 ${textColor}`}
+        style={{ borderColor, backgroundColor: 'rgba(17, 24, 39, 0.9)' }}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-lg">{isTainted ? '⚠️' : '⏳'}</span>
+          <div>
+            <div className="font-bold text-sm">{label} DATA</div>
+            <div className="text-xs opacity-75">
+              Grade {grade} - {isTainted ? 'Integrity compromised' : 'Data gaps detected'}
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
 }
