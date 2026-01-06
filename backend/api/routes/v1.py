@@ -1305,6 +1305,267 @@ async def resolve_alert(
 
 
 # =============================================================================
+# Evidence Chain API (v5.36)
+# =============================================================================
+
+from ..schemas.v1 import (
+    EvidenceChainResponse, EvidenceChainNode,
+    ReactionDistributionResponse, ReactionDistribution,
+)
+
+
+@router.get("/alerts/{alert_id}/chain", response_model=EvidenceChainResponse)
+def get_alert_evidence_chain(
+    alert_id: str,
+    window_before_ms: int = Query(60000, ge=0, le=3600000, description="Time window before alert to include"),
+):
+    """
+    Get complete evidence chain for an alert.
+
+    v5.36: Per expert review - forces visibility of complete lineage:
+    Shock(s) → Reaction(s) → Leading Event(s) → State Change(s) → Alert
+
+    This endpoint enforces the paradigm: "不能只看最终状态"
+    """
+    try:
+        conn = get_db_connection()
+        chain_nodes = []
+
+        with conn.cursor() as cur:
+            # Get alert details
+            cur.execute("""
+                SELECT alert_id, ts, token_id, severity, alert_type, summary,
+                       evidence_token, evidence_t0
+                FROM alerts
+                WHERE alert_id = %s
+            """, (alert_id,))
+            alert_row = cur.fetchone()
+
+            if not alert_row:
+                raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+            token_id = alert_row['token_id']
+            alert_ts = ts_to_ms(alert_row['ts'])
+            from_ts = alert_ts - window_before_ms
+
+            # 1. Get shocks in window
+            cur.execute("""
+                SELECT shock_id, ts, price, side, trade_volume, trigger_type
+                FROM shock_events
+                WHERE token_id = %s
+                AND ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                ORDER BY ts ASC
+            """, (token_id, from_ts, alert_ts))
+            shocks = cur.fetchall()
+
+            for s in shocks:
+                chain_nodes.append(EvidenceChainNode(
+                    node_type="SHOCK",
+                    node_id=str(s['shock_id']),
+                    ts=ts_to_ms(s['ts']),
+                    summary=f"Shock @ {float(s['price'])*100:.0f}% ({s['side']}, {s['trigger_type']})",
+                    details={
+                        "price": float(s['price']),
+                        "side": s['side'],
+                        "trade_volume": float(s['trade_volume']) if s['trade_volume'] else None,
+                        "trigger_type": s['trigger_type'],
+                    },
+                    evidence_refs=[],
+                ))
+
+            # 2. Get reactions in window
+            cur.execute("""
+                SELECT reaction_id, shock_id, ts, price, side, reaction_type, window_type,
+                       refill_ratio, vacuum_duration_ms
+                FROM reaction_events
+                WHERE token_id = %s
+                AND ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                ORDER BY ts ASC
+            """, (token_id, from_ts, alert_ts))
+            reactions = cur.fetchall()
+
+            for r in reactions:
+                refs = [str(r['shock_id'])] if r['shock_id'] else []
+                chain_nodes.append(EvidenceChainNode(
+                    node_type="REACTION",
+                    node_id=str(r['reaction_id']),
+                    ts=ts_to_ms(r['ts']),
+                    summary=f"{r['reaction_type']} @ {float(r['price'])*100:.0f}% ({r['window_type']})",
+                    details={
+                        "reaction_type": r['reaction_type'],
+                        "window_type": r['window_type'],
+                        "price": float(r['price']),
+                        "side": r['side'],
+                        "refill_ratio": float(r['refill_ratio']) if r['refill_ratio'] else None,
+                        "vacuum_duration_ms": r['vacuum_duration_ms'],
+                    },
+                    evidence_refs=refs,
+                ))
+
+            # 3. Get leading events in window
+            cur.execute("""
+                SELECT event_id, ts, event_type, price, side, drop_ratio, affected_levels
+                FROM leading_events
+                WHERE token_id = %s
+                AND ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                ORDER BY ts ASC
+            """, (token_id, from_ts, alert_ts))
+            leading_events = cur.fetchall()
+
+            for le in leading_events:
+                chain_nodes.append(EvidenceChainNode(
+                    node_type="LEADING_EVENT",
+                    node_id=str(le['event_id']),
+                    ts=ts_to_ms(le['ts']),
+                    summary=f"{le['event_type']} @ {float(le['price'])*100:.0f}% (drop: {float(le['drop_ratio'])*100:.0f}%)",
+                    details={
+                        "event_type": le['event_type'],
+                        "price": float(le['price']),
+                        "side": le['side'],
+                        "drop_ratio": float(le['drop_ratio']) if le['drop_ratio'] else None,
+                        "affected_levels": le['affected_levels'],
+                    },
+                    evidence_refs=[],
+                ))
+
+            # 4. Get state changes in window
+            cur.execute("""
+                SELECT id, ts, old_state, new_state, trigger_reaction_id, evidence
+                FROM belief_states
+                WHERE token_id = %s
+                AND ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                ORDER BY ts ASC
+            """, (token_id, from_ts, alert_ts))
+            state_changes = cur.fetchall()
+
+            for sc in state_changes:
+                refs = [str(sc['trigger_reaction_id'])] if sc['trigger_reaction_id'] else []
+                chain_nodes.append(EvidenceChainNode(
+                    node_type="STATE_CHANGE",
+                    node_id=str(sc['id']),
+                    ts=ts_to_ms(sc['ts']),
+                    summary=f"{sc['old_state']} → {sc['new_state']}",
+                    details={
+                        "old_state": sc['old_state'],
+                        "new_state": sc['new_state'],
+                        "evidence": sc['evidence'],
+                    },
+                    evidence_refs=refs,
+                ))
+
+            # 5. Add the alert itself as the final node
+            chain_nodes.append(EvidenceChainNode(
+                node_type="ALERT",
+                node_id=alert_id,
+                ts=alert_ts,
+                summary=alert_row['summary'],
+                details={
+                    "severity": alert_row['severity'],
+                    "alert_type": alert_row['alert_type'],
+                },
+                evidence_refs=[str(sc['id']) for sc in state_changes[-1:]] if state_changes else [],
+            ))
+
+        conn.close()
+
+        # Sort by timestamp
+        chain_nodes.sort(key=lambda n: n.ts)
+
+        # Calculate statistics
+        shock_count = sum(1 for n in chain_nodes if n.node_type == "SHOCK")
+        reaction_count = sum(1 for n in chain_nodes if n.node_type == "REACTION")
+        leading_count = sum(1 for n in chain_nodes if n.node_type == "LEADING_EVENT")
+        state_count = sum(1 for n in chain_nodes if n.node_type == "STATE_CHANGE")
+
+        chain_start = chain_nodes[0].ts if chain_nodes else alert_ts
+        chain_end = chain_nodes[-1].ts if chain_nodes else alert_ts
+
+        return EvidenceChainResponse(
+            alert_id=alert_id,
+            token_id=token_id,
+            generated_at=int(time.time() * 1000),
+            chain=chain_nodes,
+            shock_count=shock_count,
+            reaction_count=reaction_count,
+            leading_event_count=leading_count,
+            state_change_count=state_count,
+            chain_start_ts=chain_start,
+            chain_end_ts=chain_end,
+            chain_duration_ms=chain_end - chain_start,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/reactions/distribution", response_model=ReactionDistributionResponse)
+def get_reaction_distribution(
+    token_id: str = Query(..., min_length=1, description="Token ID"),
+    window_minutes: int = Query(30, ge=1, le=1440, description="Time window in minutes"),
+):
+    """
+    Get reaction type distribution for a token.
+
+    v5.36: Per expert review - "强调结构，淡化事件"
+    Shows the distribution of reaction types rather than individual events.
+
+    Example response:
+    - HOLD 60%
+    - PULL 30%
+    - VACUUM 10%
+    """
+    try:
+        conn = get_db_connection()
+
+        with conn.cursor() as cur:
+            # Get reaction counts by type
+            cur.execute("""
+                SELECT reaction_type, COUNT(*) as count
+                FROM reaction_events
+                WHERE token_id = %s
+                AND ts > NOW() - INTERVAL '%s minutes'
+                GROUP BY reaction_type
+                ORDER BY count DESC
+            """, (token_id, window_minutes))
+            counts = cur.fetchall()
+
+        conn.close()
+
+        total = sum(r['count'] for r in counts)
+        distribution = []
+
+        for r in counts:
+            distribution.append(ReactionDistribution(
+                reaction_type=ReactionType(r['reaction_type']),
+                count=r['count'],
+                ratio=r['count'] / max(1, total),
+            ))
+
+        # Calculate structural metrics
+        hold_count = sum(r['count'] for r in counts if r['reaction_type'] == 'HOLD')
+        stress_count = sum(r['count'] for r in counts if r['reaction_type'] in ('VACUUM', 'PULL', 'SWEEP'))
+
+        now_ms = int(time.time() * 1000)
+        from_ts = now_ms - (window_minutes * 60 * 1000)
+
+        return ReactionDistributionResponse(
+            token_id=token_id,
+            from_ts=from_ts,
+            to_ts=now_ms,
+            window_minutes=window_minutes,
+            total_reactions=total,
+            distribution=distribution,
+            hold_dominant=hold_count > total / 2,
+            stress_ratio=stress_count / max(1, total),
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
 # WebSocket Stream API (v5.9)
 # =============================================================================
 

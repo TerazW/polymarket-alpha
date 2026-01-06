@@ -550,6 +550,81 @@ class StateExplanationInfo(BaseModel):
 
 
 # =============================================================================
+# Evidence Chain API (v5.36)
+# =============================================================================
+
+class EvidenceChainNode(BaseModel):
+    """
+    Single node in the evidence chain.
+
+    v5.36: Evidence chain enforces complete lineage visibility.
+    """
+    node_type: str = Field(..., description="Type: SHOCK, REACTION, LEADING_EVENT, STATE_CHANGE, ALERT")
+    node_id: str
+    ts: int
+    summary: str = Field(..., description="Human-readable summary of this node")
+    details: Dict[str, Any] = Field(default_factory=dict, description="Type-specific details")
+    evidence_refs: List[str] = Field(default_factory=list, description="References to upstream nodes")
+
+
+class EvidenceChainResponse(BaseModel):
+    """
+    Complete evidence chain for an alert.
+
+    v5.36: Per expert review - "反应 → 状态 → 告警 的证据链视图"
+    Forces users to see the complete lineage, not just the final state.
+
+    Chain structure:
+    - Shock(s) → Reaction(s) → Leading Event(s) → State Change(s) → Alert
+    """
+    alert_id: str
+    token_id: str
+    generated_at: int
+
+    # The evidence chain nodes in causal order
+    chain: List[EvidenceChainNode] = Field(..., description="Nodes in causal order (earliest first)")
+
+    # Summary statistics
+    shock_count: int = 0
+    reaction_count: int = 0
+    leading_event_count: int = 0
+    state_change_count: int = 0
+
+    # Time span
+    chain_start_ts: int
+    chain_end_ts: int
+    chain_duration_ms: int
+
+
+class ReactionDistribution(BaseModel):
+    """
+    Reaction type distribution over a time window.
+
+    v5.36: Per expert review - shows distribution instead of single events.
+    """
+    reaction_type: ReactionType
+    count: int
+    ratio: float = Field(..., ge=0, le=1, description="Ratio of total reactions")
+
+
+class ReactionDistributionResponse(BaseModel):
+    """
+    Aggregated reaction distribution for a token.
+
+    v5.36: "强调结构，淡化事件"
+    """
+    token_id: str
+    from_ts: int
+    to_ts: int
+    window_minutes: int
+    total_reactions: int
+    distribution: List[ReactionDistribution]
+    # Structural summary
+    hold_dominant: bool = Field(..., description="True if HOLD > 50%")
+    stress_ratio: float = Field(..., ge=0, le=1, description="Ratio of stress reactions (VACUUM+PULL+SWEEP)")
+
+
+# =============================================================================
 # Error Response
 # =============================================================================
 
