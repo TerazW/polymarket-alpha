@@ -22,9 +22,11 @@ export interface RadarRow {
   belief_state: 'STABLE' | 'FRAGILE' | 'CRACKING' | 'BROKEN';
   state_since_ts: number;
   state_severity: number;
+  evidence_grade: 'A' | 'B' | 'C' | 'D';  // v5.34
   fragile_index_10m: number;
   leading_rate_10m: number;
-  confidence: number;
+  evidence_confidence: number;  // v5.36: renamed from confidence
+  confidence?: number;  // deprecated, for backwards compat
   data_health: {
     missing_bucket_ratio_10m: number;
     rebuild_count_10m: number;
@@ -401,6 +403,182 @@ export async function resolveAlert(
   params?: { note?: string; acked_by?: string }
 ): Promise<AlertAckResponse> {
   return fetchApi<AlertAckResponse>(`/v1/alerts/${alertId}/resolve`, {
+    method: 'PUT',
+    body: JSON.stringify(params || {}),
+  });
+}
+
+// =============================================================================
+// v5.36: Evidence Chain API
+// =============================================================================
+
+export interface EvidenceChainNode {
+  node_type: 'SHOCK' | 'REACTION' | 'LEADING_EVENT' | 'STATE_CHANGE' | 'ALERT';
+  node_id: string;
+  ts: number;
+  summary: string;
+  details: Record<string, unknown>;
+  evidence_refs: string[];
+}
+
+export interface EvidenceChainResponse {
+  alert_id: string;
+  token_id: string;
+  generated_at: number;
+  chain: EvidenceChainNode[];
+  shock_count: number;
+  reaction_count: number;
+  leading_event_count: number;
+  state_change_count: number;
+  chain_start_ts: number;
+  chain_end_ts: number;
+  chain_duration_ms: number;
+}
+
+export async function getAlertEvidenceChain(
+  alertId: string,
+  params?: { window_before_ms?: number }
+): Promise<EvidenceChainResponse> {
+  const searchParams = new URLSearchParams();
+  if (params?.window_before_ms) searchParams.set('window_before_ms', String(params.window_before_ms));
+  const query = searchParams.toString();
+  return fetchApi<EvidenceChainResponse>(`/v1/alerts/${alertId}/chain${query ? `?${query}` : ''}`);
+}
+
+// =============================================================================
+// v5.36: Reaction Distribution API
+// =============================================================================
+
+export interface ReactionDistribution {
+  reaction_type: string;
+  count: number;
+  ratio: number;
+}
+
+export interface ReactionDistributionResponse {
+  token_id: string;
+  from_ts: number;
+  to_ts: number;
+  window_minutes: number;
+  total_reactions: number;
+  distribution: ReactionDistribution[];
+  hold_dominant: boolean;
+  stress_ratio: number;
+}
+
+export async function getReactionDistribution(params: {
+  token_id: string;
+  window_minutes?: number;
+}): Promise<ReactionDistributionResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set('token_id', params.token_id);
+  if (params.window_minutes) searchParams.set('window_minutes', String(params.window_minutes));
+  return fetchApi<ReactionDistributionResponse>(`/v1/reactions/distribution?${searchParams.toString()}`);
+}
+
+// =============================================================================
+// v5.36: Similar Cases API
+// =============================================================================
+
+export interface SimilarCaseMatch {
+  match_id: string;
+  token_id: string;
+  market_title?: string;
+  match_ts: number;
+  similarity_score: number;
+  pattern_summary: string;
+  reaction_sequence: string[];
+  state_at_match: string;
+}
+
+export interface SimilarCasesResponse {
+  query_pattern: string[];
+  query_state: string;
+  query_ts: number;
+  matches: SimilarCaseMatch[];
+  total_matches: number;
+  search_window_days: number;
+  paradigm_note: string;
+}
+
+export async function getSimilarCases(params: {
+  token_id: string;
+  window_minutes?: number;
+  search_days?: number;
+  max_results?: number;
+}): Promise<SimilarCasesResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set('token_id', params.token_id);
+  if (params.window_minutes) searchParams.set('window_minutes', String(params.window_minutes));
+  if (params.search_days) searchParams.set('search_days', String(params.search_days));
+  if (params.max_results) searchParams.set('max_results', String(params.max_results));
+  return fetchApi<SimilarCasesResponse>(`/v1/similar-cases?${searchParams.toString()}`);
+}
+
+// =============================================================================
+// v5.36: Multi-Market Comparison API
+// =============================================================================
+
+export interface MarketTimePoint {
+  ts: number;
+  state: string;
+  hold_ratio?: number;
+  reaction_type?: string;
+}
+
+export interface MarketTimeSeries {
+  token_id: string;
+  market_title?: string;
+  time_series: MarketTimePoint[];
+  final_state: string;
+}
+
+export interface EventComparisonResponse {
+  event_id: string;
+  event_ts: number;
+  event_type: string;
+  markets: MarketTimeSeries[];
+  divergence_detected: boolean;
+  divergence_summary?: string;
+  paradigm_note: string;
+}
+
+export async function getEventComparison(
+  eventId: string,
+  params: { token_ids: string[]; window_before_ms?: number; window_after_ms?: number }
+): Promise<EventComparisonResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set('token_ids', params.token_ids.join(','));
+  if (params.window_before_ms) searchParams.set('window_before_ms', String(params.window_before_ms));
+  if (params.window_after_ms) searchParams.set('window_after_ms', String(params.window_after_ms));
+  return fetchApi<EventComparisonResponse>(`/events/${eventId}/compare?${searchParams.toString()}`);
+}
+
+// =============================================================================
+// v5.36: Enhanced Alert Resolution
+// =============================================================================
+
+export interface AlertResolveResponseV536 {
+  alert_id: string;
+  status: 'OPEN' | 'ACKED' | 'RESOLVED';
+  resolved_at: number;
+  resolved_by?: string;
+  note?: string;
+  recovery_evidence: string[];
+  is_false_positive: boolean;
+  false_positive_reason?: string;
+}
+
+export async function resolveAlertV536(
+  alertId: string,
+  params?: {
+    note?: string;
+    resolved_by?: string;
+    is_false_positive?: boolean;
+    false_positive_reason?: string;
+  }
+): Promise<AlertResolveResponseV536> {
+  return fetchApi<AlertResolveResponseV536>(`/v1/alerts/${alertId}/resolve`, {
     method: 'PUT',
     body: JSON.stringify(params || {}),
   });

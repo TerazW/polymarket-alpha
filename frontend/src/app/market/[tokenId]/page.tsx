@@ -5,6 +5,9 @@ import { useSearchParams } from 'next/navigation';
 import { ContextPanel } from '@/components/evidence/ContextPanel';
 import { EvidencePlayer } from '@/components/evidence/EvidencePlayer';
 import { TapePanel } from '@/components/evidence/TapePanel';
+// v5.36: New evidence panels
+import ReactionDistributionPanel from '@/components/evidence/ReactionDistributionPanel';
+import SimilarCasesPanel from '@/components/evidence/SimilarCasesPanel';
 import type { EvidenceResponse, BeliefState, ShockEvent, ReactionEvent, LeadingEvent, StateChange, ProofSummary } from '@/types/api';
 import { getEvidence, type EvidenceResponse as ApiEvidenceResponse } from '@/lib/api';
 
@@ -414,7 +417,7 @@ export default function MarketDetailPage({ params }: PageProps) {
           />
         </div>
 
-        {/* Right: Tape + Proof Panel */}
+        {/* Right: Tape + Proof Panel + v5.36 Panels */}
         <div className="w-80 border-l border-gray-800 overflow-y-auto">
           <TapePanel
             shocks={evidence.shocks}
@@ -424,6 +427,16 @@ export default function MarketDetailPage({ params }: PageProps) {
             selectedEventId={selectedEventId}
             onEventClick={handleEventClick}
           />
+
+          {/* v5.36: Reaction Distribution */}
+          <div className="p-3 border-t border-gray-700">
+            <ReactionDistributionPanel tokenId={tokenId} windowMinutes={30} />
+          </div>
+
+          {/* v5.36: Similar Historical Cases */}
+          <div className="p-3 border-t border-gray-700">
+            <SimilarCasesPanel tokenId={tokenId} windowMinutes={30} searchDays={30} />
+          </div>
         </div>
       </div>
     </div>
