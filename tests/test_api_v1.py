@@ -142,13 +142,13 @@ class TestSchemaModels:
             state_since_ts=now_ms,
             state_severity=0,
             evidence_grade=EvidenceGrade.A,  # v5.34 required field
-            confidence=85,
+            evidence_confidence=85,
             fragile_index_10m=0.0,
             data_health=health,
             leading_rate_10m=0,
         )
         assert row.belief_state == BeliefState.STABLE
-        assert row.confidence == 85
+        assert row.evidence_confidence == 85
         assert row.state_severity == 0
 
 
