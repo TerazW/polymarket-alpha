@@ -50,6 +50,25 @@ from .success_metrics import (
     run_ci_gate,
     get_success_tracker,
 )
+from .cost_alerts import (
+    CostMonitor,
+    CostMonitorConfig,
+    CostMetricsCollector,
+    CostThreshold,
+    CostCategory,
+    CostAlertSeverity,
+    CostMetric,
+    CostAlert,
+    DEFAULT_THRESHOLDS,
+    get_cost_monitor,
+    get_cost_collector,
+    track_api_request,
+    track_tile_request,
+    track_reactor_event,
+    track_upstream_request,
+    set_ws_connections,
+    set_tracked_markets,
+)
 
 __all__ = [
     # Metrics
@@ -87,4 +106,22 @@ __all__ = [
     'ci_gate_check',
     'run_ci_gate',
     'get_success_tracker',
+    # Cost Alerts (v5.36)
+    'CostMonitor',
+    'CostMonitorConfig',
+    'CostMetricsCollector',
+    'CostThreshold',
+    'CostCategory',
+    'CostAlertSeverity',
+    'CostMetric',
+    'CostAlert',
+    'DEFAULT_THRESHOLDS',
+    'get_cost_monitor',
+    'get_cost_collector',
+    'track_api_request',
+    'track_tile_request',
+    'track_reactor_event',
+    'track_upstream_request',
+    'set_ws_connections',
+    'set_tracked_markets',
 ]
