@@ -47,6 +47,10 @@ resource "aws_lb" "main" {
 
   enable_deletion_protection = var.environment == "production" ? true : false
 
+  lifecycle {
+    ignore_changes = [security_groups, subnets]
+  }
+
   access_logs {
     bucket  = aws_s3_bucket.alb_logs.id
     prefix  = "alb-logs"
@@ -116,6 +120,10 @@ resource "aws_lb_target_group" "api" {
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
   target_type = "ip"
+
+  lifecycle {
+    ignore_changes = [vpc_id]
+  }
 
   health_check {
     enabled             = true
