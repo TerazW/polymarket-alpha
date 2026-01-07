@@ -1,7 +1,37 @@
 version: '3.8'
 
 services:
+  # ==========================================================================
+  # Backend API Service
+  # ==========================================================================
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: belief-reaction-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@timescaledb:5432/belief_reaction
+      - REDIS_URL=redis://redis:6379/0
+      - LOG_LEVEL=INFO
+      - ENV=development
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ==========================================================================
   # TimescaleDB - 时序数据库，用于存储 heatmap 数据
+  # ==========================================================================
   timescaledb:
     image: timescale/timescaledb:latest-pg15
     container_name: belief-reaction-db
@@ -21,7 +51,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # Redis - 用于实时事件推送和缓存（可选，MVP 阶段可以不用）
+  # ==========================================================================
+  # Redis - 用于实时事件推送和缓存
+  # ==========================================================================
   redis:
     image: redis:7-alpine
     container_name: belief-reaction-redis
