@@ -101,6 +101,10 @@ resource "aws_db_instance" "main" {
   publicly_accessible    = false
   multi_az               = var.environment == "production" ? true : false
 
+  lifecycle {
+    ignore_changes = [vpc_security_group_ids, db_subnet_group_name]
+  }
+
   # Backup
   backup_retention_period   = var.db_backup_retention_days
   backup_window             = "03:00-04:00"
