@@ -55,54 +55,101 @@ aws ecr describe-repositories --region us-east-1
 4. ~~更新 ECS 服務~~ ✅
 5. 運行數據庫遷移 ⬅️ **當前步驟**
 
-## 數據庫遷移
+## TimescaleDB Cloud 部署 (方案 A)
 
-### 問題
-RDS 數據庫沒有創建表結構，collector 報錯：`relation "book_bins" does not exist`
+### 為什麼用 TimescaleDB Cloud？
+- AWS RDS 不支持 TimescaleDB 擴展
+- TimescaleDB Cloud 提供完整的時序數據庫功能
+- 原始 `init.sql` 架構設計需要 TimescaleDB
 
-### 解決方案
-使用 `init_postgresql.sql` (標準 PostgreSQL 版本，不需要 TimescaleDB)
+### 步驟 1：創建 TimescaleDB Cloud 實例
 
-### 遷移步驟 (在 Windows PowerShell 運行)
+1. 訪問 https://console.cloud.timescale.com/
+2. 註冊/登錄帳戶
+3. 點擊 **Create Service**
+4. 選擇配置：
+   - **Region**: `us-east-1` (與 AWS 相同)
+   - **Compute**: 最小配置 (0.5 CPU / 2GB RAM, ~$30/月)
+   - **Storage**: 10GB 起步
+5. 記錄連接信息：
+   ```
+   Host: xxx.tsdb.cloud.timescale.com
+   Port: 5432
+   Database: tsdb
+   Username: tsdbadmin
+   Password: (創建時設置)
+   ```
 
-```powershell
-# 1. 登入 ECR
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "821482074659.dkr.ecr.us-east-1.amazonaws.com"
+### 步驟 2：運行數據庫遷移
 
-# 2. 創建遷移倉庫 (如果不存在)
-aws ecr create-repository --repository-name market-sensemaking-migration --region us-east-1
+在 TimescaleDB Cloud 控制台的 **SQL Editor** 中：
+1. 打開 `infra/init.sql`
+2. 複製全部內容
+3. 粘貼到 SQL Editor 並執行
 
-# 3. 構建遷移鏡像 (在 C:\Projects\market-sensemaking 目錄下)
-docker build -t market-sensemaking-migration -f infra/Dockerfile.migrate .
-
-# 4. 標記並推送
-docker tag market-sensemaking-migration:latest 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking-migration:latest
-docker push 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking-migration:latest
-
-# 5. 應用 Terraform 更新 (創建遷移任務定義)
-cd infra/terraform
-terraform init
-terraform apply -target=aws_ecr_repository.migration -target=aws_ecs_task_definition.migration -target=aws_cloudwatch_log_group.migration
-
-# 6. 運行遷移任務
-aws ecs run-task `
-  --cluster market-sensemaking-cluster `
-  --task-definition market-sensemaking-migration `
-  --launch-type FARGATE `
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxx],securityGroups=[sg-xxx],assignPublicIp=DISABLED}" `
-  --region us-east-1
-
-# 7. 查看遷移日志
-aws logs tail /ecs/market-sensemaking/migration --follow --region us-east-1
+或使用命令行 (如果有 psql):
+```bash
+PGPASSWORD=你的密碼 psql -h xxx.tsdb.cloud.timescale.com -p 5432 -U tsdbadmin -d tsdb -f infra/init.sql
 ```
 
-### 獲取子網和安全組 ID
-```powershell
-# 獲取私有子網 ID
-aws ec2 describe-subnets --filters "Name=tag:Name,Values=*market-sensemaking*private*" --query "Subnets[].SubnetId" --region us-east-1
+### 步驟 3：配置 Terraform 變量
 
-# 獲取 ECS 任務安全組 ID
-aws ec2 describe-security-groups --filters "Name=tag:Name,Values=*market-sensemaking*ecs*" --query "SecurityGroups[].GroupId" --region us-east-1
+```powershell
+cd C:\Projects\market-sensemaking\infra\terraform
+
+# 複製示例配置
+copy terraform.tfvars.example terraform.tfvars
+
+# 編輯 terraform.tfvars，填入 TimescaleDB Cloud 連接信息
+notepad terraform.tfvars
+```
+
+terraform.tfvars 內容：
+```hcl
+use_timescaledb_cloud = true
+timescaledb_host     = "xxx.tsdb.cloud.timescale.com"
+timescaledb_port     = "5432"
+timescaledb_name     = "tsdb"
+timescaledb_user     = "tsdbadmin"
+timescaledb_password = "你的密碼"
+```
+
+### 步驟 4：應用 Terraform 更新
+
+```powershell
+cd C:\Projects\market-sensemaking\infra\terraform
+terraform init
+terraform apply
+```
+
+這會更新 ECS 任務定義，將數據庫連接指向 TimescaleDB Cloud。
+
+### 步驟 5：重啟 ECS 服務
+
+```powershell
+# 重啟所有服務
+aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-api --force-new-deployment --region us-east-1
+aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-collector --force-new-deployment --region us-east-1
+aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-reactor --force-new-deployment --region us-east-1
+aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-tile-worker --force-new-deployment --region us-east-1
+```
+
+### 步驟 6：驗證
+
+```powershell
+# 檢查服務狀態
+aws ecs describe-services --cluster market-sensemaking-cluster --services market-sensemaking-collector --query "services[0].deployments" --region us-east-1
+
+# 查看 collector 日志
+aws logs tail /ecs/market-sensemaking/collector --follow --region us-east-1
+```
+
+### 可選：刪除 RDS 節省費用
+
+確認 TimescaleDB Cloud 運行正常後，可以刪除 RDS：
+```powershell
+# 在 Terraform 中註釋掉 RDS 相關資源，或手動刪除
+aws rds delete-db-instance --db-instance-identifier market-sensemaking-db --skip-final-snapshot --region us-east-1
 ```
 
 ## 本地項目路徑 (Windows)

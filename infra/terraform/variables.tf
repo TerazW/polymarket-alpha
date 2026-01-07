@@ -41,7 +41,7 @@ variable "availability_zones" {
 }
 
 # -----------------------------------------------------------------------------
-# Database (RDS)
+# Database (RDS) - Legacy, kept for reference
 # -----------------------------------------------------------------------------
 
 variable "db_instance_class" {
@@ -72,6 +72,47 @@ variable "db_backup_retention_days" {
   description = "Number of days to retain backups"
   type        = number
   default     = 7
+}
+
+# -----------------------------------------------------------------------------
+# TimescaleDB Cloud (Primary Database)
+# -----------------------------------------------------------------------------
+
+variable "use_timescaledb_cloud" {
+  description = "Use TimescaleDB Cloud instead of RDS"
+  type        = bool
+  default     = true
+}
+
+variable "timescaledb_host" {
+  description = "TimescaleDB Cloud host"
+  type        = string
+  default     = ""  # Set via terraform.tfvars or environment
+}
+
+variable "timescaledb_port" {
+  description = "TimescaleDB Cloud port"
+  type        = string
+  default     = "5432"
+}
+
+variable "timescaledb_name" {
+  description = "TimescaleDB database name"
+  type        = string
+  default     = "tsdb"
+}
+
+variable "timescaledb_user" {
+  description = "TimescaleDB username"
+  type        = string
+  default     = "tsdbadmin"
+}
+
+variable "timescaledb_password" {
+  description = "TimescaleDB password"
+  type        = string
+  sensitive   = true
+  default     = ""  # Set via terraform.tfvars or environment
 }
 
 # -----------------------------------------------------------------------------
