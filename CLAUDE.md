@@ -49,11 +49,61 @@ aws ecr describe-repositories --region us-east-1
 - backend/reactor/service.py
 
 ### 待完成
-1. 確認 ECR 倉庫實際名稱
-2. 重新構建 Docker 鏡像
-3. 推送到 ECR
-4. 更新 ECS 服務
-5. 運行數據庫遷移
+1. ~~確認 ECR 倉庫實際名稱~~ ✅
+2. ~~重新構建 Docker 鏡像~~ ✅
+3. ~~推送到 ECR~~ ✅
+4. ~~更新 ECS 服務~~ ✅
+5. 運行數據庫遷移 ⬅️ **當前步驟**
+
+## 數據庫遷移
+
+### 問題
+RDS 數據庫沒有創建表結構，collector 報錯：`relation "book_bins" does not exist`
+
+### 解決方案
+使用 `init_postgresql.sql` (標準 PostgreSQL 版本，不需要 TimescaleDB)
+
+### 遷移步驟 (在 Windows PowerShell 運行)
+
+```powershell
+# 1. 登入 ECR
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "821482074659.dkr.ecr.us-east-1.amazonaws.com"
+
+# 2. 創建遷移倉庫 (如果不存在)
+aws ecr create-repository --repository-name market-sensemaking-migration --region us-east-1
+
+# 3. 構建遷移鏡像 (在 C:\Projects\market-sensemaking 目錄下)
+docker build -t market-sensemaking-migration -f infra/Dockerfile.migrate .
+
+# 4. 標記並推送
+docker tag market-sensemaking-migration:latest 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking-migration:latest
+docker push 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking-migration:latest
+
+# 5. 應用 Terraform 更新 (創建遷移任務定義)
+cd infra/terraform
+terraform init
+terraform apply -target=aws_ecr_repository.migration -target=aws_ecs_task_definition.migration -target=aws_cloudwatch_log_group.migration
+
+# 6. 運行遷移任務
+aws ecs run-task `
+  --cluster market-sensemaking-cluster `
+  --task-definition market-sensemaking-migration `
+  --launch-type FARGATE `
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxx],securityGroups=[sg-xxx],assignPublicIp=DISABLED}" `
+  --region us-east-1
+
+# 7. 查看遷移日志
+aws logs tail /ecs/market-sensemaking/migration --follow --region us-east-1
+```
+
+### 獲取子網和安全組 ID
+```powershell
+# 獲取私有子網 ID
+aws ec2 describe-subnets --filters "Name=tag:Name,Values=*market-sensemaking*private*" --query "Subnets[].SubnetId" --region us-east-1
+
+# 獲取 ECS 任務安全組 ID
+aws ec2 describe-security-groups --filters "Name=tag:Name,Values=*market-sensemaking*ecs*" --query "SecurityGroups[].GroupId" --region us-east-1
+```
 
 ## 本地項目路徑 (Windows)
 ```
