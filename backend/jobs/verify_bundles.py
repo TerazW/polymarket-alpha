@@ -24,6 +24,7 @@ This job:
 
 import argparse
 import asyncio
+import os
 import time
 import json
 import random
@@ -190,11 +191,11 @@ class BundleVerificationJob:
         alert_router: Optional[AlertRouter] = None,
     ):
         self.db_config = db_config or {
-            'host': '127.0.0.1',
-            'port': 5433,
-            'database': 'belief_reaction',
-            'user': 'postgres',
-            'password': 'postgres'
+            'host': os.getenv('DB_HOST', '127.0.0.1'),
+            'port': int(os.getenv('DB_PORT', '5432')),
+            'database': os.getenv('DB_NAME', 'belief_reaction'),
+            'user': os.getenv('DB_USER', 'postgres'),
+            'password': os.getenv('DB_PASSWORD', 'postgres')
         }
         self.sample_rate = sample_rate
         self.max_age_hours = max_age_hours

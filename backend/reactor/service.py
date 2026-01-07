@@ -21,6 +21,7 @@ Usage:
 """
 
 import asyncio
+import os
 from typing import Optional, Dict, List, Any, Callable
 from datetime import datetime
 from decimal import Decimal
@@ -63,11 +64,11 @@ class ReactorService:
             persist_to_db: Whether to persist events to database
         """
         self.db_config = db_config or {
-            'host': '127.0.0.1',
-            'port': 5433,
-            'database': 'belief_reaction',
-            'user': 'postgres',
-            'password': 'postgres'
+            'host': os.getenv('DB_HOST', '127.0.0.1'),
+            'port': int(os.getenv('DB_PORT', '5432')),
+            'database': os.getenv('DB_NAME', 'belief_reaction'),
+            'user': os.getenv('DB_USER', 'postgres'),
+            'password': os.getenv('DB_PASSWORD', 'postgres')
         }
 
         self.persist_to_db = persist_to_db
@@ -324,11 +325,11 @@ class BeliefMachineService:
             db_config: PostgreSQL connection config
         """
         self.db_config = db_config or {
-            'host': '127.0.0.1',
-            'port': 5433,
-            'database': 'belief_reaction',
-            'user': 'postgres',
-            'password': 'postgres'
+            'host': os.getenv('DB_HOST', '127.0.0.1'),
+            'port': int(os.getenv('DB_PORT', '5432')),
+            'database': os.getenv('DB_NAME', 'belief_reaction'),
+            'user': os.getenv('DB_USER', 'postgres'),
+            'password': os.getenv('DB_PASSWORD', 'postgres')
         }
 
     def _get_db_connection(self):

@@ -30,13 +30,15 @@ except ImportError:
     RealDictCursor = None
 
 
-# Database config
+import os
+
+# Database config (from environment variables)
 DB_CONFIG = {
-    'host': '127.0.0.1',
-    'port': 5433,
-    'database': 'belief_reaction',
-    'user': 'postgres',
-    'password': 'postgres'
+    'host': os.getenv('DB_HOST', '127.0.0.1'),
+    'port': int(os.getenv('DB_PORT', '5432')),
+    'database': os.getenv('DB_NAME', 'belief_reaction'),
+    'user': os.getenv('DB_USER', 'postgres'),
+    'password': os.getenv('DB_PASSWORD', 'postgres')
 }
 
 # Pre-computation settings
