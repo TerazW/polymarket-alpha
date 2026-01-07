@@ -148,15 +148,17 @@ resource "aws_ecs_task_definition" "api" {
       ]
 
       environment = [
-        { name = "DB_HOST", value = aws_db_instance.main.address },
-        { name = "DB_PORT", value = "5432" },
-        { name = "DB_NAME", value = var.db_name },
+        { name = "DB_HOST", value = var.use_timescaledb_cloud ? var.timescaledb_host : aws_db_instance.main.address },
+        { name = "DB_PORT", value = var.use_timescaledb_cloud ? var.timescaledb_port : "5432" },
+        { name = "DB_NAME", value = var.use_timescaledb_cloud ? var.timescaledb_name : var.db_name },
+        { name = "DB_USER", value = var.use_timescaledb_cloud ? var.timescaledb_user : "" },
+        { name = "DB_PASSWORD", value = var.use_timescaledb_cloud ? var.timescaledb_password : "" },
         { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379" },
         { name = "LOG_LEVEL", value = "INFO" },
         { name = "ENVIRONMENT", value = var.environment },
       ]
 
-      secrets = [
+      secrets = var.use_timescaledb_cloud ? [] : [
         {
           name      = "DB_PASSWORD"
           valueFrom = "${aws_secretsmanager_secret.db_credentials.arn}:password::"
@@ -207,15 +209,17 @@ resource "aws_ecs_task_definition" "collector" {
       image = "${aws_ecr_repository.services["collector"].repository_url}:latest"
 
       environment = [
-        { name = "DB_HOST", value = aws_db_instance.main.address },
-        { name = "DB_PORT", value = "5432" },
-        { name = "DB_NAME", value = var.db_name },
+        { name = "DB_HOST", value = var.use_timescaledb_cloud ? var.timescaledb_host : aws_db_instance.main.address },
+        { name = "DB_PORT", value = var.use_timescaledb_cloud ? var.timescaledb_port : "5432" },
+        { name = "DB_NAME", value = var.use_timescaledb_cloud ? var.timescaledb_name : var.db_name },
+        { name = "DB_USER", value = var.use_timescaledb_cloud ? var.timescaledb_user : "" },
+        { name = "DB_PASSWORD", value = var.use_timescaledb_cloud ? var.timescaledb_password : "" },
         { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379" },
         { name = "LOG_LEVEL", value = "INFO" },
         { name = "POLYMARKET_WS_URL", value = "wss://ws-subscriptions-clob.polymarket.com/ws/market" },
       ]
 
-      secrets = [
+      secrets = var.use_timescaledb_cloud ? [] : [
         {
           name      = "DB_PASSWORD"
           valueFrom = "${aws_secretsmanager_secret.db_credentials.arn}:password::"
@@ -258,14 +262,16 @@ resource "aws_ecs_task_definition" "reactor" {
       image = "${aws_ecr_repository.services["reactor"].repository_url}:latest"
 
       environment = [
-        { name = "DB_HOST", value = aws_db_instance.main.address },
-        { name = "DB_PORT", value = "5432" },
-        { name = "DB_NAME", value = var.db_name },
+        { name = "DB_HOST", value = var.use_timescaledb_cloud ? var.timescaledb_host : aws_db_instance.main.address },
+        { name = "DB_PORT", value = var.use_timescaledb_cloud ? var.timescaledb_port : "5432" },
+        { name = "DB_NAME", value = var.use_timescaledb_cloud ? var.timescaledb_name : var.db_name },
+        { name = "DB_USER", value = var.use_timescaledb_cloud ? var.timescaledb_user : "" },
+        { name = "DB_PASSWORD", value = var.use_timescaledb_cloud ? var.timescaledb_password : "" },
         { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379" },
         { name = "LOG_LEVEL", value = "INFO" },
       ]
 
-      secrets = [
+      secrets = var.use_timescaledb_cloud ? [] : [
         {
           name      = "DB_PASSWORD"
           valueFrom = "${aws_secretsmanager_secret.db_credentials.arn}:password::"
@@ -308,15 +314,17 @@ resource "aws_ecs_task_definition" "tile_worker" {
       image = "${aws_ecr_repository.services["tile-worker"].repository_url}:latest"
 
       environment = [
-        { name = "DB_HOST", value = aws_db_instance.main.address },
-        { name = "DB_PORT", value = "5432" },
-        { name = "DB_NAME", value = var.db_name },
+        { name = "DB_HOST", value = var.use_timescaledb_cloud ? var.timescaledb_host : aws_db_instance.main.address },
+        { name = "DB_PORT", value = var.use_timescaledb_cloud ? var.timescaledb_port : "5432" },
+        { name = "DB_NAME", value = var.use_timescaledb_cloud ? var.timescaledb_name : var.db_name },
+        { name = "DB_USER", value = var.use_timescaledb_cloud ? var.timescaledb_user : "" },
+        { name = "DB_PASSWORD", value = var.use_timescaledb_cloud ? var.timescaledb_password : "" },
         { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379" },
         { name = "LOG_LEVEL", value = "INFO" },
         { name = "TILE_WORKERS", value = "2" },
       ]
 
-      secrets = [
+      secrets = var.use_timescaledb_cloud ? [] : [
         {
           name      = "DB_PASSWORD"
           valueFrom = "${aws_secretsmanager_secret.db_credentials.arn}:password::"
