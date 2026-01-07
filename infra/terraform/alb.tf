@@ -77,6 +77,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
     id     = "expire-logs"
     status = "Enabled"
 
+    filter {}  # Required: match all objects
+
     expiration {
       days = 90
     }

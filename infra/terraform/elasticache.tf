@@ -10,6 +10,10 @@ resource "aws_elasticache_subnet_group" "main" {
   name       = "${var.project_name}-redis-subnet-group"
   subnet_ids = aws_subnet.private[*].id
 
+  lifecycle {
+    ignore_changes = [subnet_ids]
+  }
+
   tags = {
     Name = "${var.project_name}-redis-subnet-group"
   }
