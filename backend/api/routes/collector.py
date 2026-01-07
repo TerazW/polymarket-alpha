@@ -319,7 +319,7 @@ async def add_markets(request: MarketsRequest):
     # Look up token IDs from database
     DB_CONFIG = {
         'host': os.getenv('DB_HOST', '127.0.0.1'),
-        'port': int(os.getenv('DB_PORT', '5433')),
+        'port': int(os.getenv('DB_PORT', '5432')),
         'database': os.getenv('DB_NAME', 'belief_reaction'),
         'user': os.getenv('DB_USER', 'postgres'),
         'password': os.getenv('DB_PASSWORD', 'postgres'),

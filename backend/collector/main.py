@@ -53,13 +53,13 @@ from backend.reactor.alert_generator import AlertGenerator
 from backend.version import ENGINE_VERSION, CONFIG_HASH, save_config_snapshot, raw_event_tracker
 
 
-# 数据库配置
+# 数据库配置 (从环境变量读取)
 DB_CONFIG = {
-    'host': '127.0.0.1',
-    'port': 5433,
-    'database': 'belief_reaction',
-    'user': 'postgres',
-    'password': 'postgres'
+    'host': os.getenv('DB_HOST', '127.0.0.1'),
+    'port': int(os.getenv('DB_PORT', '5432')),
+    'database': os.getenv('DB_NAME', 'belief_reaction'),
+    'user': os.getenv('DB_USER', 'postgres'),
+    'password': os.getenv('DB_PASSWORD', 'postgres')
 }
 
 # 全局数据库连接
