@@ -190,3 +190,58 @@ aws ecs update-service --cluster market-sensemaking-cluster --service SERVICE_NA
 ```
 infra/terraform/
 ```
+
+## CI/CD 部署流水線 (Phase 3)
+
+### GitHub Actions Workflows
+- `.github/workflows/ci.yml` - 測試 (單元測試、對抗性測試、安全測試)
+- `.github/workflows/deploy.yml` - 自動部署到 AWS
+
+### 部署流程
+```
+push to main → 測試 → 構建 Docker → 推送 ECR → 遷移數據庫 → 部署 ECS → 健康檢查
+```
+
+### 分支策略
+| 分支 | 環境 | 自動部署 |
+|------|------|----------|
+| `main` | Production | ✅ |
+| `staging` | Staging | ✅ |
+| 其他 | - | ❌ (僅測試) |
+
+### GitHub Secrets 配置 (必須)
+
+在 GitHub 倉庫設置中添加以下 Secrets：
+
+```
+Settings → Secrets and variables → Actions → New repository secret
+```
+
+| Secret 名稱 | 說明 | 範例值 |
+|-------------|------|--------|
+| `AWS_ACCESS_KEY_ID` | AWS IAM Access Key | `AKIA...` |
+| `AWS_SECRET_ACCESS_KEY` | AWS IAM Secret Key | `wJalr...` |
+| `TIMESCALEDB_HOST` | TimescaleDB 主機 | `xxx.tsdb.cloud.timescale.com` |
+| `TIMESCALEDB_PORT` | TimescaleDB 端口 | `39785` |
+| `TIMESCALEDB_NAME` | 數據庫名稱 | `tsdb` |
+| `TIMESCALEDB_USER` | 數據庫用戶 | `tsdbadmin` |
+| `TIMESCALEDB_PASSWORD` | 數據庫密碼 | `你的密碼` |
+
+### 手動觸發部署
+
+```
+GitHub → Actions → Deploy to AWS → Run workflow → 選擇環境
+```
+
+### IAM 權限要求
+
+部署用的 IAM 用戶需要以下權限：
+- `ecr:GetAuthorizationToken`
+- `ecr:BatchCheckLayerAvailability`
+- `ecr:PutImage`
+- `ecr:InitiateLayerUpload`
+- `ecr:UploadLayerPart`
+- `ecr:CompleteLayerUpload`
+- `ecs:UpdateService`
+- `ecs:DescribeServices`
+- `logs:DescribeLogGroups`
