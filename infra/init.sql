@@ -359,8 +359,17 @@ $$ LANGUAGE plpgsql;
 -- ============================================================================
 -- v5: 10. alerts - 告警表
 -- ============================================================================
-CREATE TYPE IF NOT EXISTS alert_severity AS ENUM ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL');
-CREATE TYPE IF NOT EXISTS alert_status AS ENUM ('OPEN', 'ACKED', 'RESOLVED');
+DO $$ BEGIN
+    CREATE TYPE alert_severity AS ENUM ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE alert_status AS ENUM ('OPEN', 'ACKED', 'RESOLVED');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
 CREATE TABLE IF NOT EXISTS alerts (
     alert_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
