@@ -1,6 +1,11 @@
 """
-Belief Reaction System - Shock Detector
+Belief Reaction System - Shock Detector v2
 Detects when a price level is significantly impacted by trading activity.
+
+v2 改进:
+1. 使用 baseline_size (中位数) 而非单点 size
+2. 添加绝对阈值 MIN_ABS_VOL
+3. 双窗口: FAST (8s) + SLOW (30s)
 
 "Shock" = discrete event where liquidity is TESTED, not just changed.
 """
@@ -17,7 +22,11 @@ from .config import (
     SHOCK_TIME_WINDOW_MS,
     SHOCK_VOLUME_THRESHOLD,
     SHOCK_CONSECUTIVE_TRADES,
-    REACTION_WINDOW_MS
+    BASELINE_WINDOW_START_MS,
+    BASELINE_WINDOW_END_MS,
+    MIN_ABS_VOL,
+    REACTION_FAST_WINDOW_MS,
+    REACTION_SLOW_WINDOW_MS
 )
 
 
@@ -25,8 +34,9 @@ class ShockDetector:
     """
     Detects shock events when price levels are tested.
 
-    A shock triggers when:
-    1. Trade volume >= SHOCK_VOLUME_THRESHOLD * size_before within SHOCK_TIME_WINDOW_MS
+    v2 触发条件:
+    1. Trade volume >= SHOCK_VOLUME_THRESHOLD * baseline_size within SHOCK_TIME_WINDOW_MS
+       AND trade_volume >= MIN_ABS_VOL (绝对阈值)
     OR
     2. SHOCK_CONSECUTIVE_TRADES consecutive trades hit same price
     """
@@ -46,11 +56,13 @@ class ShockDetector:
 
         # Stats
         self.total_shocks_detected = 0
+        self.shocks_by_trigger: Dict[str, int] = defaultdict(int)
 
     def on_trade(
         self,
         trade: TradeEvent,
-        level: Optional[PriceLevel]
+        level: Optional[PriceLevel],
+        tick_size: Decimal = Decimal("0.01")
     ) -> Optional[ShockEvent]:
         """
         Process a trade and check if it triggers a shock.
@@ -58,6 +70,7 @@ class ShockDetector:
         Args:
             trade: The trade event
             level: The price level being hit (if exists)
+            tick_size: Current tick size for the market
 
         Returns:
             ShockEvent if shock triggered, None otherwise
@@ -75,40 +88,44 @@ class ShockDetector:
         if key in self.active_shocks:
             return None  # Already in reaction window
 
-        # Get liquidity before (if level exists)
-        liquidity_before = level.size_now if level else 0.0
+        # 计算基准深度 (v2: 使用中位数而非单点值)
+        if level:
+            baseline_size = level.get_baseline_size(
+                now,
+                BASELINE_WINDOW_START_MS,
+                BASELINE_WINDOW_END_MS
+            )
+            liquidity_before = level.size_now  # 保留单点值用于兼容
+        else:
+            baseline_size = 0.0
+            liquidity_before = 0.0
 
         # Check shock conditions
         shock = None
-
-        # Condition 1: Volume threshold
         recent_volume = self._get_recent_volume(key)
-        if liquidity_before > 0 and recent_volume >= SHOCK_VOLUME_THRESHOLD * liquidity_before:
-            shock = ShockEvent(
-                token_id=trade.token_id,
-                price=trade.price,
-                side='bid' if trade.side == 'SELL' else 'ask',  # Trade side is opposite
-                ts_start=now,
-                trade_volume=recent_volume,
-                liquidity_before=liquidity_before,
-                trigger_type='volume',
-                reaction_window_end=now + REACTION_WINDOW_MS
-            )
 
-        # Condition 2: Consecutive trades
+        # Condition 1: Volume threshold (v2: 使用 baseline_size + 绝对阈值)
+        if baseline_size > 0:
+            volume_ratio = recent_volume / baseline_size
+            meets_relative_threshold = volume_ratio >= SHOCK_VOLUME_THRESHOLD
+            meets_absolute_threshold = recent_volume >= MIN_ABS_VOL
+
+            if meets_relative_threshold and meets_absolute_threshold:
+                shock = self._create_shock(
+                    trade, recent_volume, liquidity_before, baseline_size,
+                    'volume', tick_size, now
+                )
+                self.shocks_by_trigger['volume'] += 1
+
+        # Condition 2: Consecutive trades (不需要绝对阈值)
         if not shock:
             consecutive = self._track_consecutive(trade)
             if consecutive >= SHOCK_CONSECUTIVE_TRADES:
-                shock = ShockEvent(
-                    token_id=trade.token_id,
-                    price=trade.price,
-                    side='bid' if trade.side == 'SELL' else 'ask',
-                    ts_start=now,
-                    trade_volume=recent_volume,
-                    liquidity_before=liquidity_before,
-                    trigger_type='consecutive',
-                    reaction_window_end=now + REACTION_WINDOW_MS
+                shock = self._create_shock(
+                    trade, recent_volume, liquidity_before, baseline_size,
+                    'consecutive', tick_size, now
                 )
+                self.shocks_by_trigger['consecutive'] += 1
 
         if shock:
             self.active_shocks[key] = shock
@@ -118,6 +135,33 @@ class ShockDetector:
             return shock
 
         return None
+
+    def _create_shock(
+        self,
+        trade: TradeEvent,
+        trade_volume: float,
+        liquidity_before: float,
+        baseline_size: float,
+        trigger_type: str,
+        tick_size: Decimal,
+        now: int
+    ) -> ShockEvent:
+        """Create a new ShockEvent with dual windows."""
+        return ShockEvent(
+            token_id=trade.token_id,
+            price=trade.price,
+            side='bid' if trade.side == 'SELL' else 'ask',  # Trade side is opposite
+            ts_start=now,
+            trade_volume=trade_volume,
+            liquidity_before=liquidity_before,
+            baseline_size=baseline_size,
+            trigger_type=trigger_type,
+            tick_size=tick_size,
+            # 双窗口
+            fast_window_end=now + REACTION_FAST_WINDOW_MS,
+            slow_window_end=now + REACTION_SLOW_WINDOW_MS,
+            reaction_window_end=now + REACTION_SLOW_WINDOW_MS  # 兼容旧字段
+        )
 
     def get_active_shock(self, token_id: str, price: Decimal) -> Optional[ShockEvent]:
         """Get active shock for a level if exists."""
@@ -129,13 +173,25 @@ class ShockDetector:
         key = (token_id, str(price))
         return self.active_shocks.pop(key, None)
 
-    def get_expired_shocks(self, current_time: int) -> List[ShockEvent]:
-        """Get all shocks whose reaction windows have expired."""
+    def get_fast_window_expired_shocks(self, current_time: int) -> List[ShockEvent]:
+        """Get all shocks whose FAST windows have expired but still active."""
         expired = []
         for key, shock in list(self.active_shocks.items()):
-            if current_time >= shock.reaction_window_end:
+            if current_time >= shock.fast_window_end:
                 expired.append(shock)
         return expired
+
+    def get_slow_window_expired_shocks(self, current_time: int) -> List[ShockEvent]:
+        """Get all shocks whose SLOW windows have expired."""
+        expired = []
+        for key, shock in list(self.active_shocks.items()):
+            if current_time >= shock.slow_window_end:
+                expired.append(shock)
+        return expired
+
+    def get_expired_shocks(self, current_time: int) -> List[ShockEvent]:
+        """Get all shocks whose reaction windows have expired (兼容旧接口)."""
+        return self.get_slow_window_expired_shocks(current_time)
 
     def _prune_old_trades(self, key: Tuple[str, str], now: int):
         """Remove trades outside the shock detection window."""
@@ -173,5 +229,6 @@ class ShockDetector:
         return {
             "total_shocks": self.total_shocks_detected,
             "active_shocks": len(self.active_shocks),
-            "tracked_levels": len(self.recent_trades)
+            "tracked_levels": len(self.recent_trades),
+            "by_trigger": dict(self.shocks_by_trigger)
         }

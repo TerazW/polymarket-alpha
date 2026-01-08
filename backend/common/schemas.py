@@ -21,13 +21,22 @@ from pydantic import BaseModel, Field
 # =============================================================================
 
 class ReactionType(str, Enum):
-    """Six atomic reaction types - the system's vocabulary."""
-    HOLD = "HOLD"       # Defend: refills quickly after shock
-    DELAY = "DELAY"     # Hesitate: partial/slow refill
-    PULL = "PULL"       # Retreat: cancels immediately after shock
-    VACUUM = "VACUUM"   # Vacuum: liquidity completely vanishes
-    CHASE = "CHASE"     # Chase: anchor moved, belief repricing
-    FAKE = "FAKE"       # Anchor: adds more after shock (psychological)
+    """
+    Seven atomic reaction types - the system's core vocabulary.
+    Ordered by priority (higher priority checked first during classification).
+
+    These describe OBSERVABLE post-shock market behavior only.
+    They do NOT encode intent, expectation, valuation, or direction.
+
+    MUST match poc/models.py ReactionType exactly.
+    """
+    VACUUM = "VACUUM"       # 1. Liquidity falls below threshold for sustained duration
+    SWEEP = "SWEEP"         # 2. Consecutive trades remove liquidity across multiple levels
+    CHASE = "CHASE"         # 3. Liquidity reappears only at shifted levels, persisting
+    PULL = "PULL"           # 4. Liquidity cancelled immediately following shock
+    HOLD = "HOLD"           # 5. Liquidity replenished within bounded time window
+    DELAYED = "DELAYED"     # 6. Liquidity partially replenished with measurable delay
+    NO_IMPACT = "NO_IMPACT" # 7. Observed changes do not exceed reaction thresholds
 
 
 class BeliefState(str, Enum):
