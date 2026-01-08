@@ -132,9 +132,9 @@ jobs:
           file: ${{ matrix.service.dockerfile }}
           push: true
           tags: |
-            ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:${{ github.sha }}
-            ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:latest
-            ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:${{ needs.setup.outputs.environment }}
+            ${{ env.ECR_REGISTRY }}/market-sensemaking/${{ matrix.service.name }}:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/market-sensemaking/${{ matrix.service.name }}:latest
+            ${{ env.ECR_REGISTRY }}/market-sensemaking/${{ matrix.service.name }}:${{ needs.setup.outputs.environment }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
