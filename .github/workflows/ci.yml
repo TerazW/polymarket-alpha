@@ -1,0 +1,493 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "feature/*"]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ==========================================================================
+  # Unit Tests - Basic functionality
+  # ==========================================================================
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/ \
+            --ignore=tests/adversarial \
+            -v --tb=short \
+            --junitxml=junit-unit.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: junit-unit.xml
+
+  # ==========================================================================
+  # GATE: Determinism Tests - Required for merge
+  # ==========================================================================
+  determinism-gate:
+    name: "GATE: Determinism"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run determinism tests
+        run: |
+          echo "=========================================="
+          echo "DETERMINISM GATE"
+          echo "=========================================="
+          echo "Testing: Same inputs -> Same outputs"
+          echo ""
+          python -m pytest tests/adversarial/test_determinism.py \
+            tests/adversarial/test_belief_state_replay.py \
+            -v --tb=short \
+            --junitxml=junit-determinism.xml
+
+      - name: Verify bundle hash reproducibility
+        run: |
+          echo "Testing bundle hash reproducibility..."
+          python -c "
+          from backend.evidence.bundle_hash import compute_bundle_hash
+          import json
+
+          bundle = {
+              'token_id': 'test',
+              't0': 1704067200000,
+              'trades': [{'ts': 1704067200000, 'price': 0.72, 'size': 100}],
+          }
+
+          # Compute hash 10 times
+          hashes = [compute_bundle_hash(bundle) for _ in range(10)]
+
+          if len(set(hashes)) != 1:
+              print('ERROR: Hash varies across runs!')
+              print(f'Hashes: {hashes}')
+              exit(1)
+
+          print(f'SUCCESS: Hash is reproducible: {hashes[0][:16]}...')
+          "
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: determinism-test-results
+          path: junit-determinism.xml
+
+  # ==========================================================================
+  # GATE: Adversarial Tests - Required for merge
+  # ==========================================================================
+  adversarial-gate:
+    name: "GATE: Adversarial"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run adversarial tests
+        run: |
+          echo "=========================================="
+          echo "ADVERSARIAL GATE"
+          echo "=========================================="
+          echo "Testing: Edge cases, manipulation resistance"
+          echo ""
+          python -m pytest tests/adversarial/ \
+            -v --tb=short \
+            --junitxml=junit-adversarial.xml
+
+      - name: Report adversarial coverage
+        run: |
+          echo ""
+          echo "Adversarial Test Categories:"
+          echo "- Determinism: Event ordering, hash stability"
+          echo "- Edge Cases: Zero values, overflow, boundaries"
+          echo "- Manipulation: Spoofing, layering, wash trading"
+          echo "- Belief States: State transition verification"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: adversarial-test-results
+          path: junit-adversarial.xml
+
+  # ==========================================================================
+  # GATE: Security Tests - Required for merge
+  # ==========================================================================
+  security-gate:
+    name: "GATE: Security"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run security tests
+        run: |
+          echo "=========================================="
+          echo "SECURITY GATE"
+          echo "=========================================="
+          echo "Testing: ACL, audit logging, injection protection"
+          echo ""
+          python -m pytest tests/test_security.py \
+            tests/test_reactor_api.py::TestEventInjection \
+            -v --tb=short \
+            --junitxml=junit-security.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-test-results
+          path: junit-security.xml
+
+  # ==========================================================================
+  # GATE: API/Schema Freeze - Required for merge (v5.34)
+  # ==========================================================================
+  schema-freeze-gate:
+    name: "GATE: API/Schema Freeze"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for diff
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Check OpenAPI breaking changes
+        run: |
+          echo "=========================================="
+          echo "API/SCHEMA FREEZE GATE"
+          echo "=========================================="
+          echo "Checking for breaking API changes..."
+          echo ""
+
+          # Check if openapi.yaml has changed
+          if git diff --name-only origin/main...HEAD | grep -q "openapi.yaml"; then
+            echo "OpenAPI spec has changed. Checking for breaking changes..."
+
+            # Check for removed endpoints (breaking)
+            REMOVED=$(git diff origin/main...HEAD -- openapi.yaml | grep "^-.*paths:" -A 1000 | grep "^-  /" | head -20 || true)
+            if [ -n "$REMOVED" ]; then
+              echo "ERROR: Endpoints may have been removed (breaking change):"
+              echo "$REMOVED"
+              echo ""
+              echo "If this is intentional, add [BREAKING] to commit message."
+              if ! git log --oneline origin/main...HEAD | grep -q "\[BREAKING\]"; then
+                exit 1
+              fi
+            fi
+
+            # Check for removed fields (breaking)
+            REMOVED_FIELDS=$(git diff origin/main...HEAD -- openapi.yaml | grep "^-.*type:" | head -20 || true)
+            if [ -n "$REMOVED_FIELDS" ]; then
+              echo "WARNING: Schema fields may have been removed:"
+              echo "$REMOVED_FIELDS"
+            fi
+
+            echo "OpenAPI changes detected but no breaking changes found."
+          else
+            echo "No OpenAPI changes detected."
+          fi
+
+      - name: Check Pydantic schema compatibility
+        run: |
+          echo ""
+          echo "Checking Pydantic schema changes..."
+
+          # Check for removed fields in schemas
+          if git diff --name-only origin/main...HEAD | grep -qE "schemas.*\.py|models\.py"; then
+            echo "Schema files have changed. Checking for breaking changes..."
+
+            # Check for removed class attributes
+            REMOVED=$(git diff origin/main...HEAD -- backend/api/schemas/ backend/common/schemas.py | grep "^-.*:.*=" | grep -v "^-.*#" | head -20 || true)
+            if [ -n "$REMOVED" ]; then
+              echo "WARNING: Schema fields may have been removed:"
+              echo "$REMOVED"
+              echo ""
+              echo "Ensure backward compatibility or mark as [BREAKING]."
+            fi
+          else
+            echo "No schema file changes detected."
+          fi
+
+          echo ""
+          echo "Schema freeze check completed."
+
+      - name: Check enum changes (v5.34 - breaking change detection)
+        run: |
+          echo ""
+          echo "Checking for enum changes (potential breaking)..."
+
+          ERRORS=0
+
+          # Check for removed enum values (CRITICAL - always breaking)
+          if git diff --name-only origin/main...HEAD | grep -qE "schemas.*\.py|models\.py"; then
+            # Check ReactionType enum
+            REMOVED_REACTION=$(git diff origin/main...HEAD -- backend/common/schemas.py poc/models.py | grep "^-.*VACUUM\|^-.*SWEEP\|^-.*CHASE\|^-.*PULL\|^-.*HOLD\|^-.*DELAYED\|^-.*NO_IMPACT" || true)
+            if [ -n "$REMOVED_REACTION" ]; then
+              echo "CRITICAL: ReactionType enum values removed (BREAKING):"
+              echo "$REMOVED_REACTION"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            # Check BeliefState enum
+            REMOVED_STATE=$(git diff origin/main...HEAD -- backend/common/schemas.py poc/models.py | grep "^-.*STABLE\|^-.*FRAGILE\|^-.*CRACKING\|^-.*BROKEN" || true)
+            if [ -n "$REMOVED_STATE" ]; then
+              echo "CRITICAL: BeliefState enum values removed (BREAKING):"
+              echo "$REMOVED_STATE"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            # Check LeadingEventType enum
+            REMOVED_LEADING=$(git diff origin/main...HEAD -- backend/common/schemas.py poc/models.py | grep "^-.*PRE_SHOCK_PULL\|^-.*DEPTH_COLLAPSE\|^-.*GRADUAL_THINNING" || true)
+            if [ -n "$REMOVED_LEADING" ]; then
+              echo "CRITICAL: LeadingEventType enum values removed (BREAKING):"
+              echo "$REMOVED_LEADING"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            # Check EvidenceGrade enum (v5.34)
+            REMOVED_GRADE=$(git diff origin/main...HEAD -- backend/api/schemas/v1.py | grep "^-.*class EvidenceGrade\|^-.*=.*\"A\"\|^-.*=.*\"B\"\|^-.*=.*\"C\"\|^-.*=.*\"D\"" || true)
+            if [ -n "$REMOVED_GRADE" ]; then
+              echo "CRITICAL: EvidenceGrade enum values removed (BREAKING):"
+              echo "$REMOVED_GRADE"
+              ERRORS=$((ERRORS + 1))
+            fi
+          fi
+
+          if [ $ERRORS -gt 0 ]; then
+            echo ""
+            echo "ERROR: $ERRORS enum breaking changes detected."
+            echo "Enum values cannot be removed without [BREAKING] tag."
+            if ! git log --oneline origin/main...HEAD | grep -q "\[BREAKING\]"; then
+              exit 1
+            fi
+          else
+            echo "No enum breaking changes detected."
+          fi
+
+      - name: Check type narrowing (v5.34 - breaking change detection)
+        run: |
+          echo ""
+          echo "Checking for type narrowing (potential breaking)..."
+
+          # Check for nullable -> not null changes
+          NULLABLE_REMOVED=$(git diff origin/main...HEAD -- backend/api/schemas/ | grep "^-.*Optional\[" | head -10 || true)
+          if [ -n "$NULLABLE_REMOVED" ]; then
+            echo "WARNING: Optional fields may have been made required:"
+            echo "$NULLABLE_REMOVED"
+            echo ""
+            echo "This is a breaking change for existing clients."
+          fi
+
+          # Check for type changes (str -> int, etc.)
+          TYPE_CHANGES=$(git diff origin/main...HEAD -- backend/api/schemas/ | grep -E "^-.*: (str|int|float|bool)" | head -10 || true)
+          if [ -n "$TYPE_CHANGES" ]; then
+            echo "WARNING: Field types may have been changed:"
+            echo "$TYPE_CHANGES"
+          fi
+
+          echo "Type narrowing check completed."
+
+      - name: Check database migration compatibility
+        run: |
+          echo ""
+          echo "Checking database migration compatibility..."
+
+          # Check for migration files
+          if git diff --name-only origin/main...HEAD | grep -qE "migrations/|alembic/"; then
+            echo "Migration files have changed."
+
+            # Check for DROP statements (potentially breaking)
+            DROPS=$(git diff origin/main...HEAD -- "**/migrations/**" "**/alembic/**" | grep -i "DROP" | head -10 || true)
+            if [ -n "$DROPS" ]; then
+              echo "WARNING: DROP statements detected in migrations:"
+              echo "$DROPS"
+              echo ""
+              echo "Ensure data is backed up or migration is reversible."
+            fi
+
+            # Check for NOT NULL without default (v5.34)
+            NOT_NULL=$(git diff origin/main...HEAD -- "**/migrations/**" "**/alembic/**" | grep -i "NOT NULL" | grep -v "DEFAULT" | head -10 || true)
+            if [ -n "$NOT_NULL" ]; then
+              echo "WARNING: NOT NULL constraint without DEFAULT detected:"
+              echo "$NOT_NULL"
+              echo ""
+              echo "Existing rows will fail. Add DEFAULT or backfill first."
+            fi
+
+            # Check for constraint changes
+            CONSTRAINTS=$(git diff origin/main...HEAD -- "**/migrations/**" "**/alembic/**" | grep -iE "UNIQUE|PRIMARY KEY|FOREIGN KEY|CHECK" | head -10 || true)
+            if [ -n "$CONSTRAINTS" ]; then
+              echo "INFO: Constraint changes detected:"
+              echo "$CONSTRAINTS"
+            fi
+          else
+            echo "No migration changes detected."
+          fi
+
+          echo ""
+          echo "Database migration check completed."
+
+  # ==========================================================================
+  # All Gates Summary - Final check
+  # ==========================================================================
+  all-gates:
+    name: All Gates Passed
+    runs-on: ubuntu-latest
+    needs:
+      - unit-tests
+      - determinism-gate
+      - adversarial-gate
+      - security-gate
+      - schema-freeze-gate
+
+    steps:
+      - name: All gates passed
+        run: |
+          echo "=========================================="
+          echo "ALL GATES PASSED"
+          echo "=========================================="
+          echo ""
+          echo "Unit Tests:     PASSED"
+          echo "Determinism:    PASSED"
+          echo "Adversarial:    PASSED"
+          echo "Security:       PASSED"
+          echo "Schema Freeze:  PASSED"
+          echo ""
+          echo "Ready for merge."
+
+  # ==========================================================================
+  # Integration Tests (Optional - for main branch only)
+  # ==========================================================================
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: all-gates
+    if: github.ref == 'refs/heads/main'
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: belief_reaction
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run integration tests
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5433
+          DB_NAME: belief_reaction
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+        run: |
+          python -m pytest tests/integration/ \
+            -v --tb=short \
+            --junitxml=junit-integration.xml || true
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: junit-integration.xml
