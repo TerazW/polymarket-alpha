@@ -285,7 +285,7 @@ jobs:
           RETRY_COUNT=0
 
           while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" https://marketsensemaking.com/v1/health || true)
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" https://api.marketsensemaking.com/v1/health || true)
 
             if [ "$RESPONSE" == "200" ]; then
               echo "API is healthy! (HTTP $RESPONSE)"
@@ -316,7 +316,7 @@ jobs:
           echo "  - market-sensemaking-collector"
           echo "  - market-sensemaking-tile-worker"
           echo ""
-          echo "API URL: https://marketsensemaking.com/v1/health"
+          echo "API URL: https://api.marketsensemaking.com/v1/health"
 
   # ==========================================================================
   # Notify on Failure

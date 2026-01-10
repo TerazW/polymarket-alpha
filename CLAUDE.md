@@ -1,7 +1,67 @@
 # Market Sensemaking - Claude 開發筆記
 
+## 當前狀態 (2026-01-10)
+
+**Phase 5: 生產驗證** - 正在進行中
+
+### 已完成的修復
+1. ✅ 移除所有 Mock Data (主頁面 + 詳情頁)
+2. ✅ 修復硬編碼 72% 價格 → 使用 API 的 `market.last_price`
+3. ✅ 修復 EQS 不一致 (Radar 65 vs 詳情頁 70) → Evidence API 現在返回 `evidence_quality`
+4. ✅ 修復前端無限循環 (Date.now() in useEffect deps)
+5. ✅ Radar API 過濾：只顯示有 `book_bins` 數據的市場
+6. ✅ **v5.40: Bookmap 風格熱力圖修復** (2026-01-10)
+
+### v5.40 Heatmap 修復詳情
+**問題**: 熱力圖顯示「上下紅綠地毯」效果，不是 Bookmap 風格
+
+**根本原因**:
+- 前端用 `midPrice` 判斷顏色（價格 > midPrice → 紅色，< midPrice → 綠色）
+- 這是語義錯誤：Bookmap 應根據 bid/ask side 決定顏色
+
+**修復內容**:
+1. **後端 API** (`backend/api/routes/v1.py`):
+   - `/v1/heatmap/tiles` 現在返回 `bid_tiles` 和 `ask_tiles` 分開的數組
+   - 使用 `side='bid'` 和 `side='ask'` 分別生成瓦片
+
+2. **後端 Schema** (`backend/api/schemas/v1.py`):
+   - `HeatmapTilesResponse` 改為 `bid_tiles` + `ask_tiles`
+
+3. **前端 API 類型** (`frontend/src/lib/api.ts`):
+   - 更新 `HeatmapTilesResponse` 接口
+
+4. **前端渲染器** (`frontend/src/components/evidence/HeatmapRenderer.tsx`):
+   - 接受 `bidTiles` 和 `askTiles` props
+   - bid tiles → 綠色 (買方流動性)
+   - ask tiles → 紅色 (賣方流動性)
+   - 移除 `midPrice` 判斷邏輯
+   - 使用 log 強度映射 + gamma 校正
+   - 移除 `pixelated` 渲染，改用 `auto`
+   - 添加 additive blending 平滑效果
+
+5. **前端播放器** (`frontend/src/components/evidence/EvidencePlayer.tsx`):
+   - 更新使用新的 tiles 結構
+
+### 待部署
+需要重新構建並部署 API 到 AWS：
+```powershell
+cd C:\Projects\market-sensemaking
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "821482074659.dkr.ecr.us-east-1.amazonaws.com"
+docker build -t market-sensemaking-api -f infra/Dockerfile.api .
+docker tag market-sensemaking-api:latest 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking/api:latest
+docker push 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking/api:latest
+aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-api --force-new-deployment --region us-east-1
+```
+
+### 當前問題：熱力圖顯示 "Generating tiles..."
+**原因**: `book_bins` 表沒有這些市場的數據
+- Collector 正在監控的市場：`21695138873211375451...`, `57761428076807364758...`
+- 但 Radar 顯示的市場 token_id 不同
+
+**解決方案**: 確認 Collector 配置，確保它監控的市場和 `markets` 表中的市場一致
+
 ## 分支
-- 開發分支：`claude/initial-setup-xsnPm`
+- 開發分支：`claude/initial-setup-xsnPm-phveT`
 
 ## AWS 部署狀態
 
@@ -9,22 +69,7 @@
 - AWS Account ID: `821482074659`
 - Region: `us-east-1`
 - Domain: `marketsensemaking.com` (Cloudflare DNS)
-
-### 已完成的基礎設施 (Terraform)
-- VPC + 子網 (公有/私有)
-- ECS Fargate 集群：`market-sensemaking-cluster`
-- RDS PostgreSQL 數據庫
-- ElastiCache Redis
-- Application Load Balancer (ALB)
-- ACM SSL 證書 (已驗證)
-- VPC Endpoints (ECR, S3, CloudWatch Logs, Secrets Manager)
-- 4 個 ECR 倉庫
-
-### ECR 倉庫名稱 (重要!)
-需要確認實際名稱，運行：
-```bash
-aws ecr describe-repositories --region us-east-1
-```
+- API URL: `https://api.marketsensemaking.com`
 
 ### ECS 服務
 - market-sensemaking-api
@@ -32,137 +77,15 @@ aws ecr describe-repositories --region us-east-1
 - market-sensemaking-reactor
 - market-sensemaking-tile-worker
 
-## 當前問題
-
-### 數據庫連接錯誤 (已修復代碼，待部署)
-容器嘗試連接 `127.0.0.1:5433` 而不是 RDS。
-
-**已修復的文件** (使用環境變量讀取 DB 配置):
-- backend/api/main.py
-- backend/api/routes/v1.py
-- backend/api/routes/events.py
-- backend/api/routes/collector.py
-- backend/collector/main.py
-- backend/heatmap/precompute.py
-- backend/heatmap/tile_generator.py
-- backend/jobs/verify_bundles.py
-- backend/reactor/service.py
-
-### 待完成
-1. ~~確認 ECR 倉庫實際名稱~~ ✅
-2. ~~重新構建 Docker 鏡像~~ ✅
-3. ~~推送到 ECR~~ ✅
-4. ~~更新 ECS 服務~~ ✅
-5. 運行數據庫遷移 ⬅️ **當前步驟**
-
-## TimescaleDB Cloud 部署 (方案 A)
-
-### 為什麼用 TimescaleDB Cloud？
-- AWS RDS 不支持 TimescaleDB 擴展
-- TimescaleDB Cloud 提供完整的時序數據庫功能
-- 原始 `init.sql` 架構設計需要 TimescaleDB
-
-### 步驟 1：創建 TimescaleDB Cloud 實例
-
-1. 訪問 https://console.cloud.timescale.com/
-2. 註冊/登錄帳戶
-3. 點擊 **Create Service**
-4. 選擇配置：
-   - **Region**: `us-east-1` (與 AWS 相同)
-   - **Compute**: 最小配置 (0.5 CPU / 2GB RAM, ~$30/月)
-   - **Storage**: 10GB 起步
-5. 記錄連接信息：
-   ```
-   Host: xxx.tsdb.cloud.timescale.com
-   Port: 5432
-   Database: tsdb
-   Username: tsdbadmin
-   Password: (創建時設置)
-   ```
-
-### 步驟 2：運行數據庫遷移
-
-在 TimescaleDB Cloud 控制台的 **SQL Editor** 中：
-1. 打開 `infra/init.sql`
-2. 複製全部內容
-3. 粘貼到 SQL Editor 並執行
-
-或使用命令行 (如果有 psql):
-```bash
-PGPASSWORD=你的密碼 psql -h xxx.tsdb.cloud.timescale.com -p 5432 -U tsdbadmin -d tsdb -f infra/init.sql
-```
-
-### 步驟 3：配置 Terraform 變量
-
-```powershell
-cd C:\Projects\market-sensemaking\infra\terraform
-
-# 複製示例配置
-copy terraform.tfvars.example terraform.tfvars
-
-# 編輯 terraform.tfvars，填入 TimescaleDB Cloud 連接信息
-notepad terraform.tfvars
-```
-
-terraform.tfvars 內容：
-```hcl
-use_timescaledb_cloud = true
-timescaledb_host     = "xxx.tsdb.cloud.timescale.com"
-timescaledb_port     = "5432"
-timescaledb_name     = "tsdb"
-timescaledb_user     = "tsdbadmin"
-timescaledb_password = "你的密碼"
-```
-
-### 步驟 4：應用 Terraform 更新
-
-```powershell
-cd C:\Projects\market-sensemaking\infra\terraform
-terraform init
-terraform apply
-```
-
-這會更新 ECS 任務定義，將數據庫連接指向 TimescaleDB Cloud。
-
-### 步驟 5：重啟 ECS 服務
-
-```powershell
-# 重啟所有服務
-aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-api --force-new-deployment --region us-east-1
-aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-collector --force-new-deployment --region us-east-1
-aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-reactor --force-new-deployment --region us-east-1
-aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-tile-worker --force-new-deployment --region us-east-1
-```
-
-### 步驟 6：驗證
-
-```powershell
-# 檢查服務狀態
-aws ecs describe-services --cluster market-sensemaking-cluster --services market-sensemaking-collector --query "services[0].deployments" --region us-east-1
-
-# 查看 collector 日志
-aws logs tail /ecs/market-sensemaking/collector --follow --region us-east-1
-```
-
-### 可選：刪除 RDS 節省費用
-
-確認 TimescaleDB Cloud 運行正常後，可以刪除 RDS：
-```powershell
-# 在 Terraform 中註釋掉 RDS 相關資源，或手動刪除
-aws rds delete-db-instance --db-instance-identifier market-sensemaking-db --skip-final-snapshot --region us-east-1
-```
+### ECR 倉庫
+- `market-sensemaking/api`
+- `market-sensemaking/collector`
+- `market-sensemaking/reactor`
+- `market-sensemaking/tile-worker`
 
 ## 本地項目路徑 (Windows)
 ```
 C:\Projects\market-sensemaking
-```
-
-## Dockerfile 位置
-```
-infra/Dockerfile.api
-infra/Dockerfile.collector
-infra/Dockerfile.reactor
-infra/Dockerfile.tile_worker
 ```
 
 ## 構建命令模板
@@ -170,78 +93,43 @@ infra/Dockerfile.tile_worker
 # 1. 登入 ECR
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "821482074659.dkr.ecr.us-east-1.amazonaws.com"
 
-# 2. 先查詢 ECR 倉庫名稱
-aws ecr describe-repositories --region us-east-1 --query "repositories[].repositoryName"
+# 2. 構建 (在 C:\Projects\market-sensemaking 目錄下)
+docker build -t market-sensemaking-api -f infra/Dockerfile.api .
 
-# 3. 構建 (在 C:\Projects\market-sensemaking 目錄下)
-docker build -t "IMAGE_NAME" -f "infra/Dockerfile.api" .
+# 3. 標記
+docker tag market-sensemaking-api:latest 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking/api:latest
 
-# 4. 標記
-docker tag "IMAGE_NAME" "821482074659.dkr.ecr.us-east-1.amazonaws.com/REPO_NAME:latest"
+# 4. 推送
+docker push 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking/api:latest
 
-# 5. 推送
-docker push "821482074659.dkr.ecr.us-east-1.amazonaws.com/REPO_NAME:latest"
-
-# 6. 更新 ECS
-aws ecs update-service --cluster market-sensemaking-cluster --service SERVICE_NAME --force-new-deployment --region us-east-1
+# 5. 更新 ECS
+aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-api --force-new-deployment --region us-east-1
 ```
 
-## Terraform 文件位置
-```
-infra/terraform/
-```
+## 查看日誌
+```powershell
+# Collector 日誌
+aws logs tail /ecs/market-sensemaking/collector --since 10m --region us-east-1
 
-## CI/CD 部署流水線 (Phase 3)
-
-### GitHub Actions Workflows
-- `.github/workflows/ci.yml` - 測試 (單元測試、對抗性測試、安全測試)
-- `.github/workflows/deploy.yml` - 自動部署到 AWS
-
-### 部署流程
-```
-push to main → 測試 → 構建 Docker → 推送 ECR → 遷移數據庫 → 部署 ECS → 健康檢查
+# API 日誌
+aws logs tail /ecs/market-sensemaking/api --since 5m --region us-east-1
 ```
 
-### 分支策略
-| 分支 | 環境 | 自動部署 |
-|------|------|----------|
-| `main` | Production | ✅ |
-| `staging` | Staging | ✅ |
-| 其他 | - | ❌ (僅測試) |
+## Collector 配置
+市場選擇配置在 `backend/common/config.py`:
+- `MARKET_CATEGORY`: 默認 "politics"
+- `MAX_MARKETS`: 默認 10
+- `MIN_VOLUME_24H`: 默認 5000
 
-### GitHub Secrets 配置 (必須)
+## 重要文件
+- `frontend/src/app/page.tsx` - 主頁面 (Radar)
+- `frontend/src/app/market/[tokenId]/page.tsx` - 市場詳情頁
+- `backend/api/routes/v1.py` - API 路由
+- `backend/collector/main.py` - 數據收集器
+- `backend/heatmap/tile_generator.py` - 熱力圖生成
 
-在 GitHub 倉庫設置中添加以下 Secrets：
-
-```
-Settings → Secrets and variables → Actions → New repository secret
-```
-
-| Secret 名稱 | 說明 | 範例值 |
-|-------------|------|--------|
-| `AWS_ACCESS_KEY_ID` | AWS IAM Access Key | `AKIA...` |
-| `AWS_SECRET_ACCESS_KEY` | AWS IAM Secret Key | `wJalr...` |
-| `TIMESCALEDB_HOST` | TimescaleDB 主機 | `xxx.tsdb.cloud.timescale.com` |
-| `TIMESCALEDB_PORT` | TimescaleDB 端口 | `39785` |
-| `TIMESCALEDB_NAME` | 數據庫名稱 | `tsdb` |
-| `TIMESCALEDB_USER` | 數據庫用戶 | `tsdbadmin` |
-| `TIMESCALEDB_PASSWORD` | 數據庫密碼 | `你的密碼` |
-
-### 手動觸發部署
-
-```
-GitHub → Actions → Deploy to AWS → Run workflow → 選擇環境
-```
-
-### IAM 權限要求
-
-部署用的 IAM 用戶需要以下權限：
-- `ecr:GetAuthorizationToken`
-- `ecr:BatchCheckLayerAvailability`
-- `ecr:PutImage`
-- `ecr:InitiateLayerUpload`
-- `ecr:UploadLayerPart`
-- `ecr:CompleteLayerUpload`
-- `ecs:UpdateService`
-- `ecs:DescribeServices`
-- `logs:DescribeLogGroups`
+## Phase 5 測試計劃
+1. 驗證 5 個市場的數據流
+2. 確認熱力圖正確顯示 (需要 book_bins 數據)
+3. 確認 EQS 在所有頁面一致
+4. 確認價格和狀態實時更新
