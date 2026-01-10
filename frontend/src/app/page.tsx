@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { BeliefState } from '@/types/api';
 import { STATE_COLORS } from '@/types/api';
-import { getRadar, type RadarRow } from '@/lib/api';
+import { getRadar, type RadarRow, API_BASE } from '@/lib/api';
 
 interface Market {
   condition_id: string;
@@ -25,43 +25,6 @@ interface Stats {
   reactions: number;
   reaction_types: Record<string, number>;
 }
-
-// Mock markets with belief state for demo
-const MOCK_MARKETS: Market[] = [
-  {
-    condition_id: '1',
-    token_id: 'mock-token-123',
-    question: 'Will Russia Invade Ukraine?',
-    volume_24h: 125000,
-    liquidity: 85000,
-    yes_price: 0.72,
-    state: 'BROKEN',
-    confidence: 85,
-    leading_rate_10m: 3,
-  },
-  {
-    condition_id: '2',
-    token_id: 'mock-token-456',
-    question: 'BTC ETP Approval',
-    volume_24h: 89000,
-    liquidity: 62000,
-    yes_price: 0.58,
-    state: 'FRAGILE',
-    confidence: 72,
-    leading_rate_10m: 1,
-  },
-  {
-    condition_id: '3',
-    token_id: 'mock-token-789',
-    question: 'Politics - Debate Outcome',
-    volume_24h: 45000,
-    liquidity: 38000,
-    yes_price: 0.76,
-    state: 'STABLE',
-    confidence: 91,
-    leading_rate_10m: 0,
-  },
-];
 
 const STATE_EMOJIS: Record<BeliefState, string> = {
   STABLE: '🟢',
@@ -87,32 +50,26 @@ function radarRowToMarket(row: RadarRow): Market {
 }
 
 export default function Dashboard() {
-  const [markets, setMarkets] = useState<Market[]>(MOCK_MARKETS);
+  const [markets, setMarkets] = useState<Market[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [useMockData, setUseMockData] = useState(true);
   const [apiStatus, setApiStatus] = useState<'unknown' | 'online' | 'offline'>('unknown');
 
-  const API_BASE = 'http://127.0.0.1:8000';
-
   const fetchRadar = useCallback(async () => {
-    if (useMockData) return;
     try {
       const data = await getRadar({ limit: 50 });
       const convertedMarkets = data.rows.map(radarRowToMarket);
-      setMarkets(convertedMarkets.length > 0 ? convertedMarkets : MOCK_MARKETS);
+      setMarkets(convertedMarkets);
       setApiStatus('online');
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      setError(`Network error: ${err instanceof Error ? err.message : 'Unknown error'}`);
       setApiStatus('offline');
-      // Keep mock data on error
     }
-  }, [useMockData]);
+  }, []);
 
   const fetchStats = useCallback(async () => {
-    if (useMockData) return;
     try {
       const res = await fetch(`${API_BASE}/api/stats`);
       if (res.ok) {
@@ -122,15 +79,9 @@ export default function Dashboard() {
     } catch {
       // Stats endpoint might not exist yet
     }
-  }, [useMockData]);
+  }, []);
 
   useEffect(() => {
-    if (useMockData) {
-      setMarkets(MOCK_MARKETS);
-      setApiStatus('unknown');
-      return;
-    }
-
     const loadData = async () => {
       setLoading(true);
       await Promise.all([fetchRadar(), fetchStats()]);
@@ -143,7 +94,7 @@ export default function Dashboard() {
       fetchStats();
     }, 30000);
     return () => clearInterval(interval);
-  }, [useMockData, fetchRadar, fetchStats]);
+  }, [fetchRadar, fetchStats]);
 
   // Sort markets by state priority (BROKEN > CRACKING > FRAGILE > STABLE)
   const sortedMarkets = [...markets].sort((a, b) => {
@@ -168,19 +119,9 @@ export default function Dashboard() {
             >
               📜 Replay Catalog
             </Link>
-            {!useMockData && apiStatus !== 'unknown' && (
-              <span className={`text-xs ${apiStatus === 'online' ? 'text-green-400' : 'text-red-400'}`}>
-                {apiStatus === 'online' ? '● API Online' : '○ API Offline'}
-              </span>
-            )}
-            <button
-              onClick={() => setUseMockData(!useMockData)}
-              className={`px-3 py-1 rounded text-sm ${
-                useMockData ? 'bg-yellow-600' : 'bg-green-600'
-              }`}
-            >
-              {useMockData ? 'Mock Data' : 'Live Data'}
-            </button>
+            <span className={`text-xs ${apiStatus === 'online' ? 'text-green-400' : 'text-red-400'}`}>
+              {apiStatus === 'online' ? '● API Online' : '○ API Offline'}
+            </span>
           </div>
         </div>
 
