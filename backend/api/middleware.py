@@ -485,6 +485,27 @@ class ThrottleMiddleware(BaseHTTPMiddleware):
                 ip_address=request.client.host if request.client else None,
             )
 
+            # CRITICAL: 429 responses MUST include CORS headers
+            # Otherwise browser treats it as CORS error instead of rate limit
+            origin = request.headers.get("origin", "")
+            cors_headers = {
+                "Retry-After": str(int(1.0 / config.rate)),
+                "Vary": "Origin",
+            }
+
+            # Check if origin is allowed
+            allowed_origins = [
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "https://market-sensemaking.vercel.app",
+                "https://marketsensemaking.com",
+                "https://www.marketsensemaking.com",
+            ]
+            # Also check Vercel preview deployments
+            if origin in allowed_origins or (origin and "market-sensemaking" in origin and "vercel.app" in origin):
+                cors_headers["Access-Control-Allow-Origin"] = origin
+                cors_headers["Access-Control-Allow-Credentials"] = "true"
+
             return JSONResponse(
                 status_code=429,
                 content={
@@ -492,9 +513,7 @@ class ThrottleMiddleware(BaseHTTPMiddleware):
                     "code": "RATE_LIMITED",
                     "retry_after_seconds": 1.0 / config.rate,
                 },
-                headers={
-                    "Retry-After": str(int(1.0 / config.rate)),
-                },
+                headers=cors_headers,
             )
 
         return await call_next(request)
