@@ -52,7 +52,6 @@ async function loadFzstd(): Promise<typeof fzstdModule> {
 
   try {
     // Dynamic import - will fail gracefully if not installed
-    // @ts-expect-error - fzstd is optional
     fzstdModule = await import('fzstd');
   } catch {
     console.info('fzstd not available - tiles must be uncompressed');
