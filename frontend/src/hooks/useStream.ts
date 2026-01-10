@@ -1,6 +1,7 @@
 /**
  * Belief Reaction System - Real-time Stream Hook
  * v5.9: WebSocket connection for live events
+ * v5.43: Fixed connection storm caused by unstable dependencies
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -127,14 +128,6 @@ export function useStream(options: UseStreamOptions = {}): UseStreamReturn {
     autoReconnect = true,
     maxReconnectAttempts = 5,
     subscription,
-    onShock,
-    onReaction,
-    onBeliefState,
-    onAlert,
-    onMessage,
-    onConnect,
-    onDisconnect,
-    onError,
   } = options;
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
@@ -144,30 +137,42 @@ export function useStream(options: UseStreamOptions = {}): UseStreamReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const mountedRef = useRef(true);
 
+  // Store handlers in refs to avoid dependency changes
+  const handlersRef = useRef(options);
+  handlersRef.current = options;
+
+  // Store subscription in ref for stable access
+  const subscriptionRef = useRef(subscription);
+  subscriptionRef.current = subscription;
+
+  // Stable message handler that reads from ref
   const handleMessage = useCallback((event: MessageEvent) => {
     try {
       const message: StreamMessage = JSON.parse(event.data);
       setLastMessage(message);
 
+      const handlers = handlersRef.current;
+
       // Call general message handler
-      onMessage?.(message);
+      handlers.onMessage?.(message);
 
       // Route to specific handlers
       switch (message.type) {
         case 'shock':
-          onShock?.(message.payload as ShockPayload);
+          handlers.onShock?.(message.payload as ShockPayload);
           break;
         case 'reaction':
-          onReaction?.(message.payload as ReactionPayload);
+          handlers.onReaction?.(message.payload as ReactionPayload);
           break;
         case 'belief_state':
-          onBeliefState?.(message.payload as BeliefStatePayload);
+          handlers.onBeliefState?.(message.payload as BeliefStatePayload);
           break;
         case 'alert.new':
         case 'alert.updated':
         case 'alert.resolved':
-          onAlert?.(message.payload as AlertPayload, message.type);
+          handlers.onAlert?.(message.payload as AlertPayload, message.type);
           break;
         case 'heartbeat':
           setConnectionCount((message.payload as { connections: number }).connections);
@@ -182,29 +187,38 @@ export function useStream(options: UseStreamOptions = {}): UseStreamReturn {
     } catch (e) {
       console.error('[STREAM] Failed to parse message:', e);
     }
-  }, [onShock, onReaction, onBeliefState, onAlert, onMessage]);
+  }, []); // No deps - reads from handlersRef
 
+  // Stable connect function
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return;
     }
+
+    if (!mountedRef.current) return;
 
     setConnectionState('connecting');
 
     const ws = new WebSocket(getStreamUrl());
 
     ws.onopen = () => {
+      if (!mountedRef.current) {
+        ws.close();
+        return;
+      }
+
       setConnectionState('connected');
       reconnectAttemptsRef.current = 0;
-      onConnect?.();
+      handlersRef.current.onConnect?.();
 
       // Send initial subscription if provided
-      if (subscription) {
+      const sub = subscriptionRef.current;
+      if (sub) {
         ws.send(JSON.stringify({
           action: 'subscribe',
-          token_ids: subscription.tokenIds,
-          event_types: subscription.eventTypes,
-          min_severity: subscription.minSeverity,
+          token_ids: sub.tokenIds,
+          event_types: sub.eventTypes,
+          min_severity: sub.minSeverity,
         }));
       }
     };
@@ -212,28 +226,32 @@ export function useStream(options: UseStreamOptions = {}): UseStreamReturn {
     ws.onmessage = handleMessage;
 
     ws.onclose = () => {
+      if (!mountedRef.current) return;
+
       setConnectionState('disconnected');
-      onDisconnect?.();
+      handlersRef.current.onDisconnect?.();
 
       // Auto reconnect logic
-      if (autoReconnect && reconnectAttemptsRef.current < maxReconnectAttempts) {
+      if (autoReconnect && reconnectAttemptsRef.current < maxReconnectAttempts && mountedRef.current) {
         const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
         reconnectAttemptsRef.current++;
         setConnectionState('reconnecting');
 
         reconnectTimeoutRef.current = setTimeout(() => {
-          connect();
+          if (mountedRef.current) {
+            connect();
+          }
         }, delay);
       }
     };
 
     ws.onerror = (error) => {
       console.error('[STREAM] WebSocket error:', error);
-      onError?.(error);
+      handlersRef.current.onError?.(error);
     };
 
     wsRef.current = ws;
-  }, [handleMessage, subscription, autoReconnect, maxReconnectAttempts, onConnect, onDisconnect, onError]);
+  }, [handleMessage, autoReconnect, maxReconnectAttempts]); // Stable deps only
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -251,32 +269,39 @@ export function useStream(options: UseStreamOptions = {}): UseStreamReturn {
     setConnectionState('disconnected');
   }, [maxReconnectAttempts]);
 
-  const subscribe = useCallback((options: SubscriptionOptions) => {
+  const subscribe = useCallback((newOptions: SubscriptionOptions) => {
+    subscriptionRef.current = newOptions;
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         action: 'subscribe',
-        token_ids: options.tokenIds,
-        event_types: options.eventTypes,
-        min_severity: options.minSeverity,
+        token_ids: newOptions.tokenIds,
+        event_types: newOptions.eventTypes,
+        min_severity: newOptions.minSeverity,
       }));
     }
   }, []);
 
-  // Auto-connect on mount
+  // Auto-connect on mount - use a stable key instead of connect function
+  const autoConnectKey = autoConnect ? 'auto' : 'manual';
+
   useEffect(() => {
+    mountedRef.current = true;
+
     if (autoConnect) {
       connect();
     }
 
     return () => {
+      mountedRef.current = false;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
       if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
     };
-  }, [autoConnect, connect]);
+  }, [autoConnectKey]); // Only depend on the key, not the connect function
 
   return {
     connectionState,
@@ -302,16 +327,27 @@ export function useTokenStream(
     onAlert?: (payload: AlertPayload) => void;
   }
 ): UseStreamReturn {
+  // Store handlers in ref to prevent reconnection on handler change
+  const handlersRef = useRef(handlers);
+  handlersRef.current = handlers;
+
+  // Create stable handlers that read from ref
+  const stableHandlers = useRef({
+    onShock: (payload: ShockPayload) => handlersRef.current.onShock?.(payload),
+    onReaction: (payload: ReactionPayload) => handlersRef.current.onReaction?.(payload),
+    onBeliefState: (payload: BeliefStatePayload) => handlersRef.current.onBeliefState?.(payload),
+    onAlert: (payload: AlertPayload) => handlersRef.current.onAlert?.(payload),
+  }).current;
+
   return useStream({
     subscription: {
-      tokenIds: [tokenId],
+      tokenIds: tokenId ? [tokenId] : [],
     },
-    onShock: handlers.onShock,
-    onReaction: handlers.onReaction,
-    onBeliefState: handlers.onBeliefState,
-    onAlert: handlers.onAlert
-      ? (payload, _type) => handlers.onAlert!(payload)
-      : undefined,
+    onShock: stableHandlers.onShock,
+    onReaction: stableHandlers.onReaction,
+    onBeliefState: stableHandlers.onBeliefState,
+    onAlert: (payload) => stableHandlers.onAlert(payload),
+    autoConnect: !!tokenId, // Only connect if tokenId is provided
   });
 }
 
@@ -327,21 +363,26 @@ export function useAlertStream(
     onAlertResolved?: (payload: AlertPayload) => void;
   }
 ): UseStreamReturn {
+  // Store handlers in ref to prevent reconnection on handler change
+  const handlersRef = useRef(options);
+  handlersRef.current = options;
+
   return useStream({
     subscription: {
       eventTypes: ['alert.new', 'alert.updated', 'alert.resolved'],
       minSeverity: options.minSeverity,
     },
     onAlert: (payload, eventType) => {
+      const handlers = handlersRef.current;
       switch (eventType) {
         case 'alert.new':
-          options.onNewAlert?.(payload);
+          handlers.onNewAlert?.(payload);
           break;
         case 'alert.updated':
-          options.onAlertUpdated?.(payload);
+          handlers.onAlertUpdated?.(payload);
           break;
         case 'alert.resolved':
-          options.onAlertResolved?.(payload);
+          handlers.onAlertResolved?.(payload);
           break;
       }
     },
