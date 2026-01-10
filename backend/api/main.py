@@ -124,9 +124,18 @@ app.include_router(admin_router)
 app.include_router(events_router)
 
 # 允许前端跨域访问
+# Note: allow_credentials=True requires explicit origins (not "*")
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://market-sensemaking.vercel.app",
+    "https://market-sensemaking-*.vercel.app",  # Preview deployments
+    "https://marketsensemaking.com",
+    "https://www.marketsensemaking.com",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 开发环境允许所有来源
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
