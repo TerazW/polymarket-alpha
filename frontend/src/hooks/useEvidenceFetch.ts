@@ -6,10 +6,17 @@
  * - Debounce (wait before fetching on param changes)
  * - 429 backoff (respect Retry-After header)
  * - Stable dependency key (prevents infinite loops)
+ * - Global singleton lock (prevents multiple instances from flooding)
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getEvidence, ApiError, type EvidenceResponse } from '@/lib/api';
+
+// =============================================================================
+// Module-level singleton guards (shared across all hook instances)
+// =============================================================================
+let globalInFlightKey: string | null = null;
+let globalBackoffUntil = 0;
 
 interface UseEvidenceFetchParams {
   tokenId: string;
@@ -48,21 +55,34 @@ export function useEvidenceFetch({
   const paramsRef = useRef({ tokenId, t0, windowBeforeMs, windowAfterMs });
   paramsRef.current = { tokenId, t0, windowBeforeMs, windowAfterMs };
 
+  // Create a stable key for this fetch
+  const getFetchKey = useCallback(() => {
+    const params = paramsRef.current;
+    return `${params.tokenId}|${params.t0}|${params.windowBeforeMs}|${params.windowAfterMs}`;
+  }, []);
+
   // Stable fetch function that reads from ref
   const doFetch = useCallback(async () => {
     const params = paramsRef.current;
+    const fetchKey = getFetchKey();
 
-    // Check backoff period
+    // Check GLOBAL backoff period (shared across all instances)
     const now = Date.now();
-    if (now < backoffUntilRef.current) {
-      const waitTime = backoffUntilRef.current - now;
-      console.log(`[EvidenceFetch] In backoff, waiting ${waitTime}ms`);
+    if (now < globalBackoffUntil) {
+      const waitTime = globalBackoffUntil - now;
+      console.log(`[EvidenceFetch] GLOBAL backoff active, waiting ${waitTime}ms`);
       return;
     }
 
-    // Check in-flight
+    // Check GLOBAL in-flight for same key (prevents duplicate fetches across instances)
+    if (globalInFlightKey === fetchKey) {
+      console.log('[EvidenceFetch] GLOBAL: Already fetching same key, skipping');
+      return;
+    }
+
+    // Check local in-flight
     if (inflightRef.current) {
-      console.log('[EvidenceFetch] Request already in flight, skipping');
+      console.log('[EvidenceFetch] Local: Request already in flight, skipping');
       return;
     }
 
@@ -72,7 +92,9 @@ export function useEvidenceFetch({
     }
     abortControllerRef.current = new AbortController();
 
+    // Set both local and global locks
     inflightRef.current = true;
+    globalInFlightKey = fetchKey;
     setLoading(true);
     setError(null);
 
@@ -104,9 +126,9 @@ export function useEvidenceFetch({
           return;
         }
         if (err.status === 429 && err.retryAfter) {
-          // Set backoff period
-          backoffUntilRef.current = Date.now() + err.retryAfter * 1000;
-          console.warn(`[EvidenceFetch] Rate limited, backing off for ${err.retryAfter}s`);
+          // Set GLOBAL backoff period (shared across all instances)
+          globalBackoffUntil = Date.now() + err.retryAfter * 1000;
+          console.warn(`[EvidenceFetch] Rate limited, GLOBAL backoff for ${err.retryAfter}s`);
           setError(`Rate limited. Please wait ${err.retryAfter}s`);
         } else {
           console.error('[EvidenceFetch] API error:', err.status, err.message);
@@ -121,8 +143,12 @@ export function useEvidenceFetch({
         setLoading(false);
       }
       inflightRef.current = false;
+      // Clear global lock only if it's still our key
+      if (globalInFlightKey === fetchKey) {
+        globalInFlightKey = null;
+      }
     }
-  }, []); // No deps - reads from paramsRef
+  }, [getFetchKey]); // Only depends on getFetchKey which is stable
 
   // Create a stable key for dependency tracking
   const fetchKey = `${tokenId}|${t0}|${windowBeforeMs}|${windowAfterMs}`;
