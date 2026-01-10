@@ -177,16 +177,27 @@ class ApiError extends Error {
   }
 }
 
-async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
+async function fetchApi<T>(path: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${path}`;
+  const method = (options.method || 'GET').toUpperCase();
+
+  // Build headers - only add Content-Type when there's a body
+  // GET without Content-Type = simple request = no preflight
+  const headers: Record<string, string> = {};
+  if (options.headers) {
+    Object.assign(headers, options.headers);
+  }
+  if (options.body && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
 
   try {
     const res = await fetch(url, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options?.headers,
-      },
+      method,
+      headers,
+      // Don't send credentials for simple CORS
+      credentials: 'omit',
     });
 
     if (!res.ok) {
@@ -201,6 +212,10 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
     return res.json();
   } catch (error) {
     if (error instanceof ApiError) throw error;
+    // Check if aborted
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ApiError(-1, 'Request aborted');
+    }
     throw new ApiError(0, `Network error: ${error}`);
   }
 }
@@ -236,14 +251,17 @@ export async function getRadar(params?: {
 // Evidence API
 // =============================================================================
 
-export async function getEvidence(params: {
-  token_id: string;
-  t0: number;
-  window_before_ms?: number;
-  window_after_ms?: number;
-  include_tiles_manifest?: boolean;
-  lod?: 250 | 1000 | 5000;
-}): Promise<EvidenceResponse> {
+export async function getEvidence(
+  params: {
+    token_id: string;
+    t0: number;
+    window_before_ms?: number;
+    window_after_ms?: number;
+    include_tiles_manifest?: boolean;
+    lod?: 250 | 1000 | 5000;
+  },
+  signal?: AbortSignal
+): Promise<EvidenceResponse> {
   const searchParams = new URLSearchParams();
   searchParams.set('token_id', params.token_id);
   searchParams.set('t0', String(params.t0));
@@ -254,7 +272,7 @@ export async function getEvidence(params: {
   }
   if (params.lod) searchParams.set('lod', String(params.lod));
 
-  return fetchApi<EvidenceResponse>(`/v1/evidence?${searchParams.toString()}`);
+  return fetchApi<EvidenceResponse>(`/v1/evidence?${searchParams.toString()}`, { signal });
 }
 
 // =============================================================================
@@ -370,14 +388,17 @@ export interface HeatmapTilesResponse {
   ask_tiles: HeatmapTileMeta[];  // Red layer (ask side liquidity)
 }
 
-export async function getHeatmapTiles(params: {
-  token_id: string;
-  from_ts: number;
-  to_ts: number;
-  lod?: 250 | 1000 | 5000;
-  tile_ms?: 5000 | 10000 | 15000;
-  band?: 'FULL' | 'BID' | 'ASK';
-}): Promise<HeatmapTilesResponse> {
+export async function getHeatmapTiles(
+  params: {
+    token_id: string;
+    from_ts: number;
+    to_ts: number;
+    lod?: 250 | 1000 | 5000;
+    tile_ms?: 5000 | 10000 | 15000;
+    band?: 'FULL' | 'BID' | 'ASK';
+  },
+  signal?: AbortSignal
+): Promise<HeatmapTilesResponse> {
   const searchParams = new URLSearchParams();
   searchParams.set('token_id', params.token_id);
   searchParams.set('from_ts', String(params.from_ts));
@@ -386,7 +407,7 @@ export async function getHeatmapTiles(params: {
   if (params.tile_ms) searchParams.set('tile_ms', String(params.tile_ms));
   if (params.band) searchParams.set('band', params.band);
 
-  return fetchApi<HeatmapTilesResponse>(`/v1/heatmap/tiles?${searchParams.toString()}`);
+  return fetchApi<HeatmapTilesResponse>(`/v1/heatmap/tiles?${searchParams.toString()}`, { signal });
 }
 
 // =============================================================================

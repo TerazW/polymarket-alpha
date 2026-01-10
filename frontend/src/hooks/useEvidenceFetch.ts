@@ -70,12 +70,15 @@ export function useEvidenceFetch({
     setError(null);
 
     try {
-      const data = await getEvidence({
-        token_id: tokenId,
-        t0,
-        window_before_ms: windowBeforeMs,
-        window_after_ms: windowAfterMs,
-      });
+      const data = await getEvidence(
+        {
+          token_id: tokenId,
+          t0,
+          window_before_ms: windowBeforeMs,
+          window_after_ms: windowAfterMs,
+        },
+        abortControllerRef.current.signal
+      );
 
       if (mountedRef.current) {
         setEvidence(data);
@@ -85,6 +88,10 @@ export function useEvidenceFetch({
       if (!mountedRef.current) return;
 
       if (err instanceof ApiError) {
+        // Ignore aborted requests
+        if (err.status === -1) {
+          return;
+        }
         if (err.status === 429 && err.retryAfter) {
           // Set backoff period
           backoffUntilRef.current = Date.now() + err.retryAfter * 1000;
