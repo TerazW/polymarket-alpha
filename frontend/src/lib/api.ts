@@ -57,6 +57,7 @@ export interface EvidenceResponse {
     title: string;
     outcome: string;
     tick_size: number;
+    last_price?: number | null;
   };
   anchors: Array<{
     price: number;

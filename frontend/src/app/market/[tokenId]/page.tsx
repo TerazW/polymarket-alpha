@@ -176,15 +176,15 @@ export default function MarketDetailPage({ params }: PageProps) {
   const error = fetchError ? `Failed to load evidence: ${fetchError}` : null;
   const apiStatus = loading ? 'loading' : (evidence ? 'online' : 'offline');
 
-  // Market info from evidence or default
-  const marketInfo = evidence ? {
-    question: evidence.token_id,
-    yes_price: 0.72, // Would come from market data
-    tick_size: 0.01,
+  // Market info from evidence API
+  const marketInfo = apiEvidence ? {
+    question: apiEvidence.market.title || apiEvidence.token_id,
+    yes_price: apiEvidence.market.last_price ?? null,
+    tick_size: apiEvidence.market.tick_size || 0.01,
     min_order_size: 5,
   } : {
     question: 'Loading...',
-    yes_price: 0,
+    yes_price: null,
     tick_size: 0.01,
     min_order_size: 5,
   };
@@ -230,7 +230,7 @@ export default function MarketDetailPage({ params }: PageProps) {
               {apiStatus === 'online' ? '● API Online' : '○ API Offline'}
             </span>
             <span className="text-2xl font-bold text-green-400">
-              {(marketInfo.yes_price * 100).toFixed(0)}%
+              {marketInfo.yes_price != null ? (marketInfo.yes_price * 100).toFixed(0) : '??'}%
             </span>
             <StateIndicator state={evidence.proof_summary.current_state} />
           </div>

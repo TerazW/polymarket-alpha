@@ -429,13 +429,20 @@ def get_evidence(
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Get market info
+            # Get market info with last_price
             cur.execute("""
-                SELECT condition_id, question, slug, tick_size
-                FROM markets
-                WHERE yes_token_id = %s OR no_token_id = %s
+                SELECT
+                    m.condition_id,
+                    m.question,
+                    m.slug,
+                    m.tick_size,
+                    (SELECT price FROM trade_ticks
+                     WHERE token_id = %s
+                     ORDER BY ts DESC LIMIT 1) as last_price
+                FROM markets m
+                WHERE m.yes_token_id = %s OR m.no_token_id = %s
                 LIMIT 1
-            """, (token_id, token_id))
+            """, (token_id, token_id, token_id))
             market_row = cur.fetchone()
 
             if not market_row:
@@ -751,6 +758,7 @@ def get_evidence(
                 market_slug=market_row['slug'],
                 outcome='YES',
                 tick_size=float(market_row['tick_size'] or 0.01),
+                last_price=market_row.get('last_price'),
             ),
             evidence_grade=EvidenceGrade.B,  # v5.34: Default to Grade B
             evidence_quality=evidence_quality,  # v5.37: EQS (ADR-005)
