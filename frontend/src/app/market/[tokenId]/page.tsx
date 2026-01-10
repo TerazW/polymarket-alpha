@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, use, useMemo } from 'react';
+import { useState, useEffect, use, useMemo, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ContextPanel } from '@/components/evidence/ContextPanel';
 import { EvidencePlayer } from '@/components/evidence/EvidencePlayer';
@@ -138,10 +138,14 @@ export default function MarketDetailPage({ params }: PageProps) {
   const { tokenId } = use(params);
   const searchParams = useSearchParams();
   const t0Param = searchParams.get('t0');
-  // Memoize t0 to prevent infinite loops - only compute once on mount
-  const initialT0 = useMemo(() => {
-    return t0Param ? parseInt(t0Param, 10) : Date.now();
-  }, [t0Param]);
+
+  // Use ref to fix t0 at mount time - prevents re-computation on re-renders/remounts
+  // This is critical: useMemo can re-run on Strict Mode remounts, useRef won't
+  const t0Ref = useRef<number | null>(null);
+  if (t0Ref.current === null) {
+    t0Ref.current = t0Param ? parseInt(t0Param, 10) : Date.now();
+  }
+  const initialT0 = t0Ref.current;
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(initialT0);
