@@ -455,6 +455,10 @@ class ThrottleMiddleware(BaseHTTPMiddleware):
         if not self.enabled:
             return await call_next(request)
 
+        # CORS preflight (OPTIONS) must NEVER be rate limited
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         path = request.url.path
 
         # Get throttle config for this endpoint
