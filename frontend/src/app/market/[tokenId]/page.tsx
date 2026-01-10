@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, use, useCallback } from 'react';
+import { useState, useEffect, use, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ContextPanel } from '@/components/evidence/ContextPanel';
 import { EvidencePlayer } from '@/components/evidence/EvidencePlayer';
@@ -9,7 +9,8 @@ import { TapePanel } from '@/components/evidence/TapePanel';
 import ReactionDistributionPanel from '@/components/evidence/ReactionDistributionPanel';
 import SimilarCasesPanel from '@/components/evidence/SimilarCasesPanel';
 import type { EvidenceResponse, BeliefState, ShockEvent, ReactionEvent, LeadingEvent, StateChange, ProofSummary } from '@/types/api';
-import { getEvidence, type EvidenceResponse as ApiEvidenceResponse } from '@/lib/api';
+import { type EvidenceResponse as ApiEvidenceResponse } from '@/lib/api';
+import { useEvidenceFetch } from '@/hooks/useEvidenceFetch';
 
 interface PageProps {
   params: Promise<{ tokenId: string }>;
@@ -137,14 +138,43 @@ export default function MarketDetailPage({ params }: PageProps) {
   const { tokenId } = use(params);
   const searchParams = useSearchParams();
   const t0Param = searchParams.get('t0');
-  const initialT0 = t0Param ? parseInt(t0Param, 10) : Date.now();
+  // Memoize t0 to prevent infinite loops - only compute once on mount
+  const initialT0 = useMemo(() => {
+    return t0Param ? parseInt(t0Param, 10) : Date.now();
+  }, [t0Param]);
 
-  const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(initialT0);
-  const [apiStatus, setApiStatus] = useState<'loading' | 'online' | 'offline'>('loading');
+
+  // Use safe evidence fetch hook with debounce and in-flight protection
+  const {
+    evidence: apiEvidence,
+    loading,
+    error: fetchError,
+    refetch,
+  } = useEvidenceFetch({
+    tokenId,
+    t0: initialT0,
+    windowBeforeMs: 60000,
+    windowAfterMs: 30000,
+    debounceMs: 300,
+  });
+
+  // Convert API response to frontend types
+  const evidence = useMemo(() => {
+    if (!apiEvidence) return null;
+    return convertApiEvidence(apiEvidence);
+  }, [apiEvidence]);
+
+  // Update currentTime when evidence loads
+  useEffect(() => {
+    if (evidence) {
+      setCurrentTime(evidence.t0);
+    }
+  }, [evidence]);
+
+  const error = fetchError ? `Failed to load evidence: ${fetchError}` : null;
+  const apiStatus = loading ? 'loading' : (evidence ? 'online' : 'offline');
 
   // Market info from evidence or default
   const marketInfo = evidence ? {
@@ -158,36 +188,6 @@ export default function MarketDetailPage({ params }: PageProps) {
     tick_size: 0.01,
     min_order_size: 5,
   };
-
-  const fetchEvidenceData = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const t0 = initialT0;
-      const apiData = await getEvidence({
-        token_id: tokenId,
-        t0,
-        window_before_ms: 60000,
-        window_after_ms: 30000,
-      });
-
-      const converted = convertApiEvidence(apiData);
-      setEvidence(converted);
-      setCurrentTime(converted.t0);
-      setApiStatus('online');
-    } catch (err) {
-      console.error('API failed:', err);
-      setApiStatus('offline');
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      setError(`Failed to load evidence: ${errorMessage}`);
-    } finally {
-      setLoading(false);
-    }
-  }, [tokenId, initialT0]);
-
-  useEffect(() => {
-    fetchEvidenceData();
-  }, [fetchEvidenceData]);
 
   const handleEventClick = (eventId: string, timestamp: number) => {
     setSelectedEventId(eventId);

@@ -167,7 +167,11 @@ export interface ReplayCatalogResponse {
 // =============================================================================
 
 class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    public retryAfter?: number
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -186,6 +190,11 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
     });
 
     if (!res.ok) {
+      // Handle 429 with Retry-After header
+      if (res.status === 429) {
+        const retryAfter = parseInt(res.headers.get('Retry-After') || '1', 10);
+        throw new ApiError(429, `Rate limited. Retry after ${retryAfter}s`, retryAfter);
+      }
       throw new ApiError(res.status, `API error: ${res.status}`);
     }
 
@@ -195,6 +204,9 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
     throw new ApiError(0, `Network error: ${error}`);
   }
 }
+
+// Export ApiError for external handling
+export { ApiError };
 
 // =============================================================================
 // Radar API
