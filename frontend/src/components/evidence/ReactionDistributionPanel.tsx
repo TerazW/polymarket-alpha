@@ -7,7 +7,7 @@
  * Displays distribution percentages instead of individual events.
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { getReactionDistribution, type ReactionDistributionResponse } from '@/lib/api';
 
 interface Props {
@@ -39,21 +39,49 @@ export default function ReactionDistributionPanel({ tokenId, windowMinutes = 30 
   const [data, setData] = useState<ReactionDistributionResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const inflightRef = useRef(false);
+  const lastKeyRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
+
+    if (!tokenId) {
+      setLoading(false);
+      return;
+    }
+
+    const key = `${tokenId}|${windowMinutes}`;
+    if (inflightRef.current || lastKeyRef.current === key) {
+      return;
+    }
+    lastKeyRef.current = key;
+    inflightRef.current = true;
+
     async function fetchData() {
       try {
         setLoading(true);
         const result = await getReactionDistribution({ token_id: tokenId, window_minutes: windowMinutes });
-        setData(result);
-        setError(null);
+        if (mountedRef.current) {
+          setData(result);
+          setError(null);
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load');
+        if (mountedRef.current) {
+          setError(err instanceof Error ? err.message : 'Failed to load');
+        }
       } finally {
-        setLoading(false);
+        inflightRef.current = false;
+        if (mountedRef.current) {
+          setLoading(false);
+        }
       }
     }
     fetchData();
+
+    return () => {
+      mountedRef.current = false;
+    };
   }, [tokenId, windowMinutes]);
 
   if (loading) {

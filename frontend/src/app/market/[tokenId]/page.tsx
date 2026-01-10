@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ContextPanel } from '@/components/evidence/ContextPanel';
 import { EvidencePlayer } from '@/components/evidence/EvidencePlayer';
@@ -140,10 +140,15 @@ export default function MarketDetailPage({ params }: PageProps) {
   const t0Param = searchParams.get('t0');
 
   // Stabilize the t0 we fetch against: only change when tokenId or ?t0 changes
-  const initialT0 = useMemo(
-    () => (t0Param ? parseInt(t0Param, 10) : Date.now()),
-    [tokenId, t0Param]
-  );
+  const t0KeyRef = useRef<string>('');
+  const t0Ref = useRef<number>(0);
+  const t0Key = `${tokenId}|${t0Param ?? ''}`;
+  if (t0KeyRef.current !== t0Key) {
+    const parsedT0 = t0Param ? parseInt(t0Param, 10) : NaN;
+    t0KeyRef.current = t0Key;
+    t0Ref.current = Number.isFinite(parsedT0) ? parsedT0 : Date.now();
+  }
+  const initialT0 = t0Ref.current;
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(initialT0);
