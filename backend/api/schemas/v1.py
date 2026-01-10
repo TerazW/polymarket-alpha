@@ -118,6 +118,24 @@ class EvidenceGrade(str, Enum):
     C = "C"  # Degraded
     D = "D"  # Tainted
 
+    
+
+# v5.37: Evidence Quality Score (ADR-005)
+class EvidenceQualityBreakdown(BaseModel):
+    """Breakdown of EQS components"""
+    recency: float = Field(..., ge=0, le=100, description="How recent is the data (0-100)")
+    completeness: float = Field(..., ge=0, le=100, description="Data completeness (0-100)")
+    observability: float = Field(..., ge=0, le=100, description="Observation coverage (0-100)")
+    integrity: float = Field(..., ge=0, le=100, description="Data integrity score (0-100)")
+
+
+class EvidenceQualityScore(BaseModel):
+    """Evidence Quality Score - quantitative measure of evidence reliability"""
+    score: float = Field(..., ge=0, le=100, description="Overall EQS (0-100)")
+    breakdown: EvidenceQualityBreakdown
+    flags: List[str] = Field(default_factory=list, description="Quality flags/warnings")
+
+
 
 # =============================================================================
 # Shared Components
