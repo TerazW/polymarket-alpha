@@ -354,7 +354,8 @@ export interface HeatmapTilesManifest {
 
 export interface HeatmapTilesResponse {
   manifest: HeatmapTilesManifest;
-  tiles: HeatmapTileMeta[];
+  bid_tiles: HeatmapTileMeta[];  // Green layer (bid side liquidity)
+  ask_tiles: HeatmapTileMeta[];  // Red layer (ask side liquidity)
 }
 
 export async function getHeatmapTiles(params: {

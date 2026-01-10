@@ -27,9 +27,12 @@ from ..schemas.v1 import (
     HeatmapTilesResponse, HeatmapTilesManifest, HeatmapTileMeta,
     TileEncoding, TileCompression, TileChecksum,
     ErrorResponse, EvidenceRef,
+    # v5.37: EQS (ADR-005)
+    EvidenceQualityScore, EvidenceQualityBreakdown,
     # Enums
     BeliefState, ReactionType, LeadingEventType, AlertSeverity, AlertStatus,
     Side, ShockTrigger, ReactionWindow, TileBand, ReplayCatalogKind,
+    EvidenceGrade,  # v5.34
     # v5.25: Attribution and Explainability
     ReactionAttributionSummary, RadarStateExplanationCompact,
     StateExplanationInfo, ExplainFactor, ExplainFactorType,
@@ -150,35 +153,56 @@ def get_radar(
         with conn.cursor() as cur:
             # Build query based on outcome filter
             # v5.35: Support YES, NO, or BOTH token tracking
+            # v5.36: Only show markets with recent book_bins data (actively monitored)
+            # This prevents showing markets that were previously monitored but no longer collected
+            active_data_check = """
+                EXISTS (
+                    SELECT 1 FROM book_bins bb
+                    WHERE bb.token_id = m.yes_token_id
+                    AND bb.bucket_ts > NOW() - INTERVAL '1 hour'
+                )
+            """
+            active_data_check_no = """
+                EXISTS (
+                    SELECT 1 FROM book_bins bb
+                    WHERE bb.token_id = m.no_token_id
+                    AND bb.bucket_ts > NOW() - INTERVAL '1 hour'
+                )
+            """
+
             if outcome == "BOTH":
-                token_select = """
+                token_select = f"""
                     SELECT m.yes_token_id as token_id, 'YES' as outcome,
                            m.condition_id, m.question as title, m.slug as market_slug,
                            m.tick_size, m.volume_24h, m.liquidity, m.created_at
                     FROM markets m
                     WHERE m.active = true AND m.closed = false AND m.yes_token_id IS NOT NULL
+                    AND {active_data_check}
                     UNION ALL
                     SELECT m.no_token_id as token_id, 'NO' as outcome,
                            m.condition_id, m.question as title, m.slug as market_slug,
                            m.tick_size, m.volume_24h, m.liquidity, m.created_at
                     FROM markets m
                     WHERE m.active = true AND m.closed = false AND m.no_token_id IS NOT NULL
+                    AND {active_data_check_no}
                 """
             elif outcome == "NO":
-                token_select = """
+                token_select = f"""
                     SELECT m.no_token_id as token_id, 'NO' as outcome,
                            m.condition_id, m.question as title, m.slug as market_slug,
                            m.tick_size, m.volume_24h, m.liquidity, m.created_at
                     FROM markets m
                     WHERE m.active = true AND m.closed = false AND m.no_token_id IS NOT NULL
+                    AND {active_data_check_no}
                 """
             else:  # YES (default)
-                token_select = """
+                token_select = f"""
                     SELECT m.yes_token_id as token_id, 'YES' as outcome,
                            m.condition_id, m.question as title, m.slug as market_slug,
                            m.tick_size, m.volume_24h, m.liquidity, m.created_at
                     FROM markets m
                     WHERE m.active = true AND m.closed = false AND m.yes_token_id IS NOT NULL
+                    AND {active_data_check}
                 """
 
             # Get markets with latest belief states
@@ -194,6 +218,13 @@ def get_radar(
                 market_tokens AS (
                     {token_select}
                 ),
+                latest_prices AS (
+                    SELECT DISTINCT ON (token_id)
+                        token_id,
+                        price as last_price
+                    FROM trade_ticks
+                    ORDER BY token_id, ts DESC
+                ),
                 market_metrics AS (
                     SELECT
                         mt.token_id,
@@ -204,6 +235,7 @@ def get_radar(
                         mt.tick_size,
                         mt.volume_24h,
                         mt.liquidity,
+                        lp.last_price,
                         COALESCE(ls.new_state, 'STABLE') as belief_state,
                         COALESCE(ls.state_ts, mt.created_at) as state_since_ts,
                         -- Count leading events in last 10 min
@@ -216,6 +248,7 @@ def get_radar(
                          AND re.ts > NOW() - INTERVAL '10 minutes') as reaction_count_10m
                     FROM market_tokens mt
                     LEFT JOIN latest_states ls ON ls.token_id = mt.token_id
+                    LEFT JOIN latest_prices lp ON lp.token_id = mt.token_id
                 )
                 SELECT * FROM market_metrics
                 ORDER BY
@@ -232,22 +265,27 @@ def get_radar(
             rows = cur.fetchall()
 
             # Get total count based on outcome filter (v5.35)
+            # v5.36: Only count markets with recent book_bins data
             if outcome == "BOTH":
                 cur.execute("""
                     SELECT
-                        (SELECT COUNT(*) FROM markets WHERE active = true AND closed = false AND yes_token_id IS NOT NULL) +
-                        (SELECT COUNT(*) FROM markets WHERE active = true AND closed = false AND no_token_id IS NOT NULL)
+                        (SELECT COUNT(*) FROM markets m WHERE m.active = true AND m.closed = false AND m.yes_token_id IS NOT NULL
+                         AND EXISTS (SELECT 1 FROM book_bins bb WHERE bb.token_id = m.yes_token_id AND bb.bucket_ts > NOW() - INTERVAL '1 hour')) +
+                        (SELECT COUNT(*) FROM markets m WHERE m.active = true AND m.closed = false AND m.no_token_id IS NOT NULL
+                         AND EXISTS (SELECT 1 FROM book_bins bb WHERE bb.token_id = m.no_token_id AND bb.bucket_ts > NOW() - INTERVAL '1 hour'))
                     as count
                 """)
             elif outcome == "NO":
                 cur.execute("""
-                    SELECT COUNT(*) FROM markets
-                    WHERE active = true AND closed = false AND no_token_id IS NOT NULL
+                    SELECT COUNT(*) FROM markets m
+                    WHERE m.active = true AND m.closed = false AND m.no_token_id IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM book_bins bb WHERE bb.token_id = m.no_token_id AND bb.bucket_ts > NOW() - INTERVAL '1 hour')
                 """)
             else:  # YES
                 cur.execute("""
-                    SELECT COUNT(*) FROM markets
-                    WHERE active = true AND closed = false AND yes_token_id IS NOT NULL
+                    SELECT COUNT(*) FROM markets m
+                    WHERE m.active = true AND m.closed = false AND m.yes_token_id IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM book_bins bb WHERE bb.token_id = m.yes_token_id AND bb.bucket_ts > NOW() - INTERVAL '1 hour')
                 """)
             total = cur.fetchone()['count']
 
@@ -284,6 +322,35 @@ def get_radar(
                 top_factors=top_factors[:3],
             )
 
+            # v5.37: Calculate EQS (ADR-005)
+            # Simplified calculation based on available data
+            has_price = row.get('last_price') is not None
+            has_events = leading_count > 0 or reaction_count > 0
+
+            # Recency: assume fresh if we have recent data
+            recency_score = 20 if has_price else 10
+
+            # Completeness: based on data_health (placeholder for now)
+            completeness_score = 20
+
+            # Observability: based on event coverage
+            anchor_coverage = min(5, int(leading_count + reaction_count))
+            observability_score = min(25, anchor_coverage * 3 + (5 if has_events else 0))
+
+            # Integrity: assume good for now
+            integrity_score = 25
+
+            eqs_total = min(100, recency_score + completeness_score + observability_score + integrity_score)
+
+            # Determine flags
+            eqs_flags = []
+            if not has_price:
+                eqs_flags.append("STALE_DATA")
+            if anchor_coverage < 2:
+                eqs_flags.append("LOW_OBSERVABILITY")
+            if not has_events and state != 'STABLE':
+                eqs_flags.append("EVIDENCE_SPARSE")
+
             radar_rows.append(RadarRow(
                 market=MarketSummary(
                     token_id=row['token_id'] or '',
@@ -292,15 +359,29 @@ def get_radar(
                     market_slug=row['market_slug'],
                     outcome=row.get('outcome', 'YES'),  # v5.35: Support YES/NO
                     tick_size=float(row['tick_size'] or 0.01),
-                    last_price=None,
+                    last_price=row.get('last_price'),
+                    volume_24h=float(row.get('volume_24h') or 0),
+                    liquidity=float(row.get('liquidity') or 0),
                 ),
                 belief_state=BeliefState(state),
                 state_since_ts=ts_to_ms(row['state_since_ts']),
                 state_severity=STATE_SEVERITY.get(state, 0),
+                evidence_grade=EvidenceGrade.B,  # v5.34: Default to Grade B
                 fragile_index_10m=reaction_count * 0.5 + leading_count * 1.5,
                 leading_rate_10m=leading_count,
-                # v5.36: Renamed from confidence to evidence_confidence
-                evidence_confidence=85.0 if state == 'STABLE' else 70.0 if state == 'FRAGILE' else 50.0,
+                # v5.37: EQS (ADR-005)
+                evidence_quality=EvidenceQualityScore(
+                    score=eqs_total,
+                    breakdown=EvidenceQualityBreakdown(
+                        recency=recency_score,
+                        completeness=completeness_score,
+                        observability=observability_score,
+                        integrity=integrity_score,
+                    ),
+                    flags=eqs_flags,
+                ),
+                # Deprecated: keep for backwards compatibility
+                evidence_confidence=float(eqs_total),
                 data_health=DataHealth(
                     missing_bucket_ratio_10m=0.0,
                     rebuild_count_10m=0,
@@ -318,7 +399,10 @@ def get_radar(
         )
 
     except Exception as e:
-        # Return empty response on error
+        # Log error and return empty response
+        import traceback
+        print(f"[RADAR ERROR] {str(e)}")
+        print(traceback.format_exc())
         return RadarResponse(rows=[], limit=limit, offset=offset, total=0)
 
 
@@ -622,6 +706,40 @@ def get_evidence(
             window_minutes=explanation_obj.window_minutes,
         )
 
+        # v5.37: Calculate EQS for evidence response (ADR-005)
+        event_count = len(shocks) + len(reactions) + len(leading_events)
+        has_events = event_count > 0
+
+        # Recency: 25 if data is fresh
+        recency_score = 20  # Assume fresh since we're fetching real-time
+
+        # Completeness: based on data availability
+        completeness_score = 20
+
+        # Observability: based on event coverage
+        observability_score = min(25, event_count * 3 + (5 if has_events else 0))
+
+        # Integrity: assume good
+        integrity_score = 25
+
+        eqs_total = min(100, recency_score + completeness_score + observability_score + integrity_score)
+
+        # Determine flags
+        eqs_flags = []
+        if event_count < 2:
+            eqs_flags.append("LOW_OBSERVABILITY")
+
+        evidence_quality = EvidenceQualityScore(
+            score=eqs_total,
+            breakdown=EvidenceQualityBreakdown(
+                recency=recency_score,
+                completeness=completeness_score,
+                observability=observability_score,
+                integrity=integrity_score,
+            ),
+            flags=eqs_flags,
+        )
+
         return EvidenceResponse(
             token_id=token_id,
             t0=t0,
@@ -634,6 +752,8 @@ def get_evidence(
                 outcome='YES',
                 tick_size=float(market_row['tick_size'] or 0.01),
             ),
+            evidence_grade=EvidenceGrade.B,  # v5.34: Default to Grade B
+            evidence_quality=evidence_quality,  # v5.37: EQS (ADR-005)
             anchors=anchors,
             shocks=shocks,
             reactions=reactions,
@@ -870,123 +990,102 @@ def get_heatmap_tiles(
     token_id: str = Query(..., min_length=1),
     from_ts: int = Query(..., description="Start timestamp (ms)"),
     to_ts: int = Query(..., description="End timestamp (ms)"),
-    lod: Literal[250, 1000, 5000] = Query(250, description="Time resolution in ms per column"),
-    tile_ms: Literal[5000, 10000, 15000] = Query(10000),
+    lod: int = Query(250, description="Time resolution in ms per column (250, 1000, or 5000)"),
+    tile_ms: int = Query(10000, description="Tile duration in ms (5000, 10000, or 15000)"),
     price_min: Optional[float] = Query(None),
     price_max: Optional[float] = Query(None),
     band: TileBand = Query(TileBand.FULL),
 ):
     """
     Fetch heatmap tiles for a token over time range.
-    Returns pre-computed tiles or generates on-demand.
+    Returns separate bid and ask tiles for Bookmap-style rendering.
+
+    v5.40: Changed to return bid_tiles and ask_tiles separately instead of mixed tiles.
+    This enables proper Bookmap-style visualization where:
+    - bid_tiles (green) = liquidity on the bid side
+    - ask_tiles (red) = liquidity on the ask side
     """
+    # Validate lod and tile_ms values
+    valid_lods = [250, 1000, 5000]
+    valid_tile_ms = [5000, 10000, 15000]
+    if lod not in valid_lods:
+        raise HTTPException(status_code=400, detail=f"lod must be one of {valid_lods}")
+    if tile_ms not in valid_tile_ms:
+        raise HTTPException(status_code=400, detail=f"tile_ms must be one of {valid_tile_ms}")
+
+    def _tile_to_meta(t, tid: str) -> HeatmapTileMeta:
+        """Convert generated tile to API response format"""
+        import base64
+        return HeatmapTileMeta(
+            tile_id=t.tile_id,
+            token_id=tid,
+            lod_ms=t.lod_ms,
+            tile_ms=t.tile_ms,
+            band=TileBand(t.band.value),
+            t_start=t.t_start,
+            t_end=t.t_end,
+            tick_size=t.tick_size,
+            price_min=t.price_min,
+            price_max=t.price_max,
+            rows=t.rows,
+            cols=t.cols,
+            encoding=TileEncoding(
+                dtype=t.encoding_dtype,
+                layout=t.encoding_layout,
+                scale=t.encoding_scale,
+                clip_pctl=t.clip_pctl,
+                clip_value=t.clip_value,
+            ),
+            compression=TileCompression(
+                algo=t.compression_algo,
+                level=t.compression_level,
+            ),
+            payload_b64=base64.b64encode(t.payload).decode('utf-8'),
+            checksum=TileChecksum(
+                algo=t.checksum_algo,
+                value=t.checksum_value,
+            ),
+        )
+
     try:
-        conn = get_db_connection()
-        tiles = []
+        # v5.40: Generate separate bid and ask tiles
+        generator = HeatmapTileGenerator(db_config=DB_CONFIG)
+        generator_band = GeneratorTileBand(band.value)
 
-        with conn.cursor() as cur:
-            # Check for pre-computed tiles
-            cur.execute("""
-                SELECT tile_id, lod_ms, tile_ms, band, t_start, t_end,
-                       tick_size, price_min, price_max, rows, cols,
-                       encoding_dtype, encoding_layout, encoding_scale,
-                       clip_pctl, clip_value, compression_algo, compression_level,
-                       payload, checksum_algo, checksum_value
-                FROM heatmap_tiles
-                WHERE token_id = %s
-                AND lod_ms = %s
-                AND band = %s
-                AND t_start >= %s
-                AND t_end <= %s
-                ORDER BY t_start ASC
-            """, (token_id, lod, band.value, from_ts, to_ts))
+        bid_tiles = []
+        ask_tiles = []
 
-            rows = cur.fetchall()
+        # Generate bid tiles (green layer)
+        try:
+            bid_generated = generator.generate_tiles(
+                token_id=token_id,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                lod_ms=lod,
+                tile_ms=tile_ms,
+                band=generator_band,
+                side='bid'  # Filter for bid side only
+            )
+            for t in bid_generated:
+                bid_tiles.append(_tile_to_meta(t, token_id))
+        except Exception as bid_error:
+            print(f"[HEATMAP] Bid tile generation failed: {bid_error}")
 
-            for r in rows:
-                import base64
-                tiles.append(HeatmapTileMeta(
-                    tile_id=r['tile_id'],
-                    token_id=token_id,
-                    lod_ms=r['lod_ms'],
-                    tile_ms=r['tile_ms'],
-                    band=TileBand(r['band']),
-                    t_start=r['t_start'],
-                    t_end=r['t_end'],
-                    tick_size=float(r['tick_size']),
-                    price_min=float(r['price_min']),
-                    price_max=float(r['price_max']),
-                    rows=r['rows'],
-                    cols=r['cols'],
-                    encoding=TileEncoding(
-                        dtype=r['encoding_dtype'],
-                        layout=r['encoding_layout'],
-                        scale=r['encoding_scale'],
-                        clip_pctl=float(r['clip_pctl']),
-                        clip_value=float(r['clip_value']) if r['clip_value'] else None,
-                    ),
-                    compression=TileCompression(
-                        algo=r['compression_algo'],
-                        level=r['compression_level'],
-                    ),
-                    payload_b64=base64.b64encode(r['payload']).decode('utf-8'),
-                    checksum=TileChecksum(
-                        algo=r['checksum_algo'],
-                        value=r['checksum_value'],
-                    ),
-                ))
-
-        conn.close()
-
-        # v5.4: Generate tiles on-demand if not in cache
-        if not tiles:
-            try:
-                generator = HeatmapTileGenerator(db_config=DB_CONFIG)
-                generator_band = GeneratorTileBand(band.value)
-
-                generated_tiles = generator.get_or_generate(
-                    token_id=token_id,
-                    from_ts=from_ts,
-                    to_ts=to_ts,
-                    lod_ms=lod,
-                    tile_ms=tile_ms,
-                    band=generator_band,
-                    cache=True  # Cache for future requests
-                )
-
-                for t in generated_tiles:
-                    tiles.append(HeatmapTileMeta(
-                        tile_id=t.tile_id,
-                        token_id=t.token_id,
-                        lod_ms=t.lod_ms,
-                        tile_ms=t.tile_ms,
-                        band=TileBand(t.band.value),
-                        t_start=t.t_start,
-                        t_end=t.t_end,
-                        tick_size=t.tick_size,
-                        price_min=t.price_min,
-                        price_max=t.price_max,
-                        rows=t.rows,
-                        cols=t.cols,
-                        encoding=TileEncoding(
-                            dtype=t.encoding_dtype,
-                            layout=t.encoding_layout,
-                            scale=t.encoding_scale,
-                            clip_pctl=t.clip_pctl,
-                            clip_value=t.clip_value,
-                        ),
-                        compression=TileCompression(
-                            algo=t.compression_algo,
-                            level=t.compression_level,
-                        ),
-                        payload_b64=base64.b64encode(t.payload).decode('utf-8'),
-                        checksum=TileChecksum(
-                            algo=t.checksum_algo,
-                            value=t.checksum_value,
-                        ),
-                    ))
-            except Exception as gen_error:
-                print(f"[HEATMAP] Tile generation failed: {gen_error}")
+        # Generate ask tiles (red layer)
+        try:
+            ask_generated = generator.generate_tiles(
+                token_id=token_id,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                lod_ms=lod,
+                tile_ms=tile_ms,
+                band=generator_band,
+                side='ask'  # Filter for ask side only
+            )
+            for t in ask_generated:
+                ask_tiles.append(_tile_to_meta(t, token_id))
+        except Exception as ask_error:
+            print(f"[HEATMAP] Ask tile generation failed: {ask_error}")
 
         return HeatmapTilesResponse(
             manifest=HeatmapTilesManifest(
@@ -997,10 +1096,12 @@ def get_heatmap_tiles(
                 tile_ms=tile_ms,
                 band=band,
             ),
-            tiles=tiles,
+            bid_tiles=bid_tiles,
+            ask_tiles=ask_tiles,
         )
 
     except Exception as e:
+        print(f"[HEATMAP] Tile generation error: {e}")
         return HeatmapTilesResponse(
             manifest=HeatmapTilesManifest(
                 token_id=token_id,
@@ -1010,7 +1111,8 @@ def get_heatmap_tiles(
                 tile_ms=tile_ms,
                 band=band,
             ),
-            tiles=[],
+            bid_tiles=[],
+            ask_tiles=[],
         )
 
 

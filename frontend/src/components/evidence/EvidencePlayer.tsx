@@ -34,7 +34,9 @@ export function EvidencePlayer({
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
-  const [tiles, setTiles] = useState<HeatmapTileMeta[]>([]);
+  // v5.40: Separate bid and ask tiles for Bookmap-style rendering
+  const [bidTiles, setBidTiles] = useState<HeatmapTileMeta[]>([]);
+  const [askTiles, setAskTiles] = useState<HeatmapTileMeta[]>([]);
   const [tilesLoading, setTilesLoading] = useState(false);
   const [realtimeEventCount, setRealtimeEventCount] = useState(0);
 
@@ -61,12 +63,14 @@ export function EvidencePlayer({
     }
   );
 
-  // Get tile end time for staleness indicator
-  const tileEndTime = tiles.length > 0
-    ? Math.max(...tiles.map((t) => t.t_end))
+  // Get tile end time for staleness indicator (combine bid and ask tiles)
+  const allTiles = [...bidTiles, ...askTiles];
+  const tileEndTime = allTiles.length > 0
+    ? Math.max(...allTiles.map((t) => t.t_end))
     : evidence.window_end;
 
   // Fetch tiles when evidence changes
+  // v5.40: Now fetches separate bid and ask tiles for Bookmap-style rendering
   useEffect(() => {
     if (!evidence.token_id) return;
 
@@ -83,12 +87,15 @@ export function EvidencePlayer({
         });
 
         if (!cancelled) {
-          setTiles(response.tiles);
+          // v5.40: Use separate bid and ask tiles
+          setBidTiles(response.bid_tiles || []);
+          setAskTiles(response.ask_tiles || []);
         }
       } catch (err) {
         console.warn('Failed to fetch heatmap tiles:', err);
         if (!cancelled) {
-          setTiles([]);
+          setBidTiles([]);
+          setAskTiles([]);
         }
       } finally {
         if (!cancelled) {
@@ -206,7 +213,7 @@ export function EvidencePlayer({
 
           {/* Tile count */}
           <span className="text-xs text-gray-500">
-            {tiles.length} tiles
+            {bidTiles.length + askTiles.length} tiles
           </span>
         </div>
       </div>
@@ -217,8 +224,10 @@ export function EvidencePlayer({
         onClick={handleCanvasClick}
       >
         {/* Heatmap layer (rendered from tiles or placeholder) */}
+        {/* v5.40: Now using separate bid/ask tiles for Bookmap-style rendering */}
         <HeatmapRenderer
-          tiles={tiles}
+          bidTiles={bidTiles}
+          askTiles={askTiles}
           windowStart={evidence.window_start}
           windowEnd={evidence.window_end}
           priceMin={priceMin}

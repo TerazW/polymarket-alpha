@@ -462,9 +462,10 @@ class HeatmapTilesManifest(BaseModel):
 
 
 class HeatmapTilesResponse(BaseModel):
-    """GET /v1/heatmap/tiles response"""
+    """GET /v1/heatmap/tiles response - v5.40: Separate bid/ask tiles for Bookmap-style rendering"""
     manifest: HeatmapTilesManifest
-    tiles: List[HeatmapTileMeta]
+    bid_tiles: List[HeatmapTileMeta] = []  # Green layer (bid side liquidity)
+    ask_tiles: List[HeatmapTileMeta] = []  # Red layer (ask side liquidity)
 
 
 # =============================================================================
