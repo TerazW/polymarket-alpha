@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, use, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ContextPanel } from '@/components/evidence/ContextPanel';
 import { EvidencePlayer } from '@/components/evidence/EvidencePlayer';
@@ -13,7 +13,7 @@ import { type EvidenceResponse as ApiEvidenceResponse } from '@/lib/api';
 import { useEvidenceFetch } from '@/hooks/useEvidenceFetch';
 
 interface PageProps {
-  params: Promise<{ tokenId: string }>;
+  params: { tokenId: string };
 }
 
 // Convert API response to frontend types
@@ -135,17 +135,15 @@ function convertApiEvidence(api: ApiEvidenceResponse): EvidenceResponse {
 }
 
 export default function MarketDetailPage({ params }: PageProps) {
-  const { tokenId } = use(params);
+  const { tokenId } = params;
   const searchParams = useSearchParams();
   const t0Param = searchParams.get('t0');
 
-  // Use ref to fix t0 at mount time - prevents re-computation on re-renders/remounts
-  // This is critical: useMemo can re-run on Strict Mode remounts, useRef won't
-  const t0Ref = useRef<number | null>(null);
-  if (t0Ref.current === null) {
-    t0Ref.current = t0Param ? parseInt(t0Param, 10) : Date.now();
-  }
-  const initialT0 = t0Ref.current;
+  // Stabilize the t0 we fetch against: only change when tokenId or ?t0 changes
+  const initialT0 = useMemo(
+    () => (t0Param ? parseInt(t0Param, 10) : Date.now()),
+    [tokenId, t0Param]
+  );
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(initialT0);
@@ -169,6 +167,12 @@ export default function MarketDetailPage({ params }: PageProps) {
     if (!apiEvidence) return null;
     return convertApiEvidence(apiEvidence);
   }, [apiEvidence]);
+
+  // Reset UI time/selection when switching markets or t0
+  useEffect(() => {
+    setSelectedEventId(null);
+    setCurrentTime(initialT0);
+  }, [tokenId, initialT0]);
 
   // Update currentTime when evidence loads
   useEffect(() => {
