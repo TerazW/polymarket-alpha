@@ -5,6 +5,7 @@
  * - In-flight guard (only one request at a time)
  * - Debounce (wait before fetching on param changes)
  * - 429 backoff (respect Retry-After header)
+ * - Stable dependency key (prevents infinite loops)
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -36,20 +37,26 @@ export function useEvidenceFetch({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // In-flight guard
+  // Refs for request management
   const inflightRef = useRef(false);
-  // Backoff timer (for 429)
   const backoffUntilRef = useRef(0);
-  // Abort controller for cancellation
   const abortControllerRef = useRef<AbortController | null>(null);
-  // Track if component is mounted
   const mountedRef = useRef(true);
+  const retryTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const fetchEvidence = useCallback(async () => {
+  // Store params in ref to avoid stale closures
+  const paramsRef = useRef({ tokenId, t0, windowBeforeMs, windowAfterMs });
+  paramsRef.current = { tokenId, t0, windowBeforeMs, windowAfterMs };
+
+  // Stable fetch function that reads from ref
+  const doFetch = useCallback(async () => {
+    const params = paramsRef.current;
+
     // Check backoff period
     const now = Date.now();
     if (now < backoffUntilRef.current) {
-      console.log(`[EvidenceFetch] Backing off until ${new Date(backoffUntilRef.current).toISOString()}`);
+      const waitTime = backoffUntilRef.current - now;
+      console.log(`[EvidenceFetch] In backoff, waiting ${waitTime}ms`);
       return;
     }
 
@@ -69,18 +76,21 @@ export function useEvidenceFetch({
     setLoading(true);
     setError(null);
 
+    console.log('[EvidenceFetch] Fetching:', params.tokenId, 't0:', params.t0);
+
     try {
       const data = await getEvidence(
         {
-          token_id: tokenId,
-          t0,
-          window_before_ms: windowBeforeMs,
-          window_after_ms: windowAfterMs,
+          token_id: params.tokenId,
+          t0: params.t0,
+          window_before_ms: params.windowBeforeMs,
+          window_after_ms: params.windowAfterMs,
         },
         abortControllerRef.current.signal
       );
 
       if (mountedRef.current) {
+        console.log('[EvidenceFetch] Success');
         setEvidence(data);
         setError(null);
       }
@@ -90,6 +100,7 @@ export function useEvidenceFetch({
       if (err instanceof ApiError) {
         // Ignore aborted requests
         if (err.status === -1) {
+          console.log('[EvidenceFetch] Request aborted');
           return;
         }
         if (err.status === 429 && err.retryAfter) {
@@ -98,9 +109,11 @@ export function useEvidenceFetch({
           console.warn(`[EvidenceFetch] Rate limited, backing off for ${err.retryAfter}s`);
           setError(`Rate limited. Please wait ${err.retryAfter}s`);
         } else {
+          console.error('[EvidenceFetch] API error:', err.status, err.message);
           setError(err.message);
         }
       } else {
+        console.error('[EvidenceFetch] Unknown error:', err);
         setError(err instanceof Error ? err.message : 'Unknown error');
       }
     } finally {
@@ -109,24 +122,46 @@ export function useEvidenceFetch({
       }
       inflightRef.current = false;
     }
-  }, [tokenId, t0, windowBeforeMs, windowAfterMs]);
+  }, []); // No deps - reads from paramsRef
 
-  // Debounced fetch on param changes
+  // Create a stable key for dependency tracking
+  const fetchKey = `${tokenId}|${t0}|${windowBeforeMs}|${windowAfterMs}`;
+
+  // Effect that runs on key change (debounced)
   useEffect(() => {
     mountedRef.current = true;
 
     // Skip if no tokenId
-    if (!tokenId) return;
+    if (!tokenId) {
+      setLoading(false);
+      return;
+    }
 
+    console.log('[EvidenceFetch] Key changed:', fetchKey);
+
+    // Clear any existing retry timer
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+
+    // Cancel any in-flight request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    // Reset state
+    inflightRef.current = false;
+
+    // Debounced fetch
     const timeoutId = setTimeout(() => {
-      fetchEvidence();
+      doFetch();
     }, debounceMs);
 
     return () => {
       clearTimeout(timeoutId);
-      // Don't set mounted to false on every cleanup - only on unmount
     };
-  }, [tokenId, t0, windowBeforeMs, windowAfterMs, debounceMs, fetchEvidence]);
+  }, [fetchKey, debounceMs, doFetch]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -135,14 +170,23 @@ export function useEvidenceFetch({
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+      }
     };
   }, []);
 
+  // Manual refetch
   const refetch = useCallback(() => {
     // Clear backoff on manual refetch
     backoffUntilRef.current = 0;
-    fetchEvidence();
-  }, [fetchEvidence]);
+    // Clear any pending timer
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    doFetch();
+  }, [doFetch]);
 
   return { evidence, loading, error, refetch };
 }

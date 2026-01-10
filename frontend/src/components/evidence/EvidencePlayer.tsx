@@ -74,31 +74,39 @@ export function EvidencePlayer({
   useEffect(() => {
     if (!evidence.token_id) return;
 
-    let cancelled = false;
+    const abortController = new AbortController();
     setTilesLoading(true);
+
+    console.log('[TilesFetch] Fetching tiles for:', evidence.token_id);
 
     async function fetchTiles() {
       try {
-        const response = await getHeatmapTiles({
-          token_id: evidence.token_id,
-          from_ts: evidence.window_start,
-          to_ts: evidence.window_end,
-          lod: 250,
-        });
+        const response = await getHeatmapTiles(
+          {
+            token_id: evidence.token_id,
+            from_ts: evidence.window_start,
+            to_ts: evidence.window_end,
+            lod: 250,
+          },
+          abortController.signal
+        );
 
-        if (!cancelled) {
+        if (!abortController.signal.aborted) {
+          console.log('[TilesFetch] Success, tiles:', response.bid_tiles.length + response.ask_tiles.length);
           // v5.40: Use separate bid and ask tiles
           setBidTiles(response.bid_tiles || []);
           setAskTiles(response.ask_tiles || []);
         }
       } catch (err) {
-        console.warn('Failed to fetch heatmap tiles:', err);
-        if (!cancelled) {
-          setBidTiles([]);
-          setAskTiles([]);
+        if (abortController.signal.aborted) {
+          console.log('[TilesFetch] Request aborted');
+          return;
         }
+        console.warn('[TilesFetch] Failed:', err);
+        setBidTiles([]);
+        setAskTiles([]);
       } finally {
-        if (!cancelled) {
+        if (!abortController.signal.aborted) {
           setTilesLoading(false);
         }
       }
@@ -107,7 +115,7 @@ export function EvidencePlayer({
     fetchTiles();
 
     return () => {
-      cancelled = true;
+      abortController.abort();
     };
   }, [evidence.token_id, evidence.window_start, evidence.window_end]);
 
