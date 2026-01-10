@@ -133,143 +133,6 @@ function convertApiEvidence(api: ApiEvidenceResponse): EvidenceResponse {
   };
 }
 
-// Mock data for development
-const MOCK_EVIDENCE: EvidenceResponse = {
-  token_id: 'mock-token-123',
-  t0: Date.now() - 30000,
-  window_start: Date.now() - 90000,
-  window_end: Date.now(),
-  anchors: [
-    { price: '0.72', side: 'bid', score: 0.95 },
-    { price: '0.68', side: 'bid', score: 0.82 },
-    { price: '0.76', side: 'ask', score: 0.78 },
-  ],
-  shocks: [
-    {
-      id: 'shock-1',
-      timestamp: Date.now() - 60000,
-      price: '0.72',
-      side: 'bid',
-      trigger_type: 'volume',
-      trade_volume: 1500,
-      liquidity_before: 5000,
-      baseline_size: 4800,
-    },
-    {
-      id: 'shock-2',
-      timestamp: Date.now() - 25000,
-      price: '0.72',
-      side: 'bid',
-      trigger_type: 'consecutive',
-      trade_volume: 800,
-      liquidity_before: 3200,
-      baseline_size: 3500,
-    },
-  ],
-  reactions: [
-    {
-      id: 'reaction-1',
-      timestamp: Date.now() - 52000,
-      shock_id: 'shock-1',
-      price: '0.72',
-      side: 'bid',
-      reaction_type: 'PULL',
-      drop_ratio: 0.65,
-      refill_ratio: 0.22,
-      min_size: 1750,
-      max_size: 2800,
-      time_to_min_ms: 3200,
-      time_to_refill_ms: null,
-      price_shift_ticks: 0,
-      proof: {
-        rule_triggered: 'PULL: drop >= 60% AND refill < 30%',
-        thresholds: { drop_min: 0.6, refill_max: 0.3 },
-        actual_values: { drop: 0.65, refill: 0.22 },
-        window_type: 'SLOW',
-      },
-    },
-    {
-      id: 'reaction-2',
-      timestamp: Date.now() - 17000,
-      shock_id: 'shock-2',
-      price: '0.72',
-      side: 'bid',
-      reaction_type: 'VACUUM',
-      drop_ratio: 0.92,
-      refill_ratio: 0.08,
-      min_size: 280,
-      max_size: 850,
-      time_to_min_ms: 1800,
-      time_to_refill_ms: null,
-      price_shift_ticks: 0,
-      proof: {
-        rule_triggered: 'VACUUM: min_size <= 5% baseline AND <= 10 abs, duration >= 3s',
-        thresholds: { size_ratio_max: 0.05, abs_max: 10, duration_min_ms: 3000 },
-        actual_values: { size_ratio: 0.08, abs_size: 280, duration_ms: 4200 },
-        window_type: 'FAST',
-      },
-    },
-  ],
-  leading_events: [
-    {
-      id: 'leading-1',
-      timestamp: Date.now() - 70000,
-      price: '0.72',
-      side: 'bid',
-      event_type: 'PRE_SHOCK_PULL',
-      drop_ratio: 0.75,
-      trade_volume_nearby: 12,
-    },
-  ],
-  state_changes: [
-    {
-      id: 'state-1',
-      timestamp: Date.now() - 50000,
-      old_state: 'STABLE',
-      new_state: 'FRAGILE',
-      evidence: ['PRE_SHOCK_PULL at 72%', 'PULL reaction'],
-      evidence_refs: ['leading-1', 'reaction-1'],
-    },
-    {
-      id: 'state-2',
-      timestamp: Date.now() - 15000,
-      old_state: 'FRAGILE',
-      new_state: 'BROKEN',
-      evidence: ['VACUUM at 72%', 'No refill after 8s'],
-      evidence_refs: ['reaction-2'],
-    },
-  ],
-  proof_summary: {
-    current_state: 'BROKEN',
-    state_since: Date.now() - 15000,
-    confidence: 85,
-    shock_count: 2,
-    reaction_counts: { VACUUM: 1, PULL: 1, SWEEP: 0, CHASE: 0, HOLD: 0, DELAYED: 0, NO_IMPACT: 0 },
-    leading_event_counts: { PRE_SHOCK_PULL: 1, DEPTH_COLLAPSE: 0, GRADUAL_THINNING: 0 },
-    hold_ratio: 0,
-    fragile_signals: 3,
-    data_health: {
-      missing_buckets: 0,
-      rebuild_count: 0,
-      last_rebuild_ts: null,
-      hash_mismatch: false,
-    },
-  },
-  tiles_manifest: {
-    token_id: 'mock-token-123',
-    lod: '250ms',
-    tile_duration_ms: 10000,
-    tiles: [],
-    normalization: {
-      method: 'log1p',
-      clip_max: 10000,
-      price_min: '0.60',
-      price_max: '0.80',
-      tick_size: '0.01',
-    },
-  },
-};
-
 export default function MarketDetailPage({ params }: PageProps) {
   const { tokenId } = use(params);
   const searchParams = useSearchParams();
@@ -281,7 +144,6 @@ export default function MarketDetailPage({ params }: PageProps) {
   const [error, setError] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(initialT0);
-  const [useMockData, setUseMockData] = useState(false);
   const [apiStatus, setApiStatus] = useState<'loading' | 'online' | 'offline'>('loading');
 
   // Market info from evidence or default
@@ -299,9 +161,8 @@ export default function MarketDetailPage({ params }: PageProps) {
 
   const fetchEvidenceData = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
-      // Try to fetch from API first
-      // Use t0 from URL param or current time
       const t0 = initialT0;
       const apiData = await getEvidence({
         token_id: tokenId,
@@ -314,28 +175,19 @@ export default function MarketDetailPage({ params }: PageProps) {
       setEvidence(converted);
       setCurrentTime(converted.t0);
       setApiStatus('online');
-      setError(null);
     } catch (err) {
-      console.warn('API failed, using mock data:', err);
+      console.error('API failed:', err);
       setApiStatus('offline');
-      // Fallback to mock data
-      setEvidence(MOCK_EVIDENCE);
-      setCurrentTime(MOCK_EVIDENCE.t0);
-      setUseMockData(true);
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Failed to load evidence: ${errorMessage}`);
     } finally {
       setLoading(false);
     }
   }, [tokenId, initialT0]);
 
   useEffect(() => {
-    if (useMockData) {
-      setEvidence(MOCK_EVIDENCE);
-      setCurrentTime(MOCK_EVIDENCE.t0);
-      setLoading(false);
-      return;
-    }
     fetchEvidenceData();
-  }, [tokenId, useMockData, fetchEvidenceData]);
+  }, [fetchEvidenceData]);
 
   const handleEventClick = (eventId: string, timestamp: number) => {
     setSelectedEventId(eventId);
@@ -374,17 +226,9 @@ export default function MarketDetailPage({ params }: PageProps) {
             <h1 className="text-lg font-semibold truncate max-w-md">{marketInfo.question}</h1>
           </div>
           <div className="flex items-center gap-4">
-            {apiStatus !== 'loading' && (
-              <span className={`text-xs ${apiStatus === 'online' ? 'text-green-400' : 'text-yellow-400'}`}>
-                {apiStatus === 'online' ? '● Live' : '○ Mock'}
-              </span>
-            )}
-            <button
-              onClick={() => setUseMockData(!useMockData)}
-              className={`px-2 py-1 rounded text-xs ${useMockData ? 'bg-yellow-600' : 'bg-green-600'}`}
-            >
-              {useMockData ? 'Mock' : 'Live'}
-            </button>
+            <span className={`text-xs ${apiStatus === 'online' ? 'text-green-400' : 'text-red-400'}`}>
+              {apiStatus === 'online' ? '● API Online' : '○ API Offline'}
+            </span>
             <span className="text-2xl font-bold text-green-400">
               {(marketInfo.yes_price * 100).toFixed(0)}%
             </span>

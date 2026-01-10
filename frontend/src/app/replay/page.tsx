@@ -30,78 +30,10 @@ const SEVERITY_COLORS: Record<Severity, string> = {
   CRITICAL: '#ef4444',
 };
 
-// Mock data for development
-const MOCK_CATALOG: ReplayCatalogEntry[] = [
-  {
-    kind: 'BELIEF_STATE',
-    id: 'bs-1',
-    token_id: 'mock-token-123',
-    ts: Date.now() - 15000,
-    severity: 'CRITICAL',
-    label: 'FRAGILE → BROKEN',
-    evidence_ref: { token_id: 'mock-token-123', t0: Date.now() - 15000 },
-  },
-  {
-    kind: 'REACTION',
-    id: 'rx-1',
-    token_id: 'mock-token-123',
-    ts: Date.now() - 17000,
-    severity: 'HIGH',
-    label: 'VACUUM @ 72%',
-    evidence_ref: { token_id: 'mock-token-123', t0: Date.now() - 17000 },
-  },
-  {
-    kind: 'SHOCK',
-    id: 'sh-1',
-    token_id: 'mock-token-123',
-    ts: Date.now() - 25000,
-    severity: 'MEDIUM',
-    label: 'Shock @ 72% (bid)',
-    evidence_ref: { token_id: 'mock-token-123', t0: Date.now() - 25000 },
-  },
-  {
-    kind: 'LEADING',
-    id: 'le-1',
-    token_id: 'mock-token-123',
-    ts: Date.now() - 70000,
-    severity: 'MEDIUM',
-    label: 'PRE_SHOCK_PULL @ 72%',
-    evidence_ref: { token_id: 'mock-token-123', t0: Date.now() - 70000 },
-  },
-  {
-    kind: 'BELIEF_STATE',
-    id: 'bs-2',
-    token_id: 'mock-token-123',
-    ts: Date.now() - 50000,
-    severity: 'HIGH',
-    label: 'STABLE → FRAGILE',
-    evidence_ref: { token_id: 'mock-token-123', t0: Date.now() - 50000 },
-  },
-  {
-    kind: 'REACTION',
-    id: 'rx-2',
-    token_id: 'mock-token-123',
-    ts: Date.now() - 52000,
-    severity: 'MEDIUM',
-    label: 'PULL @ 72%',
-    evidence_ref: { token_id: 'mock-token-123', t0: Date.now() - 52000 },
-  },
-  {
-    kind: 'SHOCK',
-    id: 'sh-2',
-    token_id: 'mock-token-123',
-    ts: Date.now() - 60000,
-    severity: 'MEDIUM',
-    label: 'Shock @ 72% (bid)',
-    evidence_ref: { token_id: 'mock-token-123', t0: Date.now() - 60000 },
-  },
-];
-
 export default function ReplayCatalogPage() {
   const [entries, setEntries] = useState<ReplayCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [useMockData, setUseMockData] = useState(false);
   const [apiStatus, setApiStatus] = useState<'loading' | 'online' | 'offline'>('loading');
 
   // Filters
@@ -120,13 +52,8 @@ export default function ReplayCatalogPage() {
   };
 
   const fetchCatalog = useCallback(async () => {
-    if (useMockData) {
-      setEntries(MOCK_CATALOG);
-      setLoading(false);
-      return;
-    }
-
     setLoading(true);
+    setError(null);
     try {
       const now = Date.now();
       const from_ts = now - getTimeRangeMs(timeRange);
@@ -141,23 +68,21 @@ export default function ReplayCatalogPage() {
 
       setEntries(response.rows);
       setApiStatus('online');
-      setError(null);
     } catch (err) {
-      console.warn('Failed to fetch catalog:', err);
+      console.error('Failed to fetch catalog:', err);
       setApiStatus('offline');
-      // Fallback to mock data
-      setEntries(MOCK_CATALOG);
-      setUseMockData(true);
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Failed to load catalog: ${errorMessage}`);
     } finally {
       setLoading(false);
     }
-  }, [useMockData, timeRange, eventType, severityFilter]);
+  }, [timeRange, eventType, severityFilter]);
 
   useEffect(() => {
     fetchCatalog();
   }, [fetchCatalog]);
 
-  // Filter entries client-side for mock data
+  // Filter entries client-side
   const filteredEntries = entries.filter((entry) => {
     if (eventType !== 'ALL' && entry.kind !== eventType) return false;
     if (severityFilter !== 'ALL' && entry.severity !== severityFilter) return false;
@@ -188,17 +113,9 @@ export default function ReplayCatalogPage() {
             <h1 className="text-xl font-semibold">Replay Catalog</h1>
           </div>
           <div className="flex items-center gap-3">
-            {apiStatus !== 'loading' && (
-              <span className={`text-xs ${apiStatus === 'online' ? 'text-green-400' : 'text-yellow-400'}`}>
-                {apiStatus === 'online' ? '● Live' : '○ Mock'}
-              </span>
-            )}
-            <button
-              onClick={() => setUseMockData(!useMockData)}
-              className={`px-2 py-1 rounded text-xs ${useMockData ? 'bg-yellow-600' : 'bg-green-600'}`}
-            >
-              {useMockData ? 'Mock' : 'Live'}
-            </button>
+            <span className={`text-xs ${apiStatus === 'online' ? 'text-green-400' : 'text-red-400'}`}>
+              {apiStatus === 'online' ? '● API Online' : '○ API Offline'}
+            </span>
           </div>
         </div>
       </header>
