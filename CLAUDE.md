@@ -11,6 +11,7 @@
 4. ✅ 修復前端無限循環 (Date.now() in useEffect deps)
 5. ✅ Radar API 過濾：只顯示有 `book_bins` 數據的市場
 6. ✅ **v5.40: Bookmap 風格熱力圖修復** (2026-01-10)
+7. ✅ **v5.42: Collector 市場元數據同步** (2026-01-10)
 
 ### v5.40 Heatmap 修復詳情
 **問題**: 熱力圖顯示「上下紅綠地毯」效果，不是 Bookmap 風格
@@ -53,15 +54,27 @@ docker push 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking/api:
 aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-api --force-new-deployment --region us-east-1
 ```
 
-### 當前問題：熱力圖顯示 "Generating tiles..."
-**原因**: `book_bins` 表沒有這些市場的數據
-- Collector 正在監控的市場：`21695138873211375451...`, `57761428076807364758...`
-- 但 Radar 顯示的市場 token_id 不同
+### v5.42 Collector 市場元數據同步
+**問題**: Radar 只顯示 2 個市場，但 Collector 監控 10 個
 
-**解決方案**: 確認 Collector 配置，確保它監控的市場和 `markets` 表中的市場一致
+**根本原因**:
+- Collector 將數據寫入 `book_bins` 表（使用 `token_id`）
+- 但 `markets` 表沒有對應的市場元數據
+- Radar API 用 `markets.yes_token_id` JOIN `book_bins.token_id`
+- 7 個市場的 `token_id` 在 `book_bins` 中有數據，但在 `markets` 表中找不到對應記錄
+
+**修復內容**:
+1. **Polymarket API** (`utils/polymarket_api.py`):
+   - `_extract_market_from_event()` 現在提取 `yes_token_id` 和 `no_token_id`
+   - 從 `clobTokenIds` JSON 數組中提取兩個 token
+
+2. **Collector** (`backend/collector/main.py`):
+   - 新增 `save_markets_to_db()` 函數
+   - 在 `get_top_markets()` 結束時自動同步市場到 `markets` 表
+   - 使用 `ON CONFLICT DO UPDATE` 確保冪等性
 
 ## 分支
-- 開發分支：`claude/initial-setup-xsnPm-phveT`
+- 開發分支：`claude/initial-setup-uqFJn`
 
 ## AWS 部署狀態
 

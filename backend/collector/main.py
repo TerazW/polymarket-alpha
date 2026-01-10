@@ -704,8 +704,50 @@ def _print_state_change(change):
           f"{old_indicator} {change.old_state.value} → {new_indicator} {change.new_state.value}")
 
 
+def save_markets_to_db(markets: list):
+    """
+    保存市场元数据到 markets 表 (v5.42)
+    这样 Radar API 才能找到匹配的 token_id
+    """
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            for m in markets:
+                condition_id = m.get('condition_id')
+                if not condition_id:
+                    continue
+
+                cur.execute("""
+                    INSERT INTO markets (
+                        condition_id, question, slug, yes_token_id, no_token_id,
+                        active, closed, volume_24h, liquidity, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (condition_id) DO UPDATE SET
+                        question = EXCLUDED.question,
+                        yes_token_id = EXCLUDED.yes_token_id,
+                        no_token_id = EXCLUDED.no_token_id,
+                        volume_24h = EXCLUDED.volume_24h,
+                        liquidity = EXCLUDED.liquidity,
+                        updated_at = NOW()
+                """, (
+                    condition_id,
+                    m.get('question', 'Unknown'),
+                    m.get('slug', ''),
+                    m.get('yes_token_id') or m.get('token_id'),
+                    m.get('no_token_id') or m.get('token_id'),
+                    m.get('active', True),
+                    m.get('closed', False),
+                    m.get('volume_24h', 0),
+                    m.get('liquidity', 0),
+                ))
+        print(f"✅ 已同步 {len(markets)} 个市场到 markets 表")
+    except Exception as e:
+        print(f"[DB ERROR] 保存市场元数据失败: {e}")
+
+
 def get_top_markets(limit: int = 10):
-    """获取热门市场"""
+    """获取热门市场并返回完整市场数据"""
     print(f"正在获取前 {limit} 个热门市场...")
 
     api = PolymarketAPI()
@@ -719,10 +761,13 @@ def get_top_markets(limit: int = 10):
     for m in top_markets:
         question = m.get('question', '')[:40]
         volume = m.get('volume_24h', 0) or 0
-        token_id = m.get('token_id')
+        token_id = m.get('yes_token_id') or m.get('token_id')
         if token_id:
             token_ids.append(token_id)
             print(f"  ✓ {question}... (${volume:,.0f})")
+
+    # v5.42: 保存市场元数据到 markets 表
+    save_markets_to_db(top_markets)
 
     return token_ids
 

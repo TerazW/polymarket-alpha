@@ -322,23 +322,37 @@ class PolymarketAPI:
             condition_id = market.get('conditionId', '')
             if not condition_id:
                 return None
-            
-            # token_id
+
+            # token_id - extract both YES and NO tokens
             clob_token_ids_raw = market.get('clobTokenIds', '')
             token_id = None
-            
+            yes_token_id = None
+            no_token_id = None
+
             if isinstance(clob_token_ids_raw, str) and clob_token_ids_raw:
                 try:
                     clob_token_ids = json.loads(clob_token_ids_raw)
-                    if isinstance(clob_token_ids, list) and clob_token_ids:
-                        token_id = clob_token_ids[0]
+                    if isinstance(clob_token_ids, list):
+                        if len(clob_token_ids) >= 1:
+                            yes_token_id = clob_token_ids[0]
+                            token_id = yes_token_id
+                        if len(clob_token_ids) >= 2:
+                            no_token_id = clob_token_ids[1]
                 except json.JSONDecodeError:
                     pass
-            elif isinstance(clob_token_ids_raw, list) and clob_token_ids_raw:
-                token_id = clob_token_ids_raw[0]
-            
+            elif isinstance(clob_token_ids_raw, list):
+                if len(clob_token_ids_raw) >= 1:
+                    yes_token_id = clob_token_ids_raw[0]
+                    token_id = yes_token_id
+                if len(clob_token_ids_raw) >= 2:
+                    no_token_id = clob_token_ids_raw[1]
+
             if not token_id:
                 token_id = condition_id
+            if not yes_token_id:
+                yes_token_id = condition_id
+            if not no_token_id:
+                no_token_id = condition_id
             
             # Price.
             outcome_prices_raw = market.get('outcomePrices', '["0.5", "0.5"]')
@@ -372,7 +386,10 @@ class PolymarketAPI:
             return {
                 'condition_id': condition_id,
                 'token_id': token_id,
+                'yes_token_id': yes_token_id,
+                'no_token_id': no_token_id,
                 'question': market.get('question', 'Unknown'),
+                'slug': market.get('slug', ''),
                 'description': market.get('description', ''),
                 'price': price,
                 'volume_24h': volume_24h,
