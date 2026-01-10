@@ -9,6 +9,11 @@
  * - No more midPrice-based color determination
  * - Log-based intensity mapping for heavy-tailed data
  * - Smooth rendering with additive blending
+ *
+ * v5.41: Unified clipValue across all tiles (B1 improvement)
+ * - Uses global max clipValue for intensity calculation
+ * - Prevents banding artifacts at tile boundaries
+ * - Per-tile clipValue still used for depth decoding (as encoded)
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -218,12 +223,20 @@ export function HeatmapRenderer({
     const timeRange = windowEnd - windowStart;
     const priceRange = priceMax - priceMin;
 
+    // v5.41: Calculate global clipValue across all tiles for consistent intensity mapping
+    // This prevents banding artifacts at tile boundaries where different tiles
+    // might have different clip_values
+    const globalClip = Math.max(
+      ...decodedTiles.map(t => t.tile.encoding.clip_value || 10000)
+    );
+
     // Enable additive blending for smoother overlapping
     ctx.globalCompositeOperation = 'lighter';
 
     // Render each tile
     for (const { tile, matrix, rows, cols, side } of decodedTiles) {
-      const clipValue = tile.encoding.clip_value || 10000;
+      // Per-tile clipValue for decoding (data was encoded with this value)
+      const tileClipValue = tile.encoding.clip_value || 10000;
       const scale = tile.encoding.scale;
 
       // Calculate tile position in canvas
@@ -254,8 +267,10 @@ export function HeatmapRenderer({
 
           if (value === 0) continue;
 
-          const depth = decodeDepth(value, clipValue, scale);
-          const intensity = calculateIntensity(depth, clipValue);
+          // Decode depth using tile's clipValue (as encoded)
+          const depth = decodeDepth(value, tileClipValue, scale);
+          // v5.41: Use globalClip for intensity to ensure consistent mapping across tiles
+          const intensity = calculateIntensity(depth, globalClip);
 
           if (intensity < 0.02) continue; // Skip nearly invisible cells
 
