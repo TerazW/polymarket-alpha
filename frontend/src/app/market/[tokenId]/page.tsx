@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, use } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ContextPanel } from '@/components/evidence/ContextPanel';
 import { EvidencePlayer } from '@/components/evidence/EvidencePlayer';
@@ -13,7 +13,7 @@ import { type EvidenceResponse as ApiEvidenceResponse } from '@/lib/api';
 import { useEvidenceFetch } from '@/hooks/useEvidenceFetch';
 
 interface PageProps {
-  params: { tokenId: string };
+  params: Promise<{ tokenId: string }>;
 }
 
 // Convert API response to frontend types
@@ -138,7 +138,8 @@ export default function MarketDetailPage({ params }: PageProps) {
   // DEBUG: count renders
   console.count('[DEBUG] MarketDetailPage render');
 
-  const { tokenId } = params;
+  // Unwrap params Promise (Next.js 15+ requirement)
+  const { tokenId } = use(params);
   const searchParams = useSearchParams();
   const t0Param = searchParams.get('t0');
 
