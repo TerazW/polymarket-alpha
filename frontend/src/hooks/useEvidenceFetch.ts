@@ -65,6 +65,8 @@ export function useEvidenceFetch({
   const doFetch = useCallback(async () => {
     const params = paramsRef.current;
     const fetchKey = getFetchKey();
+    // DEBUG: trace who is calling doFetch
+    console.trace('[DEBUG] useEvidenceFetch.doFetch called', { fetchKey, tokenId: params.tokenId, t0: params.t0 });
 
     // Check GLOBAL backoff period (shared across all instances)
     const now = Date.now();

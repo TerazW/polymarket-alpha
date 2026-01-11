@@ -191,10 +191,13 @@ export function useStream(options: UseStreamOptions = {}): UseStreamReturn {
 
   // Stable connect function
   const connect = useCallback(() => {
+    // DEBUG: trace who is calling connect
+    console.trace('[DEBUG] useStream.connect called', { readyState: wsRef.current?.readyState });
     if (
       wsRef.current?.readyState === WebSocket.OPEN ||
       wsRef.current?.readyState === WebSocket.CONNECTING
     ) {
+      console.log('[DEBUG] useStream.connect: already OPEN or CONNECTING, skipping');
       return;
     }
 

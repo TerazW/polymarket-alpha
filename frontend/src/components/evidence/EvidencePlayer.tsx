@@ -31,6 +31,10 @@ export function EvidencePlayer({
   enableRealtime = false,
   onRealtimeEvent,
 }: EvidencePlayerProps) {
+  // DEBUG: count renders
+  console.count('[DEBUG] EvidencePlayer render');
+  console.log('[DEBUG] EvidencePlayer', { token_id: evidence.token_id, enableRealtime });
+
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });

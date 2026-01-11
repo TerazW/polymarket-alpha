@@ -135,6 +135,9 @@ function convertApiEvidence(api: ApiEvidenceResponse): EvidenceResponse {
 }
 
 export default function MarketDetailPage({ params }: PageProps) {
+  // DEBUG: count renders
+  console.count('[DEBUG] MarketDetailPage render');
+
   const { tokenId } = params;
   const searchParams = useSearchParams();
   const t0Param = searchParams.get('t0');
@@ -147,8 +150,12 @@ export default function MarketDetailPage({ params }: PageProps) {
     const parsedT0 = t0Param ? parseInt(t0Param, 10) : NaN;
     t0KeyRef.current = t0Key;
     t0Ref.current = Number.isFinite(parsedT0) ? parsedT0 : Date.now();
+    // DEBUG: log when t0 changes
+    console.log('[DEBUG] MarketDetailPage t0 changed', { t0Key, initialT0: t0Ref.current });
   }
   const initialT0 = t0Ref.current;
+  // DEBUG: log every render's key values
+  console.log('[DEBUG] MarketDetailPage', { tokenId, initialT0, t0Key });
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(initialT0);

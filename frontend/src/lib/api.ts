@@ -263,6 +263,8 @@ export async function getEvidence(
   },
   signal?: AbortSignal
 ): Promise<EvidenceResponse> {
+  // DEBUG: trace who is calling getEvidence
+  console.trace('[DEBUG] getEvidence called', { token_id: params.token_id, t0: params.t0 });
   const searchParams = new URLSearchParams();
   searchParams.set('token_id', params.token_id);
   searchParams.set('t0', String(params.t0));
@@ -400,6 +402,8 @@ export async function getHeatmapTiles(
   },
   signal?: AbortSignal
 ): Promise<HeatmapTilesResponse> {
+  // DEBUG: trace who is calling getHeatmapTiles
+  console.trace('[DEBUG] getHeatmapTiles called', { token_id: params.token_id });
   const searchParams = new URLSearchParams();
   searchParams.set('token_id', params.token_id);
   searchParams.set('from_ts', String(params.from_ts));
@@ -505,6 +509,8 @@ export async function getReactionDistribution(params: {
   token_id: string;
   window_minutes?: number;
 }): Promise<ReactionDistributionResponse> {
+  // DEBUG: trace who is calling getReactionDistribution
+  console.trace('[DEBUG] getReactionDistribution called', { token_id: params.token_id });
   const searchParams = new URLSearchParams();
   searchParams.set('token_id', params.token_id);
   if (params.window_minutes) searchParams.set('window_minutes', String(params.window_minutes));
@@ -542,6 +548,8 @@ export async function getSimilarCases(params: {
   search_days?: number;
   max_results?: number;
 }): Promise<SimilarCasesResponse> {
+  // DEBUG: trace who is calling getSimilarCases
+  console.trace('[DEBUG] getSimilarCases called', { token_id: params.token_id });
   const searchParams = new URLSearchParams();
   searchParams.set('token_id', params.token_id);
   if (params.window_minutes) searchParams.set('window_minutes', String(params.window_minutes));
