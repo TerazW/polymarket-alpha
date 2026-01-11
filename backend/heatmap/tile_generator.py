@@ -155,6 +155,7 @@ class HeatmapTileGenerator:
         Returns:
             List of {bucket_ts, price, size, side} dicts
         """
+        print(f"[TILE_DEBUG] _fetch_book_data: token={token_id[:20]}..., from={from_ts}, to={to_ts}, lod={lod_ms}, side={side}")
         conn = self._get_conn()
 
         # Choose table based on LOD
@@ -186,7 +187,9 @@ class HeatmapTileGenerator:
 
         with conn.cursor() as cur:
             cur.execute(query, (token_id, from_ts, to_ts))
-            return cur.fetchall()
+            result = cur.fetchall()
+            print(f"[TILE_DEBUG] _fetch_book_data: returned {len(result)} rows")
+            return result
 
     def _get_tick_size(self, token_id: str) -> float:
         """Get tick size for a token"""
@@ -358,10 +361,12 @@ class HeatmapTileGenerator:
         Returns:
             HeatmapTile or None if no data
         """
+        print(f"[TILE_DEBUG] generate_tile: t_start={t_start}, t_end={t_end}, side={side}")
         # Fetch data
         data = self._fetch_book_data(token_id, t_start, t_end, lod_ms, side)
 
         if not data:
+            print(f"[TILE_DEBUG] generate_tile: no data, returning None")
             return None
 
         # Get tick size
@@ -458,10 +463,12 @@ class HeatmapTileGenerator:
         Returns:
             List of HeatmapTile objects
         """
+        print(f"[TILE_DEBUG] generate_tiles: token={token_id[:20]}..., from_ts={from_ts}, to_ts={to_ts}, side={side}")
         tiles = []
 
         # Align to tile boundaries
         t_start = (from_ts // tile_ms) * tile_ms
+        print(f"[TILE_DEBUG] generate_tiles: aligned t_start={t_start}")
 
         while t_start < to_ts:
             t_end = min(t_start + tile_ms, to_ts)
@@ -478,9 +485,11 @@ class HeatmapTileGenerator:
 
             if tile:
                 tiles.append(tile)
+                print(f"[TILE_DEBUG] generate_tiles: added tile for t_start={t_start}")
 
             t_start += tile_ms
 
+        print(f"[TILE_DEBUG] generate_tiles: completed, total tiles={len(tiles)}")
         return tiles
 
     def save_tile(self, tile: HeatmapTile) -> bool:
