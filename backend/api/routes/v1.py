@@ -1125,6 +1125,125 @@ def get_heatmap_tiles(
 
 
 # =============================================================================
+# Heatmap Debug Endpoint (temporary)
+# =============================================================================
+
+@router.get("/heatmap/debug")
+def debug_heatmap_tiles(
+    token_id: str = Query(..., min_length=1),
+    from_ts: int = Query(...),
+    to_ts: int = Query(...),
+):
+    """
+    Debug endpoint to diagnose heatmap tile generation issues.
+    Returns raw query results and debug info.
+    """
+    import sys
+    debug_info = {
+        "token_id": token_id,
+        "token_id_len": len(token_id),
+        "from_ts": from_ts,
+        "to_ts": to_ts,
+        "db_config": {
+            "host": DB_CONFIG.get("host", "unknown"),
+            "port": DB_CONFIG.get("port", "unknown"),
+            "database": DB_CONFIG.get("database", "unknown"),
+        },
+        "steps": [],
+        "errors": [],
+    }
+
+    try:
+        # Step 1: Test direct database query
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # Check if token exists in book_bins
+            cur.execute("""
+                SELECT COUNT(*) as count FROM book_bins
+                WHERE token_id = %s
+            """, (token_id,))
+            row = cur.fetchone()
+            debug_info["steps"].append(f"book_bins total count for token: {row['count']}")
+
+            # Check data in time range
+            cur.execute("""
+                SELECT COUNT(*) as count FROM book_bins
+                WHERE token_id = %s
+                AND bucket_ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+            """, (token_id, from_ts, to_ts))
+            row = cur.fetchone()
+            debug_info["steps"].append(f"book_bins in time range: {row['count']}")
+
+            # Check with side filter
+            cur.execute("""
+                SELECT side, COUNT(*) as count FROM book_bins
+                WHERE token_id = %s
+                AND bucket_ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                GROUP BY side
+            """, (token_id, from_ts, to_ts))
+            rows = cur.fetchall()
+            for r in rows:
+                debug_info["steps"].append(f"  side={r['side']}: {r['count']}")
+
+            # Get sample data
+            cur.execute("""
+                SELECT
+                    EXTRACT(EPOCH FROM bucket_ts) * 1000 AS bucket_ts_ms,
+                    price, size, side
+                FROM book_bins
+                WHERE token_id = %s
+                AND bucket_ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                LIMIT 3
+            """, (token_id, from_ts, to_ts))
+            samples = cur.fetchall()
+            debug_info["sample_data"] = [dict(s) for s in samples]
+
+        conn.close()
+
+        # Step 2: Test tile generator
+        debug_info["steps"].append("Testing tile generator...")
+        generator = HeatmapTileGenerator(db_config=DB_CONFIG)
+
+        # Test fetching data directly
+        tile_ms = 10000
+        t_start = (from_ts // tile_ms) * tile_ms
+        debug_info["steps"].append(f"Aligned t_start: {t_start}")
+
+        try:
+            tiles = generator.generate_tiles(
+                token_id=token_id,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                lod_ms=250,
+                tile_ms=tile_ms,
+                side='bid'
+            )
+            debug_info["steps"].append(f"Bid tiles generated: {len(tiles)}")
+        except Exception as e:
+            debug_info["errors"].append(f"Bid tile generation error: {str(e)}")
+
+        try:
+            tiles = generator.generate_tiles(
+                token_id=token_id,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                lod_ms=250,
+                tile_ms=tile_ms,
+                side='ask'
+            )
+            debug_info["steps"].append(f"Ask tiles generated: {len(tiles)}")
+        except Exception as e:
+            debug_info["errors"].append(f"Ask tile generation error: {str(e)}")
+
+    except Exception as e:
+        import traceback
+        debug_info["errors"].append(f"Error: {str(e)}")
+        debug_info["traceback"] = traceback.format_exc()
+
+    return debug_info
+
+
+# =============================================================================
 # Alert ACK API (v5.9)
 # =============================================================================
 
