@@ -59,6 +59,23 @@ async function loadFzstd(): Promise<typeof fzstdModule> {
   return fzstdModule;
 }
 
+// Pako (zlib) decompression support
+let pakoModule: { inflate: (data: Uint8Array) => Uint8Array } | null = null;
+let pakoLoaded = false;
+
+async function loadPako(): Promise<typeof pakoModule> {
+  if (pakoLoaded) return pakoModule;
+  pakoLoaded = true;
+
+  try {
+    pakoModule = await import('pako');
+    console.log('[TileDecode] pako module loaded successfully');
+  } catch {
+    console.info('pako not available - zlib tiles cannot be decompressed');
+  }
+  return pakoModule;
+}
+
 /**
  * Decode base64 payload to Uint16Array
  * Handles both compressed (zstd) and raw data
@@ -108,6 +125,34 @@ async function decodeTilePayload(tile: HeatmapTileMeta): Promise<Uint16Array | n
       }
       // If fzstd not available or failed, return null to show placeholder
       console.warn('Compressed tile cannot be decoded - fzstd not available');
+      return null;
+    }
+
+    // If compressed with zlib, use pako to decompress
+    if (algo === 'zlib' && tile.compression.level > 0) {
+      console.log('[TileDecode] Attempting zlib decompression with pako...');
+      const pako = await loadPako();
+      if (pako) {
+        try {
+          const decompressed = pako.inflate(bytes);
+          console.log('[TileDecode] zlib decompressed:', decompressed.length, 'bytes');
+          // Check for non-zero values
+          const result = new Uint16Array(decompressed.buffer);
+          let nonZeroCount = 0;
+          let maxValue = 0;
+          for (let i = 0; i < result.length; i++) {
+            if (result[i] > 0) nonZeroCount++;
+            if (result[i] > maxValue) maxValue = result[i];
+          }
+          console.log('[TileDecode] Tile stats:', { nonZeroCount, maxValue, totalCells: result.length });
+          return result;
+        } catch (e) {
+          console.warn('[TileDecode] zlib decompression failed:', e);
+        }
+      } else {
+        console.warn('[TileDecode] pako module not available');
+      }
+      console.warn('Compressed tile cannot be decoded - pako not available');
       return null;
     }
 
