@@ -4,7 +4,7 @@ Implements OpenAPI spec endpoints
 """
 
 from fastapi import APIRouter, Query, HTTPException, WebSocket, WebSocketDisconnect
-from typing import Optional, Literal, List
+from typing import Optional, Literal, List, Dict, Any
 import time
 import base64
 import psycopg2
@@ -46,8 +46,12 @@ from backend.evidence.bundle_hash import compute_bundle_hash
 from backend.heatmap.tile_generator import (
     HeatmapTileGenerator,
     TileBand as GeneratorTileBand,
-    tile_to_api_response
+    tile_to_api_response,
+    HeatmapTile,
+    HAS_ZSTD,
+    HAS_XXHASH,
 )
+from backend.security.audit import is_production_environment
 
 # v5.25: Attribution and Explainability
 from backend.radar.explain import (
@@ -993,6 +997,108 @@ def get_replay_catalog(
 # Heatmap Tiles API
 # =============================================================================
 
+def _resolve_heatmap_source(lod: int) -> tuple:
+    if lod <= 250:
+        return "book_bins", "bucket_ts", "size"
+    if lod <= 1000:
+        return "book_bins_1s", "bucket_ts_1s", "avg_size"
+    return "book_bins_1m", "bucket_ts_1m", "avg_size"
+
+
+def _synthetic_tiles_allowed() -> bool:
+    if os.getenv("ALLOW_SYNTHETIC_TILES", "").lower() == "true":
+        return True
+    return not is_production_environment()
+
+
+def _generate_synthetic_tiles(
+    token_id: str,
+    from_ts: int,
+    to_ts: int,
+    lod_ms: int,
+    tile_ms: int,
+    band: TileBand,
+    price_min: Optional[float],
+    price_max: Optional[float],
+    tick_size: Optional[float],
+) -> tuple:
+    import numpy as np
+
+    generator = HeatmapTileGenerator(db_config=DB_CONFIG)
+    price_min_val = 0.0 if price_min is None else float(price_min)
+    price_max_val = 1.0 if price_max is None else float(price_max)
+    tick_val = float(tick_size) if tick_size and tick_size > 0 else 0.01
+
+    if price_max_val <= price_min_val:
+        price_min_val, price_max_val = 0.0, 1.0
+
+    rows = max(2, int(round((price_max_val - price_min_val) / tick_val)) + 1)
+    cols = max(1, tile_ms // lod_ms)
+
+    band_rows = [
+        max(0, min(rows - 1, int(rows * 0.25))),
+        max(0, min(rows - 1, int(rows * 0.5))),
+        max(0, min(rows - 1, int(rows * 0.75))),
+    ]
+    vanish_row = band_rows[1]
+    vanish_after = from_ts + int((to_ts - from_ts) * 0.6)
+
+    bid_tiles = []
+    ask_tiles = []
+
+    t_start = (from_ts // tile_ms) * tile_ms
+    while t_start < to_ts:
+        t_end = min(t_start + tile_ms, to_ts)
+        matrix_bid = np.zeros((rows, cols), dtype=np.float64)
+        matrix_ask = np.zeros((rows, cols), dtype=np.float64)
+
+        for col in range(cols):
+            ts = t_start + col * lod_ms
+            for row_idx, value in zip(band_rows, [1200.0, 700.0, 350.0]):
+                if row_idx == vanish_row and ts >= vanish_after:
+                    continue
+                matrix_bid[row_idx, col] = value
+            for row_idx, value in zip(band_rows, [350.0, 700.0, 1200.0]):
+                if row_idx == vanish_row and ts >= vanish_after:
+                    continue
+                matrix_ask[row_idx, col] = value
+
+        def _build_tile(matrix: np.ndarray) -> HeatmapTile:
+            encoded_bytes, clip_value = generator._encode_matrix(matrix, generator.DEFAULT_CLIP_PCTL)
+            compressed = generator._compress(encoded_bytes, generator.DEFAULT_COMPRESSION_LEVEL)
+            checksum = generator._compute_checksum(compressed)
+            return HeatmapTile(
+                tile_id=f"synthetic:{token_id}:{lod_ms}:{t_start}:{band.value}",
+                token_id=token_id,
+                lod_ms=lod_ms,
+                tile_ms=tile_ms,
+                band=GeneratorTileBand(band.value),
+                t_start=t_start,
+                t_end=t_end,
+                tick_size=tick_val,
+                price_min=price_min_val,
+                price_max=price_max_val,
+                rows=rows,
+                cols=cols,
+                encoding_dtype="uint16",
+                encoding_layout="row_major",
+                encoding_scale="log1p_clip",
+                clip_pctl=generator.DEFAULT_CLIP_PCTL,
+                clip_value=clip_value,
+                compression_algo="zstd" if HAS_ZSTD else "zlib",
+                compression_level=generator.DEFAULT_COMPRESSION_LEVEL,
+                payload=compressed,
+                checksum_algo="xxh3_64" if HAS_XXHASH else "md5",
+                checksum_value=checksum,
+            )
+
+        bid_tiles.append(_build_tile(matrix_bid))
+        ask_tiles.append(_build_tile(matrix_ask))
+
+        t_start += tile_ms
+
+    return bid_tiles, ask_tiles
+
 @router.get("/heatmap/tiles", response_model=HeatmapTilesResponse)
 def get_heatmap_tiles(
     token_id: str = Query(..., min_length=1),
@@ -1003,6 +1109,8 @@ def get_heatmap_tiles(
     price_min: Optional[float] = Query(None),
     price_max: Optional[float] = Query(None),
     band: TileBand = Query(TileBand.FULL),
+    value_mode: Literal["max", "sum", "last"] = Query("max", description="Cell aggregation: max, sum, or last"),
+    synthetic: bool = Query(False, description="DEV only: return synthetic tiles"),
 ):
     """
     Fetch heatmap tiles for a token over time range.
@@ -1056,6 +1164,33 @@ def get_heatmap_tiles(
         )
 
     try:
+        if synthetic:
+            if not _synthetic_tiles_allowed():
+                raise HTTPException(status_code=403, detail="Synthetic tiles disabled in production")
+            bid_tiles, ask_tiles = _generate_synthetic_tiles(
+                token_id=token_id,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                lod_ms=lod,
+                tile_ms=tile_ms,
+                band=band,
+                price_min=price_min,
+                price_max=price_max,
+                tick_size=None,
+            )
+            return HeatmapTilesResponse(
+                manifest=HeatmapTilesManifest(
+                    token_id=token_id,
+                    from_ts=from_ts,
+                    to_ts=to_ts,
+                    lod_ms=lod,
+                    tile_ms=tile_ms,
+                    band=band,
+                ),
+                bid_tiles=[_tile_to_meta(t, token_id) for t in bid_tiles],
+                ask_tiles=[_tile_to_meta(t, token_id) for t in ask_tiles],
+            )
+
         # v5.40: Generate separate bid and ask tiles
         print(f"[HEATMAP] /tiles request: token={token_id[:30]}..., from={from_ts}, to={to_ts}, lod={lod}, tile_ms={tile_ms}")
         generator = HeatmapTileGenerator(db_config=DB_CONFIG)
@@ -1073,7 +1208,8 @@ def get_heatmap_tiles(
                 lod_ms=lod,
                 tile_ms=tile_ms,
                 band=generator_band,
-                side='bid'  # Filter for bid side only
+                side='bid',  # Filter for bid side only
+                value_mode=value_mode,
             )
             print(f"[HEATMAP] Bid generator returned {len(bid_generated)} tiles")
             for t in bid_generated:
@@ -1092,7 +1228,8 @@ def get_heatmap_tiles(
                 lod_ms=lod,
                 tile_ms=tile_ms,
                 band=generator_band,
-                side='ask'  # Filter for ask side only
+                side='ask',  # Filter for ask side only
+                value_mode=value_mode,
             )
             print(f"[HEATMAP] Ask generator returned {len(ask_generated)} tiles")
             for t in ask_generated:
@@ -1141,107 +1278,261 @@ def debug_heatmap_tiles(
     token_id: str = Query(..., min_length=1),
     from_ts: int = Query(...),
     to_ts: int = Query(...),
+    lod: int = Query(250, description="Time resolution in ms per column (250, 1000, or 5000)"),
+    tile_ms: int = Query(10000, description="Tile duration in ms (5000, 10000, or 15000)"),
+    band: TileBand = Query(TileBand.FULL),
+    value_mode: Literal["max", "sum", "last"] = Query("max", description="Cell aggregation: max, sum, or last"),
+    sample_tiles: int = Query(3, ge=1, le=10, description="How many tiles to sample for detailed stats"),
 ):
     """
     Debug endpoint to diagnose heatmap tile generation issues.
     Returns raw query results and debug info.
     """
-    import sys
+    import numpy as np
+
     debug_info = {
         "token_id": token_id,
         "token_id_len": len(token_id),
         "from_ts": from_ts,
         "to_ts": to_ts,
+        "lod_ms": lod,
+        "tile_ms": tile_ms,
+        "band": band.value,
+        "value_mode": value_mode,
         "db_config": {
             "host": DB_CONFIG.get("host", "unknown"),
             "port": DB_CONFIG.get("port", "unknown"),
             "database": DB_CONFIG.get("database", "unknown"),
         },
-        "steps": [],
+        "source": {},
+        "raw_counts": {},
+        "size_stats": {},
+        "tiles": {},
+        "possible_zero_causes": [],
         "errors": [],
     }
 
     try:
+        if from_ts >= to_ts:
+            debug_info["possible_zero_causes"].append("time_window_reversed_or_empty")
+
         # Step 1: Test direct database query
+        table, time_bucket, size_col = _resolve_heatmap_source(lod)
+        debug_info["source"] = {
+            "table": table,
+            "time_bucket": time_bucket,
+            "size_column": size_col,
+        }
+
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Check if token exists in book_bins
-            cur.execute("""
-                SELECT COUNT(*) as count FROM book_bins
+            # Counts and distincts
+            cur.execute(f"""
+                SELECT
+                    COUNT(*) as row_count,
+                    COUNT(*) FILTER (WHERE side = 'bid') as bid_rows,
+                    COUNT(*) FILTER (WHERE side = 'ask') as ask_rows,
+                    COUNT(DISTINCT price) as distinct_prices,
+                    COUNT(DISTINCT {time_bucket}) as distinct_buckets
+                FROM {table}
                 WHERE token_id = %s
-            """, (token_id,))
-            row = cur.fetchone()
-            debug_info["steps"].append(f"book_bins total count for token: {row['count']}")
-
-            # Check data in time range
-            cur.execute("""
-                SELECT COUNT(*) as count FROM book_bins
-                WHERE token_id = %s
-                AND bucket_ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                AND {time_bucket} BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
             """, (token_id, from_ts, to_ts))
-            row = cur.fetchone()
-            debug_info["steps"].append(f"book_bins in time range: {row['count']}")
+            counts = cur.fetchone()
+            debug_info["raw_counts"] = {
+                "rows_total": int(counts["row_count"] or 0),
+                "rows_bid": int(counts["bid_rows"] or 0),
+                "rows_ask": int(counts["ask_rows"] or 0),
+                "distinct_prices": int(counts["distinct_prices"] or 0),
+                "distinct_buckets": int(counts["distinct_buckets"] or 0),
+            }
 
-            # Check with side filter
-            cur.execute("""
-                SELECT side, COUNT(*) as count FROM book_bins
+            # Price and time range in data
+            cur.execute(f"""
+                SELECT
+                    MIN(price) as price_min,
+                    MAX(price) as price_max,
+                    MIN({time_bucket}) as min_bucket,
+                    MAX({time_bucket}) as max_bucket
+                FROM {table}
                 WHERE token_id = %s
-                AND bucket_ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                AND {time_bucket} BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+            """, (token_id, from_ts, to_ts))
+            ranges = cur.fetchone()
+            debug_info["raw_counts"].update({
+                "price_min": float(ranges["price_min"]) if ranges["price_min"] is not None else None,
+                "price_max": float(ranges["price_max"]) if ranges["price_max"] is not None else None,
+                "bucket_min_ms": int(ranges["min_bucket"].timestamp() * 1000) if ranges["min_bucket"] else None,
+                "bucket_max_ms": int(ranges["max_bucket"].timestamp() * 1000) if ranges["max_bucket"] else None,
+            })
+
+            # Size distribution by side
+            cur.execute(f"""
+                SELECT
+                    side,
+                    MIN({size_col}) as min_size,
+                    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {size_col}) as p50,
+                    PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY {size_col}) as p90,
+                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY {size_col}) as p99,
+                    MAX({size_col}) as max_size
+                FROM {table}
+                WHERE token_id = %s
+                AND {time_bucket} BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                AND {size_col} > 0
                 GROUP BY side
             """, (token_id, from_ts, to_ts))
-            rows = cur.fetchall()
-            for r in rows:
-                debug_info["steps"].append(f"  side={r['side']}: {r['count']}")
-
-            # Get sample data
-            cur.execute("""
-                SELECT
-                    EXTRACT(EPOCH FROM bucket_ts) * 1000 AS bucket_ts_ms,
-                    price, size, side
-                FROM book_bins
-                WHERE token_id = %s
-                AND bucket_ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
-                LIMIT 3
-            """, (token_id, from_ts, to_ts))
-            samples = cur.fetchall()
-            debug_info["sample_data"] = [dict(s) for s in samples]
+            size_rows = cur.fetchall()
+            for r in size_rows:
+                debug_info["size_stats"][r["side"]] = {
+                    "min": float(r["min_size"]) if r["min_size"] is not None else None,
+                    "median": float(r["p50"]) if r["p50"] is not None else None,
+                    "p90": float(r["p90"]) if r["p90"] is not None else None,
+                    "p99": float(r["p99"]) if r["p99"] is not None else None,
+                    "max": float(r["max_size"]) if r["max_size"] is not None else None,
+                }
 
         conn.close()
 
-        # Step 2: Test tile generator
-        debug_info["steps"].append("Testing tile generator...")
+        # Step 2: Tile matrix stats
         generator = HeatmapTileGenerator(db_config=DB_CONFIG)
+        tick_size = generator._get_tick_size(token_id)
+        debug_info["raw_counts"]["tick_size"] = float(tick_size)
 
-        # Test fetching data directly
-        tile_ms = 10000
-        t_start = (from_ts // tile_ms) * tile_ms
-        debug_info["steps"].append(f"Aligned t_start: {t_start}")
+        def _matrix_stats(matrix: np.ndarray) -> Dict[str, Any]:
+            nonzero = matrix[matrix > 0]
+            if nonzero.size == 0:
+                return {
+                    "nonZeroCount": 0,
+                    "max": 0.0,
+                    "sum": 0.0,
+                    "p90": 0.0,
+                    "p99": 0.0,
+                }
+            return {
+                "nonZeroCount": int(nonzero.size),
+                "max": float(np.max(nonzero)),
+                "sum": float(np.sum(nonzero)),
+                "p90": float(np.percentile(nonzero, 90)),
+                "p99": float(np.percentile(nonzero, 99)),
+            }
 
-        try:
-            tiles = generator.generate_tiles(
-                token_id=token_id,
-                from_ts=from_ts,
-                to_ts=to_ts,
-                lod_ms=250,
-                tile_ms=tile_ms,
-                side='bid'
-            )
-            debug_info["steps"].append(f"Bid tiles generated: {len(tiles)}")
-        except Exception as e:
-            debug_info["errors"].append(f"Bid tile generation error: {str(e)}")
+        tiles_debug = {"bid": {"sample": [], "summary": {}}, "ask": {"sample": [], "summary": {}}}
+        for side in ["bid", "ask"]:
+            t_start = (from_ts // tile_ms) * tile_ms
+            sample_stats = []
+            sample_values = []
+            total_nonzero = 0
+            total_sum = 0.0
+            global_max = 0.0
+            max_samples = 200000
 
-        try:
-            tiles = generator.generate_tiles(
-                token_id=token_id,
-                from_ts=from_ts,
-                to_ts=to_ts,
-                lod_ms=250,
-                tile_ms=tile_ms,
-                side='ask'
-            )
-            debug_info["steps"].append(f"Ask tiles generated: {len(tiles)}")
-        except Exception as e:
-            debug_info["errors"].append(f"Ask tile generation error: {str(e)}")
+            while t_start < to_ts:
+                t_end = min(t_start + tile_ms, to_ts)
+                data = generator._fetch_book_data(
+                    token_id=token_id,
+                    from_ts=t_start,
+                    to_ts=t_end,
+                    lod_ms=lod,
+                    side=side,
+                )
+                if data:
+                    prices = [float(d["price"]) for d in data]
+                    price_min = min(prices)
+                    price_max = max(prices)
+                    if band == TileBand.BEST_5:
+                        price_range = (price_max - price_min) * 0.1
+                        price_min = max(0, price_min)
+                        price_max = min(1, price_min + price_range)
+                    elif band == TileBand.BEST_10:
+                        price_range = (price_max - price_min) * 0.2
+                        price_min = max(0, price_min)
+                        price_max = min(1, price_min + price_range)
+                    elif band == TileBand.BEST_20:
+                        price_range = (price_max - price_min) * 0.4
+                        price_min = max(0, price_min)
+                        price_max = min(1, price_min + price_range)
+                    matrix, _, _, matrix_debug = generator._build_matrix(
+                        data,
+                        t_start,
+                        t_end,
+                        lod,
+                        price_min,
+                        price_max,
+                        tick_size,
+                        side,
+                        value_mode=value_mode,
+                        return_debug=True,
+                    )
+                    stats = _matrix_stats(matrix)
+                    if len(sample_stats) < sample_tiles:
+                        sample_stats.append({
+                            "t_start": t_start,
+                            "t_end": t_end,
+                            "rows": int(matrix.shape[0]),
+                            "cols": int(matrix.shape[1]),
+                            "price_min": float(price_min),
+                            "price_max": float(price_max),
+                            "stats": stats,
+                            "matrix_debug": matrix_debug,
+                        })
+
+                    if stats["nonZeroCount"] > 0:
+                        nonzero = matrix[matrix > 0]
+                        total_nonzero += int(nonzero.size)
+                        total_sum += float(np.sum(nonzero))
+                        global_max = max(global_max, float(np.max(nonzero)))
+
+                        if len(sample_values) < max_samples:
+                            stride = max(1, int(nonzero.size / max(1, max_samples - len(sample_values))))
+                            sample_values.extend(nonzero[::stride].tolist())
+
+                t_start += tile_ms
+
+            if sample_values:
+                summary = {
+                    "nonZeroCount": total_nonzero,
+                    "sum": total_sum,
+                    "max": global_max,
+                    "p90": float(np.percentile(sample_values, 90)),
+                    "p99": float(np.percentile(sample_values, 99)),
+                    "sampleValues": len(sample_values),
+                }
+            else:
+                summary = {
+                    "nonZeroCount": total_nonzero,
+                    "sum": total_sum,
+                    "max": global_max,
+                    "p90": 0.0,
+                    "p99": 0.0,
+                    "sampleValues": 0,
+                }
+
+            tiles_debug[side]["sample"] = sample_stats
+            tiles_debug[side]["summary"] = summary
+
+        debug_info["tiles"] = tiles_debug
+
+        # Possible causes for zeros or faint rendering
+        if debug_info["raw_counts"].get("rows_total", 0) == 0:
+            debug_info["possible_zero_causes"].append("no_book_bins_rows_in_range")
+        if debug_info["raw_counts"].get("distinct_prices", 0) == 0:
+            debug_info["possible_zero_causes"].append("no_distinct_prices")
+        if debug_info["raw_counts"].get("distinct_buckets", 0) == 0:
+            debug_info["possible_zero_causes"].append("no_time_buckets")
+        if debug_info["raw_counts"].get("rows_bid", 0) == 0:
+            debug_info["possible_zero_causes"].append("bid_side_empty")
+        if debug_info["raw_counts"].get("rows_ask", 0) == 0:
+            debug_info["possible_zero_causes"].append("ask_side_empty")
+        if tick_size <= 0:
+            debug_info["possible_zero_causes"].append("invalid_tick_size")
+        if (debug_info["raw_counts"].get("price_min") is not None and
+                debug_info["raw_counts"].get("price_max") is not None and
+                debug_info["raw_counts"]["price_max"] <= debug_info["raw_counts"]["price_min"]):
+            debug_info["possible_zero_causes"].append("price_range_invalid_or_collapsed")
+        if (tiles_debug["bid"]["summary"]["nonZeroCount"] == 0 and
+                tiles_debug["ask"]["summary"]["nonZeroCount"] == 0 and
+                debug_info["raw_counts"].get("rows_total", 0) > 0):
+            debug_info["possible_zero_causes"].append("matrix_all_zero_possible_alignment_issue")
 
     except Exception as e:
         import traceback

@@ -399,6 +399,8 @@ export async function getHeatmapTiles(
     lod?: 250 | 1000 | 5000;
     tile_ms?: 5000 | 10000 | 15000;
     band?: 'FULL' | 'BID' | 'ASK';
+    value_mode?: 'max' | 'sum' | 'last';
+    synthetic?: boolean;
   },
   signal?: AbortSignal
 ): Promise<HeatmapTilesResponse> {
@@ -411,8 +413,55 @@ export async function getHeatmapTiles(
   if (params.lod) searchParams.set('lod', String(params.lod));
   if (params.tile_ms) searchParams.set('tile_ms', String(params.tile_ms));
   if (params.band) searchParams.set('band', params.band);
+  if (params.value_mode) searchParams.set('value_mode', params.value_mode);
+  if (params.synthetic) searchParams.set('synthetic', 'true');
 
   return fetchApi<HeatmapTilesResponse>(`/v1/heatmap/tiles?${searchParams.toString()}`, { signal });
+}
+
+// =============================================================================
+// Heatmap Debug API (dev-only)
+// =============================================================================
+
+export interface HeatmapDebugResponse {
+  token_id: string;
+  from_ts: number;
+  to_ts: number;
+  lod_ms: number;
+  tile_ms: number;
+  band: string;
+  value_mode: string;
+  raw_counts?: Record<string, unknown>;
+  size_stats?: Record<string, unknown>;
+  tiles?: Record<string, unknown>;
+  possible_zero_causes?: string[];
+  errors?: string[];
+}
+
+export async function getHeatmapDebug(
+  params: {
+    token_id: string;
+    from_ts: number;
+    to_ts: number;
+    lod?: 250 | 1000 | 5000;
+    tile_ms?: 5000 | 10000 | 15000;
+    band?: 'FULL' | 'BEST_5' | 'BEST_10' | 'BEST_20';
+    value_mode?: 'max' | 'sum' | 'last';
+    sample_tiles?: number;
+  },
+  signal?: AbortSignal
+): Promise<HeatmapDebugResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set('token_id', params.token_id);
+  searchParams.set('from_ts', String(params.from_ts));
+  searchParams.set('to_ts', String(params.to_ts));
+  if (params.lod) searchParams.set('lod', String(params.lod));
+  if (params.tile_ms) searchParams.set('tile_ms', String(params.tile_ms));
+  if (params.band) searchParams.set('band', params.band);
+  if (params.value_mode) searchParams.set('value_mode', params.value_mode);
+  if (params.sample_tiles) searchParams.set('sample_tiles', String(params.sample_tiles));
+
+  return fetchApi<HeatmapDebugResponse>(`/v1/heatmap/debug?${searchParams.toString()}`, { signal });
 }
 
 // =============================================================================

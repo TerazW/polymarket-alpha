@@ -212,7 +212,9 @@ class HeatmapTileGenerator:
         price_min: float,
         price_max: float,
         tick_size: float,
-        side: str = None
+        side: str = None,
+        value_mode: str = "max",
+        return_debug: bool = False,
     ) -> Tuple[np.ndarray, List[float], List[int]]:
         """
         Build 2D matrix from book data.
@@ -259,6 +261,9 @@ class HeatmapTileGenerator:
         skipped_price = 0
         filled = 0
 
+        if value_mode not in {"max", "sum", "last"}:
+            raise ValueError(f"Unsupported value_mode: {value_mode}")
+
         for row in data:
             if side and row['side'] != side:
                 skipped_side += 1
@@ -287,7 +292,12 @@ class HeatmapTileGenerator:
                 continue
 
             # Accumulate size (in case of multiple entries per bucket)
-            matrix[row_idx, col] = max(matrix[row_idx, col], size)
+            if value_mode == "sum":
+                matrix[row_idx, col] += size
+            elif value_mode == "last":
+                matrix[row_idx, col] = size
+            else:
+                matrix[row_idx, col] = max(matrix[row_idx, col], size)
             filled += 1
 
         # Debug summary
@@ -298,6 +308,22 @@ class HeatmapTileGenerator:
 
         price_levels = [round(price_min_aligned + i * tick_size, 4) for i in range(n_prices)]
         time_buckets = [from_ts + i * lod_ms for i in range(n_cols)]
+
+        if return_debug:
+            debug_info = {
+                "price_min_aligned": price_min_aligned,
+                "price_max_aligned": price_max_aligned,
+                "n_prices": n_prices,
+                "n_cols": n_cols,
+                "filled": filled,
+                "skipped_side": skipped_side,
+                "skipped_col": skipped_col,
+                "skipped_price": skipped_price,
+                "nonzero": nonzero,
+                "max": max_val,
+                "value_mode": value_mode,
+            }
+            return matrix, price_levels, time_buckets, debug_info
 
         return matrix, price_levels, time_buckets
 
@@ -374,7 +400,8 @@ class HeatmapTileGenerator:
         lod_ms: int = 250,
         tile_ms: int = 10000,
         band: TileBand = TileBand.FULL,
-        side: str = None
+        side: str = None,
+        value_mode: str = "max",
     ) -> Optional[HeatmapTile]:
         """
         Generate a single heatmap tile.
@@ -433,7 +460,7 @@ class HeatmapTileGenerator:
 
         # Build matrix
         matrix, price_levels, time_buckets = self._build_matrix(
-            data, t_start, t_end, lod_ms, price_min, price_max, tick_size, side
+            data, t_start, t_end, lod_ms, price_min, price_max, tick_size, side, value_mode=value_mode
         )
 
         if matrix.size == 0:
@@ -482,7 +509,8 @@ class HeatmapTileGenerator:
         lod_ms: int = 250,
         tile_ms: int = 10000,
         band: TileBand = TileBand.FULL,
-        side: str = None
+        side: str = None,
+        value_mode: str = "max",
     ) -> List[HeatmapTile]:
         """
         Generate tiles covering a time range.
@@ -516,7 +544,8 @@ class HeatmapTileGenerator:
                 lod_ms=lod_ms,
                 tile_ms=tile_ms,
                 band=band,
-                side=side
+                side=side,
+                value_mode=value_mode,
             )
 
             if tile:
@@ -623,7 +652,8 @@ class HeatmapTileGenerator:
         lod_ms: int = 250,
         tile_ms: int = 10000,
         band: TileBand = TileBand.FULL,
-        cache: bool = True
+        cache: bool = True,
+        value_mode: str = "max",
     ) -> List[HeatmapTile]:
         """
         Get tiles from cache or generate on demand.
@@ -658,7 +688,8 @@ class HeatmapTileGenerator:
                     t_end=t_end,
                     lod_ms=lod_ms,
                     tile_ms=tile_ms,
-                    band=band
+                    band=band,
+                    value_mode=value_mode,
                 )
 
                 if tile and cache:

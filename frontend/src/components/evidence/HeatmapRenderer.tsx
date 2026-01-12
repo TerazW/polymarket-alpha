@@ -16,7 +16,7 @@
  * - Per-tile clipValue still used for depth decoding (as encoded)
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import type { HeatmapTileMeta } from '@/lib/api';
 
 interface HeatmapRendererProps {
@@ -31,6 +31,26 @@ interface HeatmapRendererProps {
   height: number;
   currentTime: number;
   onReady?: () => void;
+  renderConfig?: HeatmapRenderConfig;
+  debugOptions?: HeatmapDebugOptions;
+}
+
+type NormalizeMode = 'log1p' | 'sqrt' | 'linear';
+type HoldMode = 'hold' | 'decay' | 'off';
+
+interface HeatmapRenderConfig {
+  normalizeMode: NormalizeMode;
+  clipPercentile: number;
+  rollingWindowSec: number;
+  holdMode: HoldMode;
+  decayHalfLifeSec: number;
+  binaryMode: boolean;
+}
+
+interface HeatmapDebugOptions {
+  enabled: boolean;
+  showTileBounds: boolean;
+  showTileLabels: boolean;
 }
 
 // Decoded tile data in memory
@@ -219,16 +239,33 @@ function decodeDepth(value: number, clipValue: number, scale: string): number {
  * Calculate intensity using log-based mapping for Bookmap-style visualization
  * This handles the heavy-tailed distribution of order book depth
  */
-function calculateIntensity(depth: number, clipValue: number): number {
-  if (depth <= 0) return 0;
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = (sorted.length - 1) * p;
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (idx - lower);
+}
 
-  // Use log-based intensity mapping with gamma correction
-  // This spreads out the values better than linear mapping
-  const logIntensity = Math.log1p(depth) / Math.log1p(clipValue);
+function normalizeDepth(depth: number, clipValue: number, mode: NormalizeMode): number {
+  if (depth <= 0 || clipValue <= 0) return 0;
+  const clipped = Math.min(depth, clipValue);
+  const ratio = clipped / clipValue;
 
-  // Apply gamma correction (0.6) for better visual perception
-  const gamma = 0.6;
-  return Math.min(1, Math.pow(logIntensity, gamma));
+  if (mode === 'sqrt') {
+    return Math.sqrt(ratio);
+  }
+  if (mode === 'linear') {
+    return ratio;
+  }
+  // log1p default
+  return Math.log1p(clipped) / Math.log1p(clipValue);
+}
+
+function applyGamma(intensity: number, gamma: number): number {
+  return Math.min(1, Math.pow(intensity, gamma));
 }
 
 export function HeatmapRenderer({
@@ -243,10 +280,34 @@ export function HeatmapRenderer({
   height,
   currentTime,
   onReady,
+  renderConfig,
+  debugOptions,
 }: HeatmapRendererProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const offscreenRef = useRef<HTMLCanvasElement | null>(null);
   const [decodedTiles, setDecodedTiles] = useState<DecodedTile[]>([]);
   const [loading, setLoading] = useState(true);
+  const decodeCacheRef = useRef<Map<string, Uint16Array>>(new Map());
+  const carryOverCache = useRef<{
+    side: 'bid' | 'ask';
+    rangeKey: string;
+    values: Float32Array;
+  } | null>(null);
+
+  const config: HeatmapRenderConfig = {
+    normalizeMode: renderConfig?.normalizeMode ?? 'log1p',
+    clipPercentile: renderConfig?.clipPercentile ?? 0.99,
+    rollingWindowSec: renderConfig?.rollingWindowSec ?? 0,
+    holdMode: renderConfig?.holdMode ?? 'hold',
+    decayHalfLifeSec: renderConfig?.decayHalfLifeSec ?? 15,
+    binaryMode: renderConfig?.binaryMode ?? false,
+  };
+
+  const debugConfig: HeatmapDebugOptions = {
+    enabled: debugOptions?.enabled ?? false,
+    showTileBounds: debugOptions?.showTileBounds ?? false,
+    showTileLabels: debugOptions?.showTileLabels ?? false,
+  };
 
   // Decode tiles when they change
   useEffect(() => {
@@ -279,7 +340,14 @@ export function HeatmapRenderer({
           break;
         }
 
-        const matrix = await decodeTilePayload(tile);
+        const cacheKey = `${tile.tile_id}:${tile.checksum?.value ?? tile.payload_b64?.length}:${side}`;
+        let matrix = decodeCacheRef.current.get(cacheKey) || null;
+        if (!matrix) {
+          matrix = await decodeTilePayload(tile);
+          if (matrix) {
+            decodeCacheRef.current.set(cacheKey, matrix);
+          }
+        }
         if (matrix) {
           decoded.push({
             tile,
@@ -314,6 +382,57 @@ export function HeatmapRenderer({
     };
   }, [bidTiles, askTiles, onReady]);
 
+  const normalization = useMemo(() => {
+    const cutoffMs = config.rollingWindowSec > 0
+      ? windowEnd - config.rollingWindowSec * 1000
+      : Number.NEGATIVE_INFINITY;
+    const samplesBySide: Record<'bid' | 'ask', number[]> = { bid: [], ask: [] };
+    const fallbackClipBySide: Record<'bid' | 'ask', number[]> = { bid: [], ask: [] };
+    const maxSamples = 120000;
+    const strideTarget = 8000;
+
+    for (const { tile, matrix, side } of decodedTiles) {
+      if (tile.t_end < cutoffMs) continue;
+      const tileClipValue = tile.encoding.clip_value || 10000;
+      fallbackClipBySide[side].push(tileClipValue);
+      if (samplesBySide[side].length >= maxSamples) continue;
+
+      const stride = Math.max(1, Math.floor(matrix.length / strideTarget));
+      for (let i = 0; i < matrix.length; i += stride) {
+        const raw = matrix[i];
+        if (raw === 0) continue;
+        const depth = decodeDepth(raw, tileClipValue, tile.encoding.scale);
+        if (depth > 0) {
+          samplesBySide[side].push(depth);
+          if (samplesBySide[side].length >= maxSamples) break;
+        }
+      }
+    }
+
+    const buildStats = (side: 'bid' | 'ask') => {
+      const samples = samplesBySide[side];
+      const fallbackClip = fallbackClipBySide[side].length > 0
+        ? Math.max(...fallbackClipBySide[side])
+        : 1;
+      const clip = samples.length > 0
+        ? percentile(samples, config.clipPercentile)
+        : fallbackClip;
+      return {
+        clip: Math.max(1, clip || fallbackClip),
+        p90: samples.length > 0 ? percentile(samples, 0.9) : 0,
+        p99: samples.length > 0 ? percentile(samples, 0.99) : 0,
+        max: samples.length > 0 ? Math.max(...samples) : 0,
+        sampleCount: samples.length,
+        cutoffMs: cutoffMs === Number.NEGATIVE_INFINITY ? null : cutoffMs,
+      };
+    };
+
+    return {
+      bid: buildStats('bid'),
+      ask: buildStats('ask'),
+    };
+  }, [decodedTiles, windowEnd, config.clipPercentile, config.rollingWindowSec]);
+
   // Render heatmap
   const renderHeatmap = useCallback(() => {
     console.log('[HeatmapRender] Starting render:', {
@@ -331,7 +450,12 @@ export function HeatmapRenderer({
       return;
     }
 
-    const ctx = canvas.getContext('2d');
+    const offscreen = offscreenRef.current || document.createElement('canvas');
+    offscreenRef.current = offscreen;
+    if (offscreen.width !== width) offscreen.width = width;
+    if (offscreen.height !== height) offscreen.height = height;
+
+    const ctx = offscreen.getContext('2d');
     if (!ctx) {
       console.warn('[HeatmapRender] No canvas context!');
       return;
@@ -341,10 +465,17 @@ export function HeatmapRenderer({
     ctx.fillStyle = '#1f2937'; // gray-800
     ctx.fillRect(0, 0, width, height);
 
+    carryOverCache.current = null;
+
     if (decodedTiles.length === 0) {
       // No tiles - show placeholder
       console.log('[HeatmapRender] No decoded tiles, showing placeholder');
       renderPlaceholder(ctx, width, height);
+      const outputCtx = canvas.getContext('2d');
+      if (outputCtx) {
+        outputCtx.clearRect(0, 0, width, height);
+        outputCtx.drawImage(offscreen, 0, 0);
+      }
       return;
     }
 
@@ -352,22 +483,37 @@ export function HeatmapRenderer({
     const priceRange = priceMax - priceMin;
     console.log('[HeatmapRender] Ranges:', { timeRange, priceRange });
 
-    // v5.41: Calculate global clipValue across all tiles for consistent intensity mapping
-    // This prevents banding artifacts at tile boundaries where different tiles
-    // might have different clip_values
-    const globalClip = Math.max(
-      ...decodedTiles.map(t => t.tile.encoding.clip_value || 10000)
-    );
+    if (timeRange <= 0 || priceRange <= 0) {
+      console.warn('[HeatmapRender] Invalid ranges, showing placeholder');
+      renderPlaceholder(ctx, width, height);
+      const outputCtx = canvas.getContext('2d');
+      if (outputCtx) {
+        outputCtx.clearRect(0, 0, width, height);
+        outputCtx.drawImage(offscreen, 0, 0);
+      }
+      return;
+    }
+
+    const clipBySide = {
+      bid: normalization.bid.clip,
+      ask: normalization.ask.clip,
+    };
 
     // Enable additive blending for smoother overlapping
     ctx.globalCompositeOperation = 'lighter';
 
+    const sortedTiles = [...decodedTiles].sort((a, b) => {
+      if (a.side !== b.side) return a.side === 'bid' ? -1 : 1;
+      return a.tile.t_start - b.tile.t_start;
+    });
+
     // Render each tile
     let tileIndex = 0;
-    for (const { tile, matrix, rows, cols, side } of decodedTiles) {
+    for (const { tile, matrix, rows, cols, side } of sortedTiles) {
       // Per-tile clipValue for decoding (data was encoded with this value)
       const tileClipValue = tile.encoding.clip_value || 10000;
       const scale = tile.encoding.scale;
+      const sideClip = clipBySide[side];
 
       // Calculate tile position in canvas
       const tileX = ((tile.t_start - windowStart) / timeRange) * width;
@@ -410,7 +556,7 @@ export function HeatmapRenderer({
           tileTime: { t_start: tile.t_start, t_end: tile.t_end },
           tilePrice: { tilePriceMin, tilePriceMax },
           windowPrice: { priceMin, priceMax },
-          encoding: { scale, tileClipValue, globalClip },
+          encoding: { scale, tileClipValue, sideClip, mode: config.normalizeMode },
           nonZeroCount,
           samplePositions,
         });
@@ -425,29 +571,58 @@ export function HeatmapRenderer({
         : { r: 239, g: 68, b: 68 };  // red-500
 
       // Render each cell
+      const decayFactor = config.holdMode === 'decay' && config.decayHalfLifeSec > 0
+        ? Math.exp(-tile.lod_ms / (config.decayHalfLifeSec * 1000))
+        : 1;
+
+      let carryOver: Float32Array | null = null;
+      if (config.holdMode !== 'off' && carryOverCache.current?.side === side && carryOverCache.current?.rangeKey === `${tilePriceMin}-${tilePriceMax}-${rows}-${cols}`) {
+        carryOver = carryOverCache.current?.values || null;
+      }
+
+      const lastDepthByRow = carryOver ? new Float32Array(carryOver) : new Float32Array(rows);
+
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < cols; col++) {
           const idx = row * cols + col;
           const value = matrix[idx];
+          let depth = 0;
 
-          if (value === 0) continue;
+          if (value > 0) {
+            depth = decodeDepth(value, tileClipValue, scale);
+            lastDepthByRow[row] = depth;
+          } else if (config.holdMode === 'hold') {
+            depth = lastDepthByRow[row];
+          } else if (config.holdMode === 'decay') {
+            lastDepthByRow[row] *= decayFactor;
+            depth = lastDepthByRow[row];
+          }
 
-          // Decode depth using tile's clipValue (as encoded)
-          const depth = decodeDepth(value, tileClipValue, scale);
-          // v5.41: Use globalClip for intensity to ensure consistent mapping across tiles
-          const intensity = calculateIntensity(depth, globalClip);
+          if (depth <= 0) continue;
 
-          if (intensity < 0.02) continue; // Skip nearly invisible cells
+          const intensityBase = config.binaryMode
+            ? 1
+            : normalizeDepth(depth, sideClip, config.normalizeMode);
+          const intensity = applyGamma(intensityBase, 0.7);
+
+          if (intensity < 0.005) continue;
 
           const x = tileX + col * cellWidth;
           const y = tileY + (rows - row - 1) * cellHeight;
 
-          // Apply intensity to color with alpha
-          const alpha = intensity * 0.85;
+          const alpha = Math.min(0.95, intensity * 0.9);
           ctx.fillStyle = `rgba(${baseColor.r}, ${baseColor.g}, ${baseColor.b}, ${alpha})`;
 
           ctx.fillRect(x, y, cellWidth, cellHeight);
         }
+      }
+
+      if (config.holdMode !== 'off') {
+        carryOverCache.current = {
+          side,
+          rangeKey: `${tilePriceMin}-${tilePriceMax}-${rows}-${cols}`,
+          values: lastDepthByRow,
+        };
       }
     }
 
@@ -466,7 +641,87 @@ export function HeatmapRenderer({
       ctx.stroke();
     }
 
-  }, [decodedTiles, width, height, windowStart, windowEnd, priceMin, priceMax, tickSize]);
+    if (debugConfig.enabled) {
+      const sampleTile = sortedTiles[0];
+      const sampleCellWidth = sampleTile
+        ? (((sampleTile.tile.t_end - sampleTile.tile.t_start) / timeRange) * width) / sampleTile.cols
+        : 0;
+      const sampleCellHeight = sampleTile
+        ? (((sampleTile.tile.price_max - sampleTile.tile.price_min) / priceRange) * height) / sampleTile.rows
+        : 0;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = 'rgba(17, 24, 39, 0.85)';
+      ctx.fillRect(8, 8, 260, 110);
+      ctx.fillStyle = '#e5e7eb';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const lines = [
+        `window: ${windowStart} -> ${windowEnd}`,
+        `price: ${priceMin.toFixed(4)} -> ${priceMax.toFixed(4)}`,
+        `tiles: ${sortedTiles.length} | cell: ${sampleCellWidth.toFixed(2)}x${sampleCellHeight.toFixed(2)}`,
+        `clip(bid/ask): ${clipBySide.bid.toFixed(2)} / ${clipBySide.ask.toFixed(2)}`,
+        `mode: ${config.normalizeMode} | pctl: ${config.clipPercentile}`,
+        `roll: ${config.rollingWindowSec}s | hold: ${config.holdMode}`,
+      ];
+      lines.forEach((line, idx) => {
+        ctx.fillText(line, 14, 14 + idx * 14);
+      });
+
+      if (debugConfig.showTileBounds) {
+        for (const { tile, rows, cols, side } of sortedTiles) {
+          const tileX = ((tile.t_start - windowStart) / timeRange) * width;
+          const tileWidth = ((tile.t_end - tile.t_start) / timeRange) * width;
+          const tileY = height - ((tile.price_max - priceMin) / priceRange) * height;
+          const tileHeight = ((tile.price_max - tile.price_min) / priceRange) * height;
+
+          ctx.strokeStyle = side === 'bid'
+            ? 'rgba(34, 197, 94, 0.6)'
+            : 'rgba(239, 68, 68, 0.6)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(tileX, tileY, tileWidth, tileHeight);
+
+          if (debugConfig.showTileLabels) {
+            ctx.fillStyle = 'rgba(243, 244, 246, 0.9)';
+            ctx.fillText(
+              `${side} ${tile.t_start}..${tile.t_end} (${rows}x${cols})`,
+              tileX + 4,
+              tileY + 4
+            );
+          }
+        }
+      }
+      ctx.restore();
+    }
+
+    const outputCtx = canvas.getContext('2d');
+    if (outputCtx) {
+      outputCtx.clearRect(0, 0, width, height);
+      outputCtx.drawImage(offscreen, 0, 0);
+    }
+
+  }, [
+    decodedTiles,
+    normalization,
+    width,
+    height,
+    windowStart,
+    windowEnd,
+    priceMin,
+    priceMax,
+    tickSize,
+    config.normalizeMode,
+    config.clipPercentile,
+    config.rollingWindowSec,
+    config.holdMode,
+    config.decayHalfLifeSec,
+    config.binaryMode,
+    debugConfig.enabled,
+    debugConfig.showTileBounds,
+    debugConfig.showTileLabels,
+  ]);
 
   // Re-render when dependencies change
   useEffect(() => {

@@ -3,7 +3,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import type { EvidenceResponse, ShockEvent, ReactionEvent, LeadingEvent, StateChange } from '@/types/api';
 import { REACTION_COLORS, STATE_COLORS } from '@/types/api';
-import { getHeatmapTiles, type HeatmapTileMeta } from '@/lib/api';
+import { getHeatmapTiles, getHeatmapDebug, type HeatmapTileMeta } from '@/lib/api';
 import { HeatmapRenderer } from './HeatmapRenderer';
 import { HashVerificationBadge } from './HashVerification';
 import TileStalenessIndicator from './TileStalenessIndicator';
@@ -37,12 +37,27 @@ export function EvidencePlayer({
 
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const debugStatsKeyRef = useRef<string>('');
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
   // v5.40: Separate bid and ask tiles for Bookmap-style rendering
   const [bidTiles, setBidTiles] = useState<HeatmapTileMeta[]>([]);
   const [askTiles, setAskTiles] = useState<HeatmapTileMeta[]>([]);
   const [tilesLoading, setTilesLoading] = useState(false);
   const [realtimeEventCount, setRealtimeEventCount] = useState(0);
+
+  const isDev = process.env.NODE_ENV !== 'production';
+  const [useSyntheticTiles, setUseSyntheticTiles] = useState(false);
+  const [showDebugOverlay, setShowDebugOverlay] = useState(false);
+  const [showTileBounds, setShowTileBounds] = useState(false);
+  const [showTileLabels, setShowTileLabels] = useState(false);
+  const [binaryMode, setBinaryMode] = useState(false);
+  const [normalizeMode, setNormalizeMode] = useState<'log1p' | 'sqrt' | 'linear'>('log1p');
+  const [clipPercentile, setClipPercentile] = useState(0.99);
+  const [rollingWindowSec, setRollingWindowSec] = useState(0);
+  const [holdMode, setHoldMode] = useState<'hold' | 'decay' | 'off'>('hold');
+  const [decayHalfLifeSec, setDecayHalfLifeSec] = useState(15);
+  const [valueMode, setValueMode] = useState<'max' | 'sum' | 'last'>('max');
+  const [logDebugStats, setLogDebugStats] = useState(isDev);
 
   // Real-time WebSocket stream (optional)
   const { isConnected, connectionState } = useTokenStream(
@@ -105,6 +120,8 @@ export function EvidencePlayer({
             from_ts: evidence.window_start,
             to_ts: effectiveToTs,
             lod: 250,
+            value_mode: valueMode,
+            synthetic: useSyntheticTiles,
           },
           abortController.signal
         );
@@ -140,7 +157,71 @@ export function EvidencePlayer({
     return () => {
       abortController.abort();
     };
-  }, [evidence.token_id, evidence.window_start, evidence.window_end]);
+  }, [evidence.token_id, evidence.window_start, evidence.window_end, useSyntheticTiles, valueMode]);
+
+  // DEV: Fetch backend heatmap debug stats once per window
+  useEffect(() => {
+    if (!isDev || !logDebugStats || useSyntheticTiles) return;
+
+    const key = [
+      evidence.token_id,
+      evidence.window_start,
+      evidence.window_end,
+      valueMode,
+    ].join('|');
+    if (debugStatsKeyRef.current === key) return;
+    debugStatsKeyRef.current = key;
+
+    const abortController = new AbortController();
+    getHeatmapDebug(
+      {
+        token_id: evidence.token_id,
+        from_ts: evidence.window_start,
+        to_ts: evidence.window_end,
+        lod: 250,
+        tile_ms: 10000,
+        value_mode: valueMode,
+        sample_tiles: 3,
+      },
+      abortController.signal
+    ).then((data) => {
+      console.log('[HeatmapDebug] Summary', {
+        rows: data.raw_counts,
+        size_stats: data.size_stats,
+        tile_stats: data.tiles,
+        normalize: {
+          mode: normalizeMode,
+          clipPercentile,
+          rollingWindowSec,
+          holdMode,
+          decayHalfLifeSec,
+          binaryMode,
+        },
+        possible_zero_causes: data.possible_zero_causes,
+        errors: data.errors,
+      });
+    }).catch((err) => {
+      if (!abortController.signal.aborted) {
+        console.warn('[HeatmapDebug] Failed to fetch debug stats:', err);
+      }
+    });
+
+    return () => abortController.abort();
+  }, [
+    isDev,
+    logDebugStats,
+    useSyntheticTiles,
+    evidence.token_id,
+    evidence.window_start,
+    evidence.window_end,
+    valueMode,
+    normalizeMode,
+    clipPercentile,
+    rollingWindowSec,
+    holdMode,
+    decayHalfLifeSec,
+    binaryMode,
+  ]);
 
   // Resize observer
   useEffect(() => {
@@ -267,6 +348,19 @@ export function EvidencePlayer({
           width={dimensions.width}
           height={dimensions.height}
           currentTime={currentTime}
+          renderConfig={{
+            normalizeMode,
+            clipPercentile,
+            rollingWindowSec,
+            holdMode,
+            decayHalfLifeSec,
+            binaryMode,
+          }}
+          debugOptions={{
+            enabled: showDebugOverlay,
+            showTileBounds,
+            showTileLabels,
+          }}
         />
 
         {/* Overlay layer (events, anchors) */}
@@ -281,6 +375,108 @@ export function EvidencePlayer({
         {tilesLoading && (
           <div className="absolute top-2 left-2 px-2 py-1 bg-blue-600/80 rounded text-xs">
             Loading tiles...
+          </div>
+        )}
+
+        {/* DEV: Heatmap debug controls */}
+        {isDev && (
+          <div
+            className="absolute top-2 right-14 bg-gray-900/90 border border-gray-700 rounded p-2 text-xs space-y-1 pointer-events-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="font-semibold text-gray-300">Heatmap Debug</div>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={useSyntheticTiles} onChange={(e) => setUseSyntheticTiles(e.target.checked)} />
+              <span>Synthetic</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={showDebugOverlay} onChange={(e) => setShowDebugOverlay(e.target.checked)} />
+              <span>Debug overlay</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={showTileBounds} onChange={(e) => setShowTileBounds(e.target.checked)} />
+              <span>Tile bounds</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={showTileLabels} onChange={(e) => setShowTileLabels(e.target.checked)} />
+              <span>Tile labels</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={binaryMode} onChange={(e) => setBinaryMode(e.target.checked)} />
+              <span>Binary</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={logDebugStats} onChange={(e) => setLogDebugStats(e.target.checked)} />
+              <span>Log stats</span>
+            </label>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400">Normalize</span>
+              <select
+                className="bg-gray-800 border border-gray-700 rounded px-1"
+                value={normalizeMode}
+                onChange={(e) => setNormalizeMode(e.target.value as typeof normalizeMode)}
+              >
+                <option value="log1p">log1p</option>
+                <option value="sqrt">sqrt</option>
+                <option value="linear">linear</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400">Clip pctl</span>
+              <input
+                className="w-16 bg-gray-800 border border-gray-700 rounded px-1"
+                type="number"
+                step="0.001"
+                min="0.9"
+                max="0.999"
+                value={clipPercentile}
+                onChange={(e) => setClipPercentile(parseFloat(e.target.value) || 0.99)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400">Rolling s</span>
+              <input
+                className="w-14 bg-gray-800 border border-gray-700 rounded px-1"
+                type="number"
+                min="0"
+                value={rollingWindowSec}
+                onChange={(e) => setRollingWindowSec(parseInt(e.target.value, 10) || 0)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400">Hold</span>
+              <select
+                className="bg-gray-800 border border-gray-700 rounded px-1"
+                value={holdMode}
+                onChange={(e) => setHoldMode(e.target.value as typeof holdMode)}
+              >
+                <option value="hold">hold</option>
+                <option value="decay">decay</option>
+                <option value="off">off</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400">Decay s</span>
+              <input
+                className="w-14 bg-gray-800 border border-gray-700 rounded px-1"
+                type="number"
+                min="1"
+                value={decayHalfLifeSec}
+                onChange={(e) => setDecayHalfLifeSec(parseInt(e.target.value, 10) || 15)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400">Value</span>
+              <select
+                className="bg-gray-800 border border-gray-700 rounded px-1"
+                value={valueMode}
+                onChange={(e) => setValueMode(e.target.value as typeof valueMode)}
+              >
+                <option value="max">max</option>
+                <option value="sum">sum</option>
+                <option value="last">last</option>
+              </select>
+            </div>
           </div>
         )}
 
