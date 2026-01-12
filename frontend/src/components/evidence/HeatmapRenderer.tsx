@@ -378,22 +378,44 @@ export function HeatmapRenderer({
       const tileY = height - ((tilePriceMax - priceMin) / priceRange) * height;
       const tileHeight = ((tilePriceMax - tilePriceMin) / priceRange) * height;
 
+      // Calculate cell dimensions (moved up for logging)
+      const cellWidth = tileWidth / cols;
+      const cellHeight = tileHeight / rows;
+
       // Log first few tiles for debugging
       if (tileIndex < 3) {
+        // Count non-zero values and find sample positions
+        let nonZeroCount = 0;
+        const samplePositions: string[] = [];
+        for (let r = 0; r < rows && samplePositions.length < 5; r++) {
+          for (let c = 0; c < cols && samplePositions.length < 5; c++) {
+            if (matrix[r * cols + c] > 0) {
+              nonZeroCount++;
+              if (samplePositions.length < 5) {
+                samplePositions.push(`[row=${r},col=${c}]=>${matrix[r * cols + c]}`);
+              }
+            }
+          }
+        }
+        // Continue counting rest
+        for (let i = rows * cols - 1; i >= 0; i--) {
+          if (matrix[i] > 0) nonZeroCount++;
+        }
+        // Subtract double-counted first 5
+        nonZeroCount = Math.max(0, nonZeroCount - samplePositions.length);
+
         console.log(`[HeatmapRender] Tile ${tileIndex} (${side}):`, {
-          position: { tileX, tileY, tileWidth, tileHeight },
+          position: { tileX: tileX.toFixed(1), tileY: tileY.toFixed(1), tileWidth: tileWidth.toFixed(1), tileHeight: tileHeight.toFixed(1) },
+          cells: { cellWidth: cellWidth.toFixed(2), cellHeight: cellHeight.toFixed(2), rows, cols },
           tileTime: { t_start: tile.t_start, t_end: tile.t_end },
           tilePrice: { tilePriceMin, tilePriceMax },
           windowPrice: { priceMin, priceMax },
-          encoding: { scale, tileClipValue },
-          matrixSize: matrix.length,
+          encoding: { scale, tileClipValue, globalClip },
+          nonZeroCount,
+          samplePositions,
         });
       }
       tileIndex++;
-
-      // Calculate cell dimensions
-      const cellWidth = tileWidth / cols;
-      const cellHeight = tileHeight / rows;
 
       // v5.40: Color based on side, not midPrice
       // Bid = green (buy side liquidity)
