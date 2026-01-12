@@ -230,21 +230,27 @@ class HeatmapTileGenerator:
         Returns:
             (matrix, price_levels, time_buckets)
         """
-        # Calculate dimensions
+        # FIX: Align price_min/price_max to tick boundaries
+        # This ensures price_to_row keys match the tick-rounded prices from data lookup
+        price_min_aligned = round(round(price_min / tick_size) * tick_size, 4)
+        price_max_aligned = round(round(price_max / tick_size) * tick_size, 4)
+
+        # Calculate dimensions using aligned prices
         n_cols = max(1, (to_ts - from_ts) // lod_ms)
-        n_prices = max(1, int(round((price_max - price_min) / tick_size)) + 1)
+        n_prices = max(1, int(round((price_max_aligned - price_min_aligned) / tick_size)) + 1)
 
         print(f"[MATRIX_DEBUG] Building matrix: from_ts={from_ts}, to_ts={to_ts}, lod_ms={lod_ms}")
-        print(f"[MATRIX_DEBUG] Dimensions: n_prices={n_prices}, n_cols={n_cols}, price_range={price_min}-{price_max}, tick={tick_size}")
+        print(f"[MATRIX_DEBUG] Raw price range: {price_min}-{price_max}, aligned: {price_min_aligned}-{price_max_aligned}")
+        print(f"[MATRIX_DEBUG] Dimensions: n_prices={n_prices}, n_cols={n_cols}, tick={tick_size}")
         print(f"[MATRIX_DEBUG] Data rows received: {len(data)}, side filter: {side}")
 
         # Initialize matrix
         matrix = np.zeros((n_prices, n_cols), dtype=np.float64)
 
-        # Build price and time indexes
+        # Build price and time indexes using ALIGNED price_min
         price_to_row = {}
         for i in range(n_prices):
-            price = round(price_min + i * tick_size, 4)
+            price = round(price_min_aligned + i * tick_size, 4)
             price_to_row[price] = i
 
         # Fill matrix with debug counters
@@ -290,7 +296,7 @@ class HeatmapTileGenerator:
         print(f"[MATRIX_DEBUG] Result: filled={filled}, skipped_side={skipped_side}, skipped_col={skipped_col}, skipped_price={skipped_price}")
         print(f"[MATRIX_DEBUG] Matrix stats: nonzero={nonzero}, max={max_val}")
 
-        price_levels = [round(price_min + i * tick_size, 4) for i in range(n_prices)]
+        price_levels = [round(price_min_aligned + i * tick_size, 4) for i in range(n_prices)]
         time_buckets = [from_ts + i * lod_ms for i in range(n_cols)]
 
         return matrix, price_levels, time_buckets
@@ -401,8 +407,14 @@ class HeatmapTileGenerator:
         if not prices:
             return None
 
-        price_min = min(prices)
-        price_max = max(prices)
+        price_min_raw = min(prices)
+        price_max_raw = max(prices)
+
+        # Align prices to tick boundaries (must match _build_matrix alignment)
+        price_min = round(round(price_min_raw / tick_size) * tick_size, 4)
+        price_max = round(round(price_max_raw / tick_size) * tick_size, 4)
+
+        print(f"[TILE_DEBUG] generate_tile: raw prices={price_min_raw}-{price_max_raw}, aligned={price_min}-{price_max}")
 
         # Apply band filter
         if band == TileBand.BEST_5:
