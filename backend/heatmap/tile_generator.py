@@ -234,6 +234,10 @@ class HeatmapTileGenerator:
         n_cols = max(1, (to_ts - from_ts) // lod_ms)
         n_prices = max(1, int(round((price_max - price_min) / tick_size)) + 1)
 
+        print(f"[MATRIX_DEBUG] Building matrix: from_ts={from_ts}, to_ts={to_ts}, lod_ms={lod_ms}")
+        print(f"[MATRIX_DEBUG] Dimensions: n_prices={n_prices}, n_cols={n_cols}, price_range={price_min}-{price_max}, tick={tick_size}")
+        print(f"[MATRIX_DEBUG] Data rows received: {len(data)}, side filter: {side}")
+
         # Initialize matrix
         matrix = np.zeros((n_prices, n_cols), dtype=np.float64)
 
@@ -243,9 +247,15 @@ class HeatmapTileGenerator:
             price = round(price_min + i * tick_size, 4)
             price_to_row[price] = i
 
-        # Fill matrix
+        # Fill matrix with debug counters
+        skipped_side = 0
+        skipped_col = 0
+        skipped_price = 0
+        filled = 0
+
         for row in data:
             if side and row['side'] != side:
+                skipped_side += 1
                 continue
 
             ts = int(row['bucket_ts_ms'])
@@ -255,16 +265,30 @@ class HeatmapTileGenerator:
             # Map to matrix coordinates
             col = (ts - from_ts) // lod_ms
             if col < 0 or col >= n_cols:
+                skipped_col += 1
+                # Debug: show first few skipped timestamps
+                if skipped_col <= 3:
+                    print(f"[MATRIX_DEBUG] Skipped col: ts={ts}, from_ts={from_ts}, col={col}, n_cols={n_cols}")
                 continue
 
             # Round price to tick
             price_rounded = round(round(price / tick_size) * tick_size, 4)
             row_idx = price_to_row.get(price_rounded)
             if row_idx is None:
+                skipped_price += 1
+                if skipped_price <= 3:
+                    print(f"[MATRIX_DEBUG] Skipped price: price={price}, rounded={price_rounded}, not in price_to_row")
                 continue
 
             # Accumulate size (in case of multiple entries per bucket)
             matrix[row_idx, col] = max(matrix[row_idx, col], size)
+            filled += 1
+
+        # Debug summary
+        nonzero = int(np.count_nonzero(matrix))
+        max_val = float(np.max(matrix)) if nonzero > 0 else 0
+        print(f"[MATRIX_DEBUG] Result: filled={filled}, skipped_side={skipped_side}, skipped_col={skipped_col}, skipped_price={skipped_price}")
+        print(f"[MATRIX_DEBUG] Matrix stats: nonzero={nonzero}, max={max_val}")
 
         price_levels = [round(price_min + i * tick_size, 4) for i in range(n_prices)]
         time_buckets = [from_ts + i * lod_ms for i in range(n_cols)]
