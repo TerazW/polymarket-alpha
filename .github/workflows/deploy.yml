@@ -3,8 +3,7 @@ name: Deploy to AWS
 on:
   push:
     branches:
-      - main        # Production deployment
-      - staging     # Staging deployment
+      - main        # Production deployment only
   workflow_dispatch:
     inputs:
       environment:

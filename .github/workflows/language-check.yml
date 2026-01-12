@@ -10,9 +10,9 @@ name: Language Governance
 
 on:
   push:
-    branches: [main, 'claude/**']
+    branches: [dev, main]
   pull_request:
-    branches: [main]
+    branches: [dev]
 
 env:
   PYTHON_VERSION: "3.11"
