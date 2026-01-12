@@ -115,8 +115,13 @@ async function decodeTilePayload(tile: HeatmapTileMeta): Promise<Uint16Array | n
       if (fzstd) {
         try {
           const decompressed = fzstd.decompress(bytes);
-          console.log('[TileDecode] zstd decompressed:', decompressed.length, 'bytes');
-          return new Uint16Array(decompressed.buffer);
+          console.log('[TileDecode] zstd decompressed:', decompressed.length, 'bytes, byteOffset:', decompressed.byteOffset);
+          // Slice buffer to get only the decompressed bytes
+          const arrayBuffer = decompressed.buffer.slice(
+            decompressed.byteOffset,
+            decompressed.byteOffset + decompressed.byteLength
+          );
+          return new Uint16Array(arrayBuffer);
         } catch (e) {
           console.warn('[TileDecode] zstd decompression failed:', e);
         }
@@ -135,9 +140,18 @@ async function decodeTilePayload(tile: HeatmapTileMeta): Promise<Uint16Array | n
       if (pako) {
         try {
           const decompressed = pako.inflate(bytes);
-          console.log('[TileDecode] zlib decompressed:', decompressed.length, 'bytes');
+          console.log('[TileDecode] zlib decompressed:', decompressed.length, 'bytes, byteOffset:', decompressed.byteOffset);
+
+          // IMPORTANT: Create Uint16Array correctly from decompressed data
+          // decompressed.buffer might be a larger shared buffer, so we need to
+          // slice it to get just the decompressed bytes
+          const arrayBuffer = decompressed.buffer.slice(
+            decompressed.byteOffset,
+            decompressed.byteOffset + decompressed.byteLength
+          );
+          const result = new Uint16Array(arrayBuffer);
+
           // Check for non-zero values
-          const result = new Uint16Array(decompressed.buffer);
           let nonZeroCount = 0;
           let maxValue = 0;
           for (let i = 0; i < result.length; i++) {
