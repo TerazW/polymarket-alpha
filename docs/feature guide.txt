@@ -1,0 +1,1097 @@
+feature guide
+# Belief Reaction System - 功能大全介紹
+
+> **重要聲明**: 本系統是證據觀察工具，不是交易工具。
+> 所有功能旨在呈現可觀察的市場微觀結構證據，而非提供交易建議。
+
+---
+
+## 目錄
+
+1. [核心概念](#1-核心概念)
+2. [數據收集與處理](#2-數據收集與處理)
+3. [事件檢測系統](#3-事件檢測系統)
+4. [反應分類引擎](#4-反應分類引擎)
+5. [信念狀態機](#5-信念狀態機)
+6. [可視化組件](#6-可視化組件)
+7. [告警系統](#7-告警系統)
+8. [證據回放](#8-證據回放)
+9. [數據完整性](#9-數據完整性)
+10. [API 功能](#10-api-功能)
+11. [實時流](#11-實時流)
+12. [高級功能](#12-高級功能)
+
+---
+
+## 1. 核心概念
+
+### 1.1 範式原則
+
+**"看存在没意义，看反应才有意义"**
+
+傳統訂單簿分析關注靜態快照。本系統關注動態反應。
+
+#### 為什麼這很重要？
+
+| 傳統方法 | 本系統方法 |
+|----------|------------|
+| 觀察「有多少深度」 | 觀察「深度如何反應」 |
+| 靜態快照 | 動態行為 |
+| 存在 ≠ 意圖 | 反應 = 可觀察證據 |
+
+### 1.2 證據優先
+
+系統的每個輸出都有可追溯的證據鏈：
+
+```
+原始數據 → 事件檢測 → 反應分類 → 狀態變化 → 告警
+```
+
+每個環節都有時間戳和可驗證的數據支持。
+
+### 1.3 確定性設計
+
+相同輸入始終產生相同輸出。這確保：
+- 回放結果可驗證
+- 審計可追溯
+- 行為可預測
+
+---
+
+## 2. 數據收集與處理
+
+### 2.1 數據源連接
+
+**支持的數據源**: Polymarket WebSocket
+
+**收集的數據類型**:
+- 訂單簿快照與增量更新
+- 成交記錄
+- 價格變動
+
+### 2.2 時間桶採樣
+
+所有數據按 **250 毫秒時間桶** 存儲，這是系統的基礎時間分辨率。
+
+```
+時間桶 = floor(timestamp / 250ms) * 250ms
+```
+
+**為什麼是 250ms？**
+- 足夠捕捉市場微觀結構變化
+- 平衡數據量和精度
+- 支持人類可理解的可視化
+
+### 2.3 價位追蹤
+
+每個價位獨立追蹤：
+
+| 屬性 | 說明 |
+|------|------|
+| `size_now` | 當前深度 |
+| `size_peak` | 歷史峰值 |
+| `size_history` | 最近 1 秒的深度歷史（用於計算基準） |
+| `hit_count` | 被成交次數 |
+| `refill_count` | 補單次數 |
+| `cancel_count` | 撤單次數 |
+
+### 2.4 基準計算
+
+**穩定基準深度** 使用中位數計算，而非瞬時值：
+
+```python
+baseline_size = median(size_history[t-500ms : t-100ms])
+```
+
+排除最近 100ms 是為了避免 Shock 本身影響基準。
+
+---
+
+## 3. 事件檢測系統
+
+### 3.1 Shock 檢測
+
+**觸發條件（滿足任一）**:
+
+1. **成交量觸發**:
+   - `trade_volume > baseline_size * 35%`
+
+2. **連續成交觸發**:
+   - 同一價位連續 3+ 筆成交
+   - 總量 > `baseline_size * 15%`
+
+**Shock 事件記錄**:
+```json
+{
+  "shock_id": "uuid",
+  "token_id": "0x...",
+  "price": 0.52,
+  "side": "bid",
+  "trade_volume": 1500,
+  "baseline_size": 4200,
+  "trigger_type": "volume",
+  "ts_start": 1704067200000
+}
+```
+
+### 3.2 雙窗口系統
+
+Shock 檢測後，系統在兩個時間窗口觀察反應：
+
+| 窗口 | 時長 | 用途 |
+|------|------|------|
+| **FAST** | 8 秒 | 即時反應檢測 |
+| **SLOW** | 30 秒 | 持續性確認 |
+
+**重要**: SLOW 窗口不是「趨勢確認」，而是觀察反應是否持續。
+
+### 3.3 領先事件檢測
+
+不依賴成交觸發的預警事件：
+
+#### PRE_SHOCK_PULL（無成交撤退）
+
+**檢測條件**:
+- 深度下降 > 30%
+- 附近無顯著成交
+- 持續 > 2 秒
+
+```json
+{
+  "event_type": "PRE_SHOCK_PULL",
+  "drop_ratio": 0.45,
+  "trade_volume_nearby": 50,
+  "is_anchor": true
+}
+```
+
+#### DEPTH_COLLAPSE（多價位同步塌陷）
+
+**檢測條件**:
+- 3+ 價位同時下降 > 40%
+- 時間標準差 < 500ms（同步）
+
+```json
+{
+  "event_type": "DEPTH_COLLAPSE",
+  "affected_levels": 5,
+  "time_std_ms": 120
+}
+```
+
+#### GRADUAL_THINNING（漸進撤退）
+
+**檢測條件**:
+- 10 秒窗口內總深度下降 > 25%
+- 成交驅動占比 < 30%（大部分是撤單）
+
+```json
+{
+  "event_type": "GRADUAL_THINNING",
+  "total_depth_before": 25000,
+  "total_depth_after": 18000,
+  "trade_driven_ratio": 0.15
+}
+```
+
+---
+
+## 4. 反應分類引擎
+
+### 4.1 分類優先級
+
+反應按優先級順序檢查（先檢查優先級高的）：
+
+```
+1. VACUUM   - 最高優先級
+2. SWEEP
+3. CHASE
+4. PULL
+5. HOLD
+6. DELAYED
+7. NO_IMPACT - 最低優先級
+```
+
+### 4.2 各反應類型詳解
+
+#### VACUUM（流動性真空）
+
+**條件**:
+- 最低流動性 < `baseline * 2%`
+- 真空持續時間 > 3000ms
+
+**觀察到的現象**: 深度幾乎完全消失，且長時間不恢復。
+
+```json
+{
+  "reaction_type": "VACUUM",
+  "min_liquidity": 50,
+  "vacuum_duration_ms": 5200,
+  "drop_ratio": 0.98
+}
+```
+
+#### SWEEP（多檔被清）
+
+**條件**:
+- 連續 2+ 價位流動性被移除
+- 每檔下降 > 50%
+
+**觀察到的現象**: 成交連續清除多個價位的流動性。
+
+```json
+{
+  "reaction_type": "SWEEP",
+  "shift_ticks": 3,
+  "drop_ratio": 0.75
+}
+```
+
+#### CHASE（價格遷移）
+
+**條件**:
+- 原價位流動性未恢復
+- 偏移 2+ ticks 處出現新流動性
+- `refill_ratio > 50%`（在新位置）
+
+**觀察到的現象**: 流動性「逃離」到其他價位。
+
+```json
+{
+  "reaction_type": "CHASE",
+  "shift_ticks": 3,
+  "refill_ratio": 0.65,
+  "price_shift": 0.03
+}
+```
+
+#### PULL（撤單退出）
+
+**條件**:
+- 深度快速下降（500ms 內 > 50%）
+- 成交量不足以解釋下降
+- `cancel_speed = 'instant'` 或 `'fast'`
+
+**觀察到的現象**: 沖擊後流動性被主動撤單取消，而非被成交消耗。
+
+```json
+{
+  "reaction_type": "PULL",
+  "drop_ratio": 0.60,
+  "cancel_speed": "instant",
+  "refill_ratio": 0.0
+}
+```
+
+#### HOLD（防守補單）
+
+**條件**:
+- `refill_ratio > 70%`
+- `time_to_refill < 5000ms`
+- 無價格偏移（`shift_ticks = 0`）
+
+**觀察到的現象**: 深度在原價位快速恢復。
+
+```json
+{
+  "reaction_type": "HOLD",
+  "refill_ratio": 0.85,
+  "time_to_refill_ms": 2300,
+  "shift_ticks": 0
+}
+```
+
+#### DELAYED（延遲反應）
+
+**條件**:
+- `refill_ratio` 在 30%-70% 之間
+- 或 `time_to_refill > 5000ms`
+
+**觀察到的現象**: 流動性部分恢復，或恢復緩慢。
+
+```json
+{
+  "reaction_type": "DELAYED",
+  "refill_ratio": 0.45,
+  "time_to_refill_ms": 12000
+}
+```
+
+#### NO_IMPACT（無顯著影響）
+
+**條件**:
+- `drop_ratio < 15%`
+
+**觀察到的現象**: 沖擊未造成足夠大的深度變化，不需要分析反應。
+
+```json
+{
+  "reaction_type": "NO_IMPACT",
+  "drop_ratio": 0.08
+}
+```
+
+### 4.3 反應指標
+
+每個反應事件記錄以下指標：
+
+| 指標 | 計算方式 | 用途 |
+|------|----------|------|
+| `drop_ratio` | `(baseline - min) / baseline` | 衡量沖擊深度 |
+| `refill_ratio` | `(max - min) / (baseline - min)` | 衡量恢復程度 |
+| `vacuum_duration_ms` | 深度 < 2% 的持續時間 | 檢測 VACUUM |
+| `time_to_refill_ms` | 恢復到 70% 的時間 | 檢測 HOLD |
+| `shift_ticks` | 新流動性偏移的價位數 | 檢測 CHASE |
+| `cancel_speed` | `instant/fast/slow/none` | 檢測 PULL |
+
+### 4.4 歸因分析
+
+系統分析每個反應的驅動因素：
+
+```json
+{
+  "attribution": {
+    "trade_driven_ratio": 0.85,
+    "cancel_driven_ratio": 0.15,
+    "attribution_type": "TRADE_DRIVEN"
+  }
+}
+```
+
+| 歸因類型 | 說明 |
+|----------|------|
+| `TRADE_DRIVEN` | 主要由成交驅動 |
+| `CANCEL_DRIVEN` | 主要由撤單驅動 |
+| `MIXED` | 混合因素 |
+| `NO_CHANGE` | 無顯著變化 |
+
+---
+
+## 5. 信念狀態機
+
+### 5.1 四階段狀態
+
+| 狀態 | 指示器 | 結構性含義 |
+|------|--------|------------|
+| **STABLE** | 🟢 | 深度防守活躍 |
+| **FRAGILE** | 🟡 | 早期壓力跡象 |
+| **CRACKING** | 🟠 | 顯著結構壓力 |
+| **BROKEN** | 🔴 | 防守結構失效 |
+
+**重要**: 這些狀態描述 **結構性模式**，不是價格方向預測。
+
+### 5.2 狀態轉換規則
+
+```
+STABLE → FRAGILE:
+  - 檢測到 1+ PRE_SHOCK_PULL
+  - 或 2+ PULL 反應在 10 分鐘內
+
+FRAGILE → CRACKING:
+  - 檢測到 VACUUM 或 DEPTH_COLLAPSE
+  - 或累積 3+ PULL/CHASE 在 10 分鐘內
+
+CRACKING → BROKEN:
+  - 連續 2+ VACUUM
+  - 或 HOLD 比例 < 20%（在最近 10 個反應中）
+
+任何狀態 → STABLE:
+  - 連續 5+ HOLD 反應
+  - 且無 VACUUM/PULL 在最近 10 分鐘
+```
+
+### 5.3 狀態解釋
+
+系統為每個狀態生成可讀的解釋：
+
+```json
+{
+  "explanation": {
+    "headline": "Depth showing early stress",
+    "trend": "STABLE",
+    "top_factors": [
+      "2 leading events in 10 min",
+      "Hold ratio dropping"
+    ],
+    "counterfactuals": [
+      {
+        "target_state": "STABLE",
+        "conditions": ["3+ consecutive HOLD reactions"],
+        "likelihood": 0.6
+      }
+    ]
+  }
+}
+```
+
+---
+
+## 6. 可視化組件
+
+### 6.1 Radar 視圖（雷達）
+
+多市場概覽儀表板。
+
+**顯示的數據**:
+- 市場列表，按脆弱性指數排序
+- 每個市場的當前信念狀態
+- 狀態持續時間
+- 過去 10 分鐘的領先事件數量
+- 最後一個高優先級告警
+- 數據健康指標
+
+**排序選項**:
+- `fragile_index_10m` - 脆弱性指數
+- `leading_rate_10m` - 領先事件率
+- `confidence` - 證據置信度
+- `state_severity` - 狀態嚴重程度
+
+### 6.2 Evidence Player（證據播放器）
+
+沉浸式證據分析界面。
+
+**組成部分**:
+
+#### 深度熱力圖
+- X 軸：時間
+- Y 軸：價格
+- 顏色強度：深度大小
+- 綠色 = Bid，紅色 = Ask
+
+#### 事件覆蓋層
+- ⚡ Shock 事件（黃色圓點）
+- ◆ Reaction 事件（根據類型著色）
+- ▲ Leading 事件（紫色三角）
+- █ State 變化（背景色帶）
+
+#### 時間軸控制
+- 時間範圍滑塊
+- 播放/暫停控制
+- 事件跳轉按鈕
+
+#### 錨點價位
+- 以虛線顯示
+- 綠色 = Bid 錨點
+- 紅色 = Ask 錨點
+
+### 6.3 Heatmap Tiles（熱力圖瓦片）
+
+預計算的深度可視化數據。
+
+**LOD 級別**:
+
+| LOD | 分辨率 | 瓦片大小 | 用途 |
+|-----|--------|----------|------|
+| 250ms | 40 列/10s | ~8KB | 詳細分析 |
+| 1s | 10 列/10s | ~2KB | 中等縮放 |
+| 5s | 2 列/10s | ~0.5KB | 概覽 |
+
+**價格帶選項**:
+
+| Band | 說明 |
+|------|------|
+| `FULL` | 完整價格範圍 |
+| `BEST_5` | 最優 5 檔 |
+| `BEST_10` | 最優 10 檔 |
+| `BEST_20` | 最優 20 檔 |
+
+**編碼格式**:
+- 數據類型：uint16
+- 縮放：log1p_clip（對數壓縮）
+- 壓縮：zstd level 3
+- 校驗：xxHash64
+
+### 6.4 Context Panel（上下文面板）
+
+顯示選中事件的詳細信息：
+- 事件類型和時間戳
+- 完整指標數據
+- 證據鏈引用
+- 原始數據片段
+
+### 6.5 Reaction Timeline（反應時間線）
+
+水平時間線顯示所有事件：
+- 按時間順序排列
+- 顏色編碼（按事件類型）
+- 點擊跳轉到對應時間
+- 當前時間指示器
+
+### 6.6 Data Degradation Overlay（數據降級覆蓋層）
+
+當 Evidence Grade 為 C 或 D 時顯示：
+- 半透明警告覆蓋
+- **STALE**（黃色）- 存在數據缺口
+- **TAINTED**（紅色）- 數據完整性受損
+
+---
+
+## 7. 告警系統
+
+### 7.1 告警生成
+
+告警基於檢測到的事件自動生成。
+
+**告警類型**:
+
+| 類型 | 觸發源 |
+|------|--------|
+| `SHOCK` | Shock 事件檢測 |
+| `REACTION` | 高優先級反應（VACUUM、PULL、SWEEP） |
+| `LEADING_EVENT` | 領先事件檢測 |
+| `STATE_CHANGE` | 信念狀態轉換 |
+
+### 7.2 嚴重級別
+
+| 級別 | 觸發條件 | 響應 |
+|------|----------|------|
+| **CRITICAL** | BROKEN 狀態、VACUUM、DEPTH_COLLAPSE | 立即關注 |
+| **HIGH** | CRACKING 狀態、PULL、PRE_SHOCK_PULL | 需要注意 |
+| **MEDIUM** | FRAGILE 狀態、SWEEP、CHASE | 觀察 |
+| **LOW** | 一般 Shock、NO_IMPACT | 記錄 |
+
+### 7.3 告警狀態流轉
+
+```
+OPEN → ACKED → RESOLVED
+  ↓
+MUTED (臨時靜音)
+```
+
+**狀態說明**:
+- `OPEN` - 新告警，未處理
+- `ACKED` - 已確認，處理中
+- `RESOLVED` - 已解決
+- `MUTED` - 臨時靜音（設定時長後自動恢復）
+
+### 7.4 解決要求
+
+告警解決必須包含以下之一：
+1. 系統生成的恢復證據
+2. 標記為誤報並說明原因
+
+```json
+{
+  "resolved_at": 1704067200000,
+  "recovery_evidence": [
+    "Current belief state: STABLE",
+    "Recent HOLD ratio: 75%",
+    "Depth defense active"
+  ],
+  "is_false_positive": false
+}
+```
+
+### 7.5 告警免責聲明
+
+每個告警都包含免責聲明：
+
+> "This alert indicates observed belief instability. It does NOT imply outcome direction or trading recommendation."
+
+---
+
+## 8. 證據回放
+
+### 8.1 回放目錄
+
+搜索歷史事件作為回放入口點：
+
+**可搜索的事件類型**:
+- Shock 事件
+- Reaction 事件
+- State Change 事件
+
+**過濾選項**:
+- 時間範圍
+- Token ID
+- 事件類型
+- 嚴重級別
+
+### 8.2 確定性保證
+
+回放系統保證：
+- **相同輸入 = 相同輸出**
+- 事件按 `(token_id, ts_ms, sort_seq)` 排序
+- 禁止使用牆上時鐘（只用事件時間）
+
+### 8.3 回放模式
+
+系統在回放時進入嚴格模式：
+
+```python
+with ReplayContext() as ctx:
+    for event in events:
+        with ctx.process_event(event.ts_ms):
+            process(event)
+```
+
+任何嘗試訪問牆上時鐘都會拋出 `DeterminismError`。
+
+### 8.4 哈希驗證
+
+回放輸出與原始輸出進行哈希比對：
+
+```json
+{
+  "input_hash": "abc123...",
+  "output_hash": "def456...",
+  "expected_hash": "def456...",
+  "match": true
+}
+```
+
+---
+
+## 9. 數據完整性
+
+### 9.1 Evidence Grade（證據等級）
+
+| 等級 | 條件 | UI 顯示 |
+|------|------|---------|
+| **A** | 缺失桶 < 2%，無重建，無哈希不匹配 | 正常 |
+| **B** | 缺失桶 2-5%，或少量重建 | 輕微警告 |
+| **C** | 缺失桶 5-15%，存在哈希不匹配 | STALE 覆蓋 |
+| **D** | 缺失桶 > 15%，多次哈希不匹配 | TAINTED 覆蓋 |
+
+### 9.2 數據健康監控
+
+持續監控以下指標：
+
+| 指標 | 說明 | 閾值 |
+|------|------|------|
+| `missing_bucket_ratio` | 缺失時間桶比例 | < 2% 正常 |
+| `rebuild_count` | 數據重建次數 | < 1 正常 |
+| `hash_mismatch_count` | 哈希校驗失敗次數 | = 0 正常 |
+
+### 9.3 Bundle Hash（證據包哈希）
+
+每個證據包計算加密哈希：
+
+```python
+bundle_data = {
+    'token_id': ...,
+    't0': ...,
+    'shocks': [...],
+    'reactions': [...],
+    'leading_events': [...],
+    'belief_states': [...],
+    'anchors': [...]
+}
+bundle_hash = sha256(canonical_json(bundle_data))
+```
+
+### 9.4 Tile 校驗
+
+每個熱力圖瓦片包含校驗信息：
+
+```json
+{
+  "checksum": {
+    "algo": "xxh3_64",
+    "value": "a1b2c3d4e5f6"
+  }
+}
+```
+
+前端在解碼前驗證校驗和。
+
+---
+
+## 10. API 功能
+
+### 10.1 核心端點
+
+#### GET /v1/radar
+獲取多市場概覽。
+
+**參數**:
+- `event_id` - 過濾特定事件
+- `tag` - 標籤過濾
+- `outcome` - YES/NO/BOTH
+- `limit`, `offset` - 分頁
+- `sort`, `order` - 排序
+
+**響應**:
+```json
+{
+  "rows": [
+    {
+      "market": { "token_id": "...", "title": "..." },
+      "belief_state": "FRAGILE",
+      "state_since_ts": 1704067200000,
+      "fragile_index_10m": 45.5,
+      "leading_rate_10m": 3,
+      "evidence_confidence": 70.0,
+      "explanation": { "headline": "...", "top_factors": [...] }
+    }
+  ],
+  "total": 150
+}
+```
+
+#### GET /v1/evidence
+獲取特定市場的證據包。
+
+**參數**:
+- `token_id` - 必填
+- `t0` - 錨點時間戳（毫秒）
+- `window_before_ms` - 向前窗口（默認 30000）
+- `window_after_ms` - 向後窗口（默認 60000）
+- `include_tiles_manifest` - 是否包含瓦片清單
+- `lod` - 建議的 LOD（250/1000/5000）
+
+**響應**:
+```json
+{
+  "token_id": "...",
+  "t0": 1704067200000,
+  "window": { "from_ts": ..., "to_ts": ... },
+  "anchors": [...],
+  "shocks": [...],
+  "reactions": [...],
+  "leading_events": [...],
+  "belief_states": [...],
+  "proof_summary": {...},
+  "tiles_manifest": {...},
+  "bundle_hash": "...",
+  "evidence_grade": "A",
+  "state_explanation": {...}
+}
+```
+
+#### GET /v1/alerts
+獲取告警列表。
+
+**參數**:
+- `since` - 起始時間戳
+- `token_id` - 過濾特定市場
+- `severity` - 嚴重級別過濾
+- `status` - 狀態過濾
+- `limit`, `offset` - 分頁
+
+#### GET /v1/heatmap/tiles
+獲取熱力圖瓦片。
+
+**參數**:
+- `token_id` - 必填
+- `from_ts`, `to_ts` - 時間範圍
+- `lod` - 250/1000/5000
+- `tile_ms` - 瓦片時長（5000/10000/15000）
+- `band` - FULL/BEST_5/BEST_10/BEST_20
+
+#### GET /v1/replay/catalog
+獲取回放目錄。
+
+**參數**:
+- `from_ts`, `to_ts` - 時間範圍
+- `token_id` - 過濾特定市場
+- `event_type` - 事件類型過濾
+- `severity` - 嚴重級別過濾
+
+### 10.2 告警操作端點
+
+#### PUT /v1/alerts/{alert_id}/ack
+確認告警。
+
+#### PUT /v1/alerts/{alert_id}/resolve
+解決告警（需要恢復證據或誤報說明）。
+
+#### PUT /v1/alerts/{alert_id}/mute
+臨時靜音告警。
+
+#### PUT /v1/alerts/{alert_id}/unmute
+取消靜音。
+
+### 10.3 分析端點
+
+#### GET /v1/alerts/{alert_id}/chain
+獲取告警的完整證據鏈。
+
+**響應**:
+```json
+{
+  "alert_id": "...",
+  "chain": [
+    { "node_type": "SHOCK", "ts": ..., "summary": "..." },
+    { "node_type": "REACTION", "ts": ..., "summary": "..." },
+    { "node_type": "STATE_CHANGE", "ts": ..., "summary": "..." },
+    { "node_type": "ALERT", "ts": ..., "summary": "..." }
+  ],
+  "shock_count": 2,
+  "reaction_count": 3,
+  "chain_duration_ms": 45000
+}
+```
+
+#### GET /v1/reactions/distribution
+獲取反應類型分布。
+
+**響應**:
+```json
+{
+  "token_id": "...",
+  "total_reactions": 25,
+  "distribution": [
+    { "reaction_type": "HOLD", "count": 15, "ratio": 0.60 },
+    { "reaction_type": "PULL", "count": 7, "ratio": 0.28 },
+    { "reaction_type": "VACUUM", "count": 3, "ratio": 0.12 }
+  ],
+  "hold_dominant": true,
+  "stress_ratio": 0.40
+}
+```
+
+#### GET /v1/similar-cases
+搜索相似歷史模式。
+
+**重要**: 只返回相似模式，**不返回後續結果**。
+
+**響應**:
+```json
+{
+  "query_pattern": ["PULL", "PULL", "VACUUM"],
+  "query_state": "CRACKING",
+  "matches": [
+    {
+      "match_id": "...",
+      "similarity_score": 0.85,
+      "pattern_summary": "PULL → PULL → VACUUM",
+      "state_at_match": "CRACKING"
+      // 注意：沒有 "outcome" 或 "what_happened_next"
+    }
+  ],
+  "paradigm_note": "Similar patterns shown for evidence comparison. No outcomes displayed."
+}
+```
+
+---
+
+## 11. 實時流
+
+### 11.1 WebSocket 連接
+
+```javascript
+const ws = new WebSocket('wss://api.example.com/v1/stream?api_key=brm_xxx');
+```
+
+### 11.2 訂閱管理
+
+**訂閱請求**:
+```json
+{
+  "action": "subscribe",
+  "topics": ["alerts", "states"],
+  "token_ids": ["0x123...", "0x456..."]
+}
+```
+
+**主題**:
+- `alerts` - 告警事件
+- `states` - 狀態變化
+- `health` - 數據健康警告
+
+### 11.3 消息類型
+
+#### alert
+```json
+{
+  "type": "alert",
+  "data": {
+    "alert_id": "...",
+    "token_id": "...",
+    "severity": "HIGH",
+    "summary": "...",
+    "evidence_ref": { "token_id": "...", "t0": ... },
+    "disclaimer": "..."
+  }
+}
+```
+
+#### state_update
+```json
+{
+  "type": "state_update",
+  "data": {
+    "token_id": "...",
+    "state": "CRACKING",
+    "previous_state": "FRAGILE",
+    "timestamp": 1704067200000
+  }
+}
+```
+
+#### data_health
+```json
+{
+  "type": "data_health",
+  "data": {
+    "token_id": "...",
+    "issue": "MISSING_BUCKETS",
+    "severity": "WARNING"
+  }
+}
+```
+
+### 11.4 連接管理
+
+**心跳**: 服務器每 30 秒發送 ping，客戶端必須響應 pong。
+
+**重連策略**: 指數退避（1s → 2s → 4s → ... → 60s max）
+
+**訂閱限制**:
+
+| 層級 | 最大主題 | 最大 Token | 並發連接 |
+|------|----------|------------|----------|
+| Observer | 1 | 20 | 1 |
+| Analyst | 3 | 100 | 2 |
+| Institution | 全部 | 500 | 5 |
+
+---
+
+## 12. 高級功能
+
+### 12.1 錨點價位追蹤
+
+系統自動識別「重要」價位：
+
+**錨點分數計算**:
+```
+anchor_score = peak_size * persistence_seconds * hit_survival_ratio
+```
+
+**用途**:
+- 在熱力圖上標記
+- PRE_SHOCK_PULL 檢測的權重因子
+- 證據包中的上下文信息
+
+### 12.2 反應歸因追蹤
+
+區分成交驅動 vs 撤單驅動：
+
+```
+trade_driven_ratio = matched_volume / total_depth_change
+cancel_driven_ratio = 1 - trade_driven_ratio
+```
+
+### 12.3 反事實條件
+
+狀態解釋包含「如何改變狀態」的條件：
+
+```json
+{
+  "counterfactuals": [
+    {
+      "target_state": "STABLE",
+      "conditions": ["3+ consecutive HOLD reactions"],
+      "likelihood": 0.6
+    },
+    {
+      "target_state": "BROKEN",
+      "conditions": ["1 more VACUUM in 5 min"],
+      "likelihood": 0.3
+    }
+  ]
+}
+```
+
+**重要**: 這不是預測，而是基於規則的狀態轉換條件說明。
+
+### 12.4 誤報追蹤
+
+當告警被標記為誤報時，記錄原因用於改進：
+
+```json
+{
+  "is_false_positive": true,
+  "false_positive_reason": "Market closed, expected behavior"
+}
+```
+
+### 12.5 瓦片新鮮度指示
+
+前端顯示瓦片數據的新鮮度：
+
+| 延遲 | 指示 |
+|------|------|
+| < 10s | 正常 |
+| 10-30s | 警告 |
+| > 30s | 嚴重延遲 |
+
+---
+
+## 附錄 A：配置參數參考
+
+### 檢測閾值
+
+| 參數 | 默認值 | 說明 |
+|------|--------|------|
+| `SHOCK_VOLUME_THRESHOLD` | 0.35 | Shock 成交量閾值 |
+| `CONSECUTIVE_TRADE_THRESHOLD` | 3 | 連續成交觸發數 |
+| `VACUUM_THRESHOLD_RATIO` | 0.02 | VACUUM 深度閾值 |
+| `VACUUM_DURATION_THRESHOLD_MS` | 3000 | VACUUM 持續時間 |
+| `REFILL_HOLD_THRESHOLD` | 0.70 | HOLD 判定的恢復比例 |
+| `REFILL_TIME_THRESHOLD_MS` | 5000 | HOLD 判定的時間閾值 |
+| `DROP_SIGNIFICANT_THRESHOLD` | 0.15 | 有意義的深度下降閾值 |
+| `SHIFT_THRESHOLD_TICKS` | 2 | CHASE 判定的偏移閾值 |
+
+### 時間窗口
+
+| 參數 | 默認值 | 說明 |
+|------|--------|------|
+| `TIME_BUCKET_MS` | 250 | 基礎時間桶 |
+| `FAST_WINDOW_MS` | 8000 | 快速反應窗口 |
+| `SLOW_WINDOW_MS` | 30000 | 慢速確認窗口 |
+| `BASELINE_WINDOW_START_MS` | 500 | 基準計算窗口起點 |
+| `BASELINE_WINDOW_END_MS` | 100 | 基準計算窗口終點 |
+
+---
+
+## 附錄 B：術語對照表
+
+| 英文 | 中文 | 說明 |
+|------|------|------|
+| Shock | 沖擊 | 成交對價位的顯著影響 |
+| Reaction | 反應 | 沖擊後的流動性變化模式 |
+| Leading Event | 領先事件 | 不依賴成交的預警 |
+| Belief State | 信念狀態 | 基於反應累積的結構性狀態 |
+| VACUUM | 真空 | 流動性消失 |
+| SWEEP | 掃單 | 多檔被清 |
+| CHASE | 追價 | 流動性遷移 |
+| PULL | 撤退 | 主動撤單 |
+| HOLD | 防守 | 深度恢復 |
+| Evidence | 證據 | 可驗證的數據記錄 |
+| Anchor | 錨點 | 重要價位 |
+| LOD | 細節層級 | 時間分辨率 |
+| Tile | 瓦片 | 預計算的熱力圖數據塊 |
+
+---
+
+## 附錄 C：禁用術語列表
+
+以下術語在本系統中 **禁止使用**，因為它們暗示預測或方向性判斷：
+
+- breakout / 突破
+- absorption / 吸收
+- exhaustion / 衰竭
+- bullish / 看漲
+- bearish / 看跌
+- signal / 訊號
+- support / 支撐
+- resistance / 阻力
+- reversal / 反轉
+- momentum / 動量
+- overbought / 超買
+- oversold / 超賣
+- trend confirmation / 趨勢確認
+- price target / 目標價
+- entry/exit point / 進出場點
+- buy/sell indicator / 買賣指標
+
+---
+
+**版本**: v5.36
+**最後更新**: 2026-01
+
+---
+
+> *"證據，不是預測。過去的反應被展示，未來的結果不被暗示。"*
