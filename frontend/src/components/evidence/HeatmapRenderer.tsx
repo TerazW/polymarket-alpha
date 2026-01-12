@@ -88,7 +88,11 @@ async function decodeTilePayload(tile: HeatmapTileMeta): Promise<Uint16Array | n
     console.log('[TileDecode] Decoded base64 to bytes:', bytes.length);
 
     // If compressed with zstd, we need to decompress
-    if (tile.compression.algo === 'zstd' && tile.compression.level > 0) {
+    // Note: algo might be 'zstd' or 'ZSTD' depending on backend
+    const algo = tile.compression.algo?.toLowerCase() ?? '';
+    console.log('[TileDecode] Compression algo:', tile.compression.algo, '→', algo, 'level:', tile.compression.level);
+
+    if (algo === 'zstd' && tile.compression.level > 0) {
       console.log('[TileDecode] Attempting zstd decompression...');
       const fzstd = await loadFzstd();
       if (fzstd) {
@@ -108,7 +112,7 @@ async function decodeTilePayload(tile: HeatmapTileMeta): Promise<Uint16Array | n
     }
 
     // No compression - parse directly as uint16
-    if (tile.compression.algo === 'none' || tile.compression.level === 0) {
+    if (algo === 'none' || algo === '' || tile.compression.level === 0) {
       // Ensure proper alignment for Uint16Array
       const expectedBytes = tile.rows * tile.cols * 2;
       console.log('[TileDecode] Uncompressed tile, expected bytes:', expectedBytes, 'actual:', bytes.length);
