@@ -65,23 +65,42 @@ async function loadFzstd(): Promise<typeof fzstdModule> {
  */
 async function decodeTilePayload(tile: HeatmapTileMeta): Promise<Uint16Array | null> {
   try {
+    console.log('[TileDecode] Starting decode:', {
+      rows: tile.rows,
+      cols: tile.cols,
+      compression: tile.compression,
+      payload_length: tile.payload_b64?.length ?? 0,
+      price_range: `${tile.price_min} - ${tile.price_max}`,
+      time_range: `${tile.t_start} - ${tile.t_end}`,
+    });
+
+    if (!tile.payload_b64) {
+      console.warn('[TileDecode] No payload_b64 in tile!');
+      return null;
+    }
+
     // Decode base64 to bytes
     const binaryStr = atob(tile.payload_b64);
     const bytes = new Uint8Array(binaryStr.length);
     for (let i = 0; i < binaryStr.length; i++) {
       bytes[i] = binaryStr.charCodeAt(i);
     }
+    console.log('[TileDecode] Decoded base64 to bytes:', bytes.length);
 
     // If compressed with zstd, we need to decompress
     if (tile.compression.algo === 'zstd' && tile.compression.level > 0) {
+      console.log('[TileDecode] Attempting zstd decompression...');
       const fzstd = await loadFzstd();
       if (fzstd) {
         try {
           const decompressed = fzstd.decompress(bytes);
+          console.log('[TileDecode] zstd decompressed:', decompressed.length, 'bytes');
           return new Uint16Array(decompressed.buffer);
         } catch (e) {
-          console.warn('zstd decompression failed:', e);
+          console.warn('[TileDecode] zstd decompression failed:', e);
         }
+      } else {
+        console.warn('[TileDecode] fzstd module not available');
       }
       // If fzstd not available or failed, return null to show placeholder
       console.warn('Compressed tile cannot be decoded - fzstd not available');
@@ -92,15 +111,28 @@ async function decodeTilePayload(tile: HeatmapTileMeta): Promise<Uint16Array | n
     if (tile.compression.algo === 'none' || tile.compression.level === 0) {
       // Ensure proper alignment for Uint16Array
       const expectedBytes = tile.rows * tile.cols * 2;
+      console.log('[TileDecode] Uncompressed tile, expected bytes:', expectedBytes, 'actual:', bytes.length);
       if (bytes.length >= expectedBytes) {
-        return new Uint16Array(bytes.buffer, bytes.byteOffset, tile.rows * tile.cols);
+        const result = new Uint16Array(bytes.buffer, bytes.byteOffset, tile.rows * tile.cols);
+        // Check for non-zero values
+        let nonZeroCount = 0;
+        let maxValue = 0;
+        for (let i = 0; i < result.length; i++) {
+          if (result[i] > 0) nonZeroCount++;
+          if (result[i] > maxValue) maxValue = result[i];
+        }
+        console.log('[TileDecode] Tile stats:', { nonZeroCount, maxValue, totalCells: result.length });
+        return result;
+      } else {
+        console.warn('[TileDecode] Byte length mismatch! Expected:', expectedBytes, 'Got:', bytes.length);
       }
     }
 
     // Fallback: create empty matrix
+    console.warn('[TileDecode] Using fallback empty matrix');
     return new Uint16Array(tile.rows * tile.cols);
   } catch (err) {
-    console.error('Failed to decode tile:', err);
+    console.error('[TileDecode] Failed to decode tile:', err);
     return null;
   }
 }
@@ -155,12 +187,18 @@ export function HeatmapRenderer({
 
   // Decode tiles when they change
   useEffect(() => {
+    console.log('[HeatmapRenderer] Decode effect triggered:', {
+      bidTilesCount: bidTiles.length,
+      askTilesCount: askTiles.length,
+    });
+
     const allTiles = [
       ...bidTiles.map(t => ({ tile: t, side: 'bid' as const })),
       ...askTiles.map(t => ({ tile: t, side: 'ask' as const })),
     ];
 
     if (allTiles.length === 0) {
+      console.log('[HeatmapRenderer] No tiles to decode');
       setDecodedTiles([]);
       setLoading(false);
       return;
@@ -169,10 +207,14 @@ export function HeatmapRenderer({
     let cancelled = false;
 
     async function decodeTiles() {
+      console.log('[HeatmapRenderer] Starting decode of', allTiles.length, 'tiles');
       const decoded: DecodedTile[] = [];
 
       for (const { tile, side } of allTiles) {
-        if (cancelled) break;
+        if (cancelled) {
+          console.log('[HeatmapRenderer] Decode cancelled');
+          break;
+        }
 
         const matrix = await decodeTilePayload(tile);
         if (matrix) {
@@ -183,8 +225,15 @@ export function HeatmapRenderer({
             cols: tile.cols,
             side,
           });
+        } else {
+          console.warn('[HeatmapRenderer] Failed to decode tile:', tile.t_start);
         }
       }
+
+      console.log('[HeatmapRenderer] Decode complete:', {
+        decodedCount: decoded.length,
+        cancelled,
+      });
 
       if (!cancelled) {
         setDecodedTiles(decoded);
@@ -197,17 +246,33 @@ export function HeatmapRenderer({
     decodeTiles();
 
     return () => {
+      console.log('[HeatmapRenderer] Decode effect cleanup');
       cancelled = true;
     };
   }, [bidTiles, askTiles, onReady]);
 
   // Render heatmap
   const renderHeatmap = useCallback(() => {
+    console.log('[HeatmapRender] Starting render:', {
+      decodedTilesCount: decodedTiles.length,
+      windowStart,
+      windowEnd,
+      priceMin,
+      priceMax,
+      canvasSize: { width, height },
+    });
+
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      console.warn('[HeatmapRender] No canvas ref!');
+      return;
+    }
 
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      console.warn('[HeatmapRender] No canvas context!');
+      return;
+    }
 
     // Clear canvas with dark background
     ctx.fillStyle = '#1f2937'; // gray-800
@@ -215,12 +280,14 @@ export function HeatmapRenderer({
 
     if (decodedTiles.length === 0) {
       // No tiles - show placeholder
+      console.log('[HeatmapRender] No decoded tiles, showing placeholder');
       renderPlaceholder(ctx, width, height);
       return;
     }
 
     const timeRange = windowEnd - windowStart;
     const priceRange = priceMax - priceMin;
+    console.log('[HeatmapRender] Ranges:', { timeRange, priceRange });
 
     // v5.41: Calculate global clipValue across all tiles for consistent intensity mapping
     // This prevents banding artifacts at tile boundaries where different tiles
@@ -233,6 +300,7 @@ export function HeatmapRenderer({
     ctx.globalCompositeOperation = 'lighter';
 
     // Render each tile
+    let tileIndex = 0;
     for (const { tile, matrix, rows, cols, side } of decodedTiles) {
       // Per-tile clipValue for decoding (data was encoded with this value)
       const tileClipValue = tile.encoding.clip_value || 10000;
@@ -246,6 +314,19 @@ export function HeatmapRenderer({
       const tilePriceMax = tile.price_max;
       const tileY = height - ((tilePriceMax - priceMin) / priceRange) * height;
       const tileHeight = ((tilePriceMax - tilePriceMin) / priceRange) * height;
+
+      // Log first few tiles for debugging
+      if (tileIndex < 3) {
+        console.log(`[HeatmapRender] Tile ${tileIndex} (${side}):`, {
+          position: { tileX, tileY, tileWidth, tileHeight },
+          tileTime: { t_start: tile.t_start, t_end: tile.t_end },
+          tilePrice: { tilePriceMin, tilePriceMax },
+          windowPrice: { priceMin, priceMax },
+          encoding: { scale, tileClipValue },
+          matrixSize: matrix.length,
+        });
+      }
+      tileIndex++;
 
       // Calculate cell dimensions
       const cellWidth = tileWidth / cols;
