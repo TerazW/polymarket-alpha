@@ -85,11 +85,17 @@ export function EvidencePlayer({
 
     async function fetchTiles() {
       try {
+        // Extend to_ts to include current time to capture live data
+        const now = Date.now();
+        const effectiveToTs = Math.max(evidence.window_end, now);
+
         console.log('[TilesFetch] Request params:', {
           token_id: evidence.token_id,
           from_ts: evidence.window_start,
-          to_ts: evidence.window_end,
-          window_duration_ms: evidence.window_end - evidence.window_start,
+          to_ts: effectiveToTs,
+          original_window_end: evidence.window_end,
+          now,
+          window_duration_ms: effectiveToTs - evidence.window_start,
           lod: 250,
         });
 
@@ -97,7 +103,7 @@ export function EvidencePlayer({
           {
             token_id: evidence.token_id,
             from_ts: evidence.window_start,
-            to_ts: evidence.window_end,
+            to_ts: effectiveToTs,
             lod: 250,
           },
           abortController.signal
