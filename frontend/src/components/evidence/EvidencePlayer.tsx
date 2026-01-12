@@ -85,6 +85,14 @@ export function EvidencePlayer({
 
     async function fetchTiles() {
       try {
+        console.log('[TilesFetch] Request params:', {
+          token_id: evidence.token_id,
+          from_ts: evidence.window_start,
+          to_ts: evidence.window_end,
+          window_duration_ms: evidence.window_end - evidence.window_start,
+          lod: 250,
+        });
+
         const response = await getHeatmapTiles(
           {
             token_id: evidence.token_id,
@@ -96,7 +104,12 @@ export function EvidencePlayer({
         );
 
         if (!abortController.signal.aborted) {
-          console.log('[TilesFetch] Success, tiles:', response.bid_tiles.length + response.ask_tiles.length);
+          console.log('[TilesFetch] Response:', {
+            manifest: response.manifest,
+            bid_tiles_count: response.bid_tiles?.length ?? 'undefined',
+            ask_tiles_count: response.ask_tiles?.length ?? 'undefined',
+            raw_response_keys: Object.keys(response),
+          });
           // v5.40: Use separate bid and ask tiles
           setBidTiles(response.bid_tiles || []);
           setAskTiles(response.ask_tiles || []);

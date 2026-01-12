@@ -1057,6 +1057,7 @@ def get_heatmap_tiles(
 
     try:
         # v5.40: Generate separate bid and ask tiles
+        print(f"[HEATMAP] /tiles request: token={token_id[:30]}..., from={from_ts}, to={to_ts}, lod={lod}, tile_ms={tile_ms}")
         generator = HeatmapTileGenerator(db_config=DB_CONFIG)
         generator_band = GeneratorTileBand(band.value)
 
@@ -1074,10 +1075,13 @@ def get_heatmap_tiles(
                 band=generator_band,
                 side='bid'  # Filter for bid side only
             )
+            print(f"[HEATMAP] Bid generator returned {len(bid_generated)} tiles")
             for t in bid_generated:
                 bid_tiles.append(_tile_to_meta(t, token_id))
         except Exception as bid_error:
             print(f"[HEATMAP] Bid tile generation failed: {bid_error}")
+            import traceback
+            traceback.print_exc()
 
         # Generate ask tiles (red layer)
         try:
@@ -1090,11 +1094,15 @@ def get_heatmap_tiles(
                 band=generator_band,
                 side='ask'  # Filter for ask side only
             )
+            print(f"[HEATMAP] Ask generator returned {len(ask_generated)} tiles")
             for t in ask_generated:
                 ask_tiles.append(_tile_to_meta(t, token_id))
         except Exception as ask_error:
             print(f"[HEATMAP] Ask tile generation failed: {ask_error}")
+            import traceback
+            traceback.print_exc()
 
+        print(f"[HEATMAP] /tiles response: bid_tiles={len(bid_tiles)}, ask_tiles={len(ask_tiles)}")
         return HeatmapTilesResponse(
             manifest=HeatmapTilesManifest(
                 token_id=token_id,
