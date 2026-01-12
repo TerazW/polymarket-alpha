@@ -1,6 +1,6 @@
 # Market Sensemaking - Claude 開發筆記
 
-## 當前狀態 (2026-01-10)
+## 當前狀態 (2026-01-12)
 
 **Phase 5: 生產驗證** - 正在進行中
 
@@ -12,6 +12,8 @@
 5. ✅ Radar API 過濾：只顯示有 `book_bins` 數據的市場
 6. ✅ **v5.40: Bookmap 風格熱力圖修復** (2026-01-10)
 7. ✅ **v5.42: Collector 市場元數據同步** (2026-01-10)
+8. ✅ **CI/CD 分支策略設置** (2026-01-12) - 限制 workflow 只在 dev/main 觸發
+9. ✅ **Event Tape 時間窗口修復** (2026-01-12) - 從 90秒 擴大到 31分鐘
 
 ### v5.40 Heatmap 修復詳情
 **問題**: 熱力圖顯示「上下紅綠地毯」效果，不是 Bookmap 風格
@@ -73,8 +75,58 @@ aws ecs update-service --cluster market-sensemaking-cluster --service market-sen
    - 在 `get_top_markets()` 結束時自動同步市場到 `markets` 表
    - 使用 `ON CONFLICT DO UPDATE` 確保冪等性
 
-## 分支
-- 開發分支：`claude/initial-setup-uqFJn`
+## Git 分支策略 (2026-01-12)
+
+### 分支結構
+```
+main        ← 生產穩定版本，push 會觸發 ECS 部署
+  ↑
+dev         ← 開發整合線，所有 PR 先合到這裡
+  ↑
+feat/*      ← 功能分支（短命）
+fix/*       ← 修復分支（短命）
+claude/*    ← Claude Code 會話分支（自動創建）
+```
+
+### 工作流程
+
+**日常開發（你需要做的）**：
+```powershell
+# 1. 從 dev 開新分支
+git checkout dev
+git pull origin dev
+git checkout -b fix/xxx-描述
+
+# 2. 開發完成後推送
+git push -u origin fix/xxx-描述
+
+# 3. 去 GitHub 開 PR → dev
+# CI 通過後 merge
+
+# 4. 準備部署時
+# 開 PR: dev → main
+# merge 後自動部署到 ECS
+```
+
+**Claude Code 會話**：
+- Claude Code 自動創建 `claude/xxx` 分支
+- 完成後你需要手動：
+  1. 把 claude 分支合到 dev：`git checkout dev && git merge origin/claude/xxx`
+  2. 或開 PR
+
+### CI/CD 觸發規則
+| 動作 | CI | Deploy |
+|------|-----|--------|
+| push 到 feature/fix/claude 分支 | ❌ | ❌ |
+| PR → dev | ✅ | ❌ |
+| push → dev | ✅ | ❌ |
+| push → main | ✅ | ✅ |
+| 手動 workflow_dispatch | - | ✅ |
+
+### 相關文件
+- `.github/workflows/ci.yml` - CI 流程
+- `.github/workflows/deploy.yml` - 部署流程
+- `.github/workflows/language-check.yml` - 語言治理檢查
 
 ## AWS 部署狀態
 
@@ -100,6 +152,43 @@ aws ecs update-service --cluster market-sensemaking-cluster --service market-sen
 ```
 C:\Projects\market-sensemaking
 ```
+
+## 本地開發命令
+
+### 安裝依賴
+```powershell
+# 後端
+cd C:\Projects\market-sensemaking\backend
+pip install -r requirements.txt
+
+# 前端
+cd C:\Projects\market-sensemaking\frontend
+npm install
+```
+
+### 運行本地環境
+```powershell
+# 終端 1: 後端 API
+cd C:\Projects\market-sensemaking\backend
+python -m uvicorn api.main:app --reload --port 8000
+
+# 終端 2: 前端
+cd C:\Projects\market-sensemaking\frontend
+npm run dev
+```
+
+### 本地環境 URL
+- 前端: http://localhost:3000
+- 後端: http://localhost:8000
+- API 文檔: http://localhost:8000/docs
+
+### 注意事項
+- 前端默認連接生產 API (`https://api.marketsensemaking.com`)
+- 要連接本地後端，需設置環境變量：
+  ```powershell
+  # frontend/.env.local
+  NEXT_PUBLIC_API_URL=http://localhost:8000
+  ```
 
 ## 構建命令模板
 ```powershell

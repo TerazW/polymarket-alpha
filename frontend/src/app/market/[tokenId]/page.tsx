@@ -170,8 +170,8 @@ export default function MarketDetailPage({ params }: PageProps) {
   } = useEvidenceFetch({
     tokenId,
     t0: initialT0,
-    windowBeforeMs: 60000,
-    windowAfterMs: 30000,
+    windowBeforeMs: 1800000,  // 30 minutes - to capture recent events
+    windowAfterMs: 60000,     // 1 minute future
     debounceMs: 300,
   });
 
