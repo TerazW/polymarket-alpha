@@ -14,6 +14,7 @@
 7. ✅ **v5.42: Collector 市場元數據同步** (2026-01-10)
 8. ✅ **CI/CD 分支策略設置** (2026-01-12) - 限制 workflow 只在 dev/main 觸發
 9. ✅ **Event Tape 時間窗口修復** (2026-01-12) - 從 90秒 擴大到 31分鐘
+10. ✅ **v5.43: Heatmap 價格對齊修復** (2026-01-12) - 修復 tile 數據全為 0 的問題
 
 ### v5.40 Heatmap 修復詳情
 **問題**: 熱力圖顯示「上下紅綠地毯」效果，不是 Bookmap 風格
@@ -55,6 +56,31 @@ docker tag market-sensemaking-api:latest 821482074659.dkr.ecr.us-east-1.amazonaw
 docker push 821482074659.dkr.ecr.us-east-1.amazonaws.com/market-sensemaking/api:latest
 aws ecs update-service --cluster market-sensemaking-cluster --service market-sensemaking-api --force-new-deployment --region us-east-1
 ```
+
+### v5.43 Heatmap 價格對齊修復 (2026-01-12)
+**問題**: 熱力圖顯示「Waiting for data...」,tiles 數據全為 0
+
+**根本原因**:
+- `_build_matrix` 函數使用原始 `price_min` 構建 `price_to_row` 字典
+- 但查詢價格時使用 tick 對齊後的值
+- 如果 `price_min=0.653` (未對齊到 0.01 tick):
+  - `price_to_row` keys: `{0.653, 0.663, 0.673, ...}`
+  - 查詢時: `price_rounded = 0.65` (tick 對齊後)
+  - 結果: lookup 失敗，所有數據被 skip
+
+**修復內容**:
+1. **`backend/heatmap/tile_generator.py`**:
+   - `_build_matrix`: 在構建 `price_to_row` 前先對齊 `price_min/price_max`
+   - `generate_tile`: 在創建 HeatmapTile 前對齊價格範圍
+   - 添加更多 debug 日誌
+
+**測試方式**:
+部署後查看 API 日誌應顯示:
+```
+[MATRIX_DEBUG] Result: filled=N, skipped_side=0, skipped_col=M, skipped_price=0
+[MATRIX_DEBUG] Matrix stats: nonzero=X, max=Y
+```
+其中 `filled > 0` 且 `skipped_price = 0`
 
 ### v5.42 Collector 市場元數據同步
 **問題**: Radar 只顯示 2 個市場，但 Collector 監控 10 個
