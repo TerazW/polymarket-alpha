@@ -39,6 +39,10 @@ export function EvidencePlayer({
   const containerRef = useRef<HTMLDivElement>(null);
   const debugStatsKeyRef = useRef<string>('');
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
+  const [viewWindow, setViewWindow] = useState({
+    start: evidence.window_start,
+    end: evidence.window_end,
+  });
   // v5.40: Separate bid and ask tiles for Bookmap-style rendering
   const [bidTiles, setBidTiles] = useState<HeatmapTileMeta[]>([]);
   const [askTiles, setAskTiles] = useState<HeatmapTileMeta[]>([]);
@@ -55,9 +59,16 @@ export function EvidencePlayer({
   const [clipPercentile, setClipPercentile] = useState(0.99);
   const [rollingWindowSec, setRollingWindowSec] = useState(0);
   const [holdMode, setHoldMode] = useState<'hold' | 'decay' | 'off'>('hold');
-  const [decayHalfLifeSec, setDecayHalfLifeSec] = useState(15);
+  const [holdSeconds, setHoldSeconds] = useState(5);
+  const [decaySeconds, setDecaySeconds] = useState(10);
+  const [decayHalfLifeSec, setDecayHalfLifeSec] = useState(8);
+  const [decayCurve, setDecayCurve] = useState<'linear' | 'half-life'>('half-life');
   const [valueMode, setValueMode] = useState<'max' | 'sum' | 'last'>('max');
   const [logDebugStats, setLogDebugStats] = useState(isDev);
+
+  const viewWindowStart = viewWindow.start;
+  const viewWindowEnd = viewWindow.end;
+  const viewWindowDuration = viewWindowEnd - viewWindowStart;
 
   // Real-time WebSocket stream (optional)
   const { isConnected, connectionState } = useTokenStream(
@@ -102,22 +113,23 @@ export function EvidencePlayer({
       try {
         // Extend to_ts to include current time to capture live data
         const now = Date.now();
-        const effectiveToTs = Math.max(evidence.window_end, now);
+        const liveTail = viewWindowEnd >= evidence.window_end - 1000;
+        const effectiveToTs = liveTail ? Math.max(viewWindowEnd, now) : viewWindowEnd;
 
         console.log('[TilesFetch] Request params:', {
           token_id: evidence.token_id,
-          from_ts: evidence.window_start,
+          from_ts: viewWindowStart,
           to_ts: effectiveToTs,
           original_window_end: evidence.window_end,
           now,
-          window_duration_ms: effectiveToTs - evidence.window_start,
+          window_duration_ms: effectiveToTs - viewWindowStart,
           lod: 250,
         });
 
         const response = await getHeatmapTiles(
           {
             token_id: evidence.token_id,
-            from_ts: evidence.window_start,
+            from_ts: viewWindowStart,
             to_ts: effectiveToTs,
             lod: 250,
             value_mode: valueMode,
@@ -157,7 +169,15 @@ export function EvidencePlayer({
     return () => {
       abortController.abort();
     };
-  }, [evidence.token_id, evidence.window_start, evidence.window_end, useSyntheticTiles, valueMode]);
+  }, [
+    evidence.token_id,
+    evidence.window_start,
+    evidence.window_end,
+    viewWindowStart,
+    viewWindowEnd,
+    useSyntheticTiles,
+    valueMode,
+  ]);
 
   // DEV: Fetch backend heatmap debug stats once per window
   useEffect(() => {
@@ -165,8 +185,8 @@ export function EvidencePlayer({
 
     const key = [
       evidence.token_id,
-      evidence.window_start,
-      evidence.window_end,
+      viewWindowStart,
+      viewWindowEnd,
       valueMode,
     ].join('|');
     if (debugStatsKeyRef.current === key) return;
@@ -176,8 +196,8 @@ export function EvidencePlayer({
     getHeatmapDebug(
       {
         token_id: evidence.token_id,
-        from_ts: evidence.window_start,
-        to_ts: evidence.window_end,
+        from_ts: viewWindowStart,
+        to_ts: viewWindowEnd,
         lod: 250,
         tile_ms: 10000,
         value_mode: valueMode,
@@ -185,20 +205,23 @@ export function EvidencePlayer({
       },
       abortController.signal
     ).then((data) => {
-      console.log('[HeatmapDebug] Summary', {
-        rows: data.raw_counts,
-        size_stats: data.size_stats,
-        tile_stats: data.tiles,
-        normalize: {
-          mode: normalizeMode,
-          clipPercentile,
-          rollingWindowSec,
-          holdMode,
-          decayHalfLifeSec,
-          binaryMode,
-        },
-        possible_zero_causes: data.possible_zero_causes,
-        errors: data.errors,
+        console.log('[HeatmapDebug] Summary', {
+          rows: data.raw_counts,
+          size_stats: data.size_stats,
+          tile_stats: data.tiles,
+          normalize: {
+            mode: normalizeMode,
+            clipPercentile,
+            rollingWindowSec,
+            holdMode,
+            holdSeconds,
+            decaySeconds,
+            decayHalfLifeSec,
+            decayCurve,
+            binaryMode,
+          },
+          possible_zero_causes: data.possible_zero_causes,
+          errors: data.errors,
       });
     }).catch((err) => {
       if (!abortController.signal.aborted) {
@@ -212,14 +235,17 @@ export function EvidencePlayer({
     logDebugStats,
     useSyntheticTiles,
     evidence.token_id,
-    evidence.window_start,
-    evidence.window_end,
+    viewWindowStart,
+    viewWindowEnd,
     valueMode,
     normalizeMode,
     clipPercentile,
     rollingWindowSec,
     holdMode,
+    holdSeconds,
+    decaySeconds,
     decayHalfLifeSec,
+    decayCurve,
     binaryMode,
   ]);
 
@@ -237,6 +263,14 @@ export function EvidencePlayer({
     return () => observer.disconnect();
   }, []);
 
+  // Reset view window when evidence window changes
+  useEffect(() => {
+    setViewWindow({
+      start: evidence.window_start,
+      end: evidence.window_end,
+    });
+  }, [evidence.window_start, evidence.window_end, evidence.token_id]);
+
   // Draw overlay (events, anchors, state changes) on top of heatmap
   useEffect(() => {
     const canvas = overlayCanvasRef.current;
@@ -249,8 +283,8 @@ export function EvidencePlayer({
     ctx.clearRect(0, 0, dimensions.width, dimensions.height);
 
     // Draw overlay elements
-    drawOverlay(ctx, evidence, dimensions, currentTime, selectedEventId);
-  }, [evidence, dimensions, currentTime, selectedEventId]);
+    drawOverlay(ctx, evidence, dimensions, currentTime, selectedEventId, viewWindowStart, viewWindowEnd);
+  }, [evidence, dimensions, currentTime, selectedEventId, viewWindowStart, viewWindowEnd]);
 
   // Handle click on heatmap
   const handleCanvasClick = useCallback(
@@ -260,13 +294,64 @@ export function EvidencePlayer({
       const x = e.clientX - rect.left;
 
       // Convert x to time
-      const timeRange = evidence.window_end - evidence.window_start;
-      const clickTime = evidence.window_start + (x / dimensions.width) * timeRange;
+      const timeRange = viewWindowEnd - viewWindowStart;
+      const clickTime = viewWindowStart + (x / dimensions.width) * timeRange;
 
       onTimeChange(clickTime);
     },
-    [evidence, dimensions, onTimeChange]
+    [viewWindowStart, viewWindowEnd, dimensions, onTimeChange]
   );
+
+  const clampViewWindow = useCallback((start: number, end: number) => {
+    const minStart = evidence.window_start;
+    const maxEnd = Math.max(evidence.window_end, Date.now());
+    const maxDuration = Math.max(1000, maxEnd - minStart);
+    const minDuration = Math.min(maxDuration, 60000);
+    let duration = end - start;
+    duration = Math.max(minDuration, Math.min(maxDuration, duration));
+
+    let clampedStart = start;
+    let clampedEnd = start + duration;
+
+    if (clampedStart < minStart) {
+      clampedStart = minStart;
+      clampedEnd = minStart + duration;
+    }
+    if (clampedEnd > maxEnd) {
+      clampedEnd = maxEnd;
+      clampedStart = maxEnd - duration;
+    }
+    return { start: clampedStart, end: clampedEnd };
+  }, [evidence.window_start, evidence.window_end]);
+
+  const setZoomWindow = useCallback((durationMs: number, centerTs: number) => {
+    const start = centerTs - durationMs / 2;
+    const end = centerTs + durationMs / 2;
+    setViewWindow(clampViewWindow(start, end));
+  }, [clampViewWindow]);
+
+  const handleZoomPreset = useCallback((minutes: number) => {
+    setZoomWindow(minutes * 60 * 1000, currentTime);
+  }, [setZoomWindow, currentTime]);
+
+  const handleZoomReset = useCallback(() => {
+    setViewWindow({
+      start: evidence.window_start,
+      end: evidence.window_end,
+    });
+  }, [evidence.window_start, evidence.window_end]);
+
+  const handleWheelZoom = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY === 0) return;
+    if (viewWindowDuration <= 0 || dimensions.width <= 0) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const ratio = x / dimensions.width;
+    const centerTs = viewWindowStart + ratio * viewWindowDuration;
+    const zoomFactor = e.deltaY > 0 ? 1.25 : 0.8;
+    setZoomWindow(viewWindowDuration * zoomFactor, centerTs);
+  }, [dimensions.width, viewWindowStart, viewWindowDuration, setZoomWindow]);
 
   // Get price range from tiles manifest or defaults
   const priceMin = parseFloat(evidence.tiles_manifest.normalization.price_min);
@@ -334,14 +419,15 @@ export function EvidencePlayer({
       <div
         className="flex-1 relative bg-gray-800 rounded-lg overflow-hidden cursor-crosshair"
         onClick={handleCanvasClick}
+        onWheel={handleWheelZoom}
       >
         {/* Heatmap layer (rendered from tiles or placeholder) */}
         {/* v5.40: Now using separate bid/ask tiles for Bookmap-style rendering */}
         <HeatmapRenderer
           bidTiles={bidTiles}
           askTiles={askTiles}
-          windowStart={evidence.window_start}
-          windowEnd={evidence.window_end}
+          windowStart={viewWindowStart}
+          windowEnd={viewWindowEnd}
           priceMin={priceMin}
           priceMax={priceMax}
           tickSize={tickSize}
@@ -353,7 +439,10 @@ export function EvidencePlayer({
             clipPercentile,
             rollingWindowSec,
             holdMode,
+            holdSeconds,
+            decaySeconds,
             decayHalfLifeSec,
+            decayCurve,
             binaryMode,
           }}
           debugOptions={{
@@ -409,6 +498,16 @@ export function EvidencePlayer({
               <input type="checkbox" checked={logDebugStats} onChange={(e) => setLogDebugStats(e.target.checked)} />
               <span>Log stats</span>
             </label>
+            <div className="flex items-center gap-1">
+              <button className="px-1 py-0.5 bg-gray-800 rounded" onClick={() => handleZoomPreset(5)}>5m</button>
+              <button className="px-1 py-0.5 bg-gray-800 rounded" onClick={() => handleZoomPreset(10)}>10m</button>
+              <button className="px-1 py-0.5 bg-gray-800 rounded" onClick={() => handleZoomPreset(30)}>30m</button>
+              <button className="px-1 py-0.5 bg-gray-800 rounded" onClick={() => handleZoomPreset(60)}>1h</button>
+              <button className="px-1 py-0.5 bg-gray-700 rounded" onClick={handleZoomReset}>Full</button>
+            </div>
+            <div className="text-gray-400">
+              Window: {(viewWindowDuration / 1000).toFixed(1)}s
+            </div>
             <div className="flex items-center gap-2">
               <span className="text-gray-400">Normalize</span>
               <select
@@ -456,13 +555,44 @@ export function EvidencePlayer({
               </select>
             </div>
             <div className="flex items-center gap-2">
+              <span className="text-gray-400">Hold s</span>
+              <input
+                className="w-14 bg-gray-800 border border-gray-700 rounded px-1"
+                type="number"
+                min="0"
+                value={holdSeconds}
+                onChange={(e) => setHoldSeconds(parseInt(e.target.value, 10) || 0)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
               <span className="text-gray-400">Decay s</span>
               <input
                 className="w-14 bg-gray-800 border border-gray-700 rounded px-1"
                 type="number"
                 min="1"
+                value={decaySeconds}
+                onChange={(e) => setDecaySeconds(parseInt(e.target.value, 10) || 10)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400">Decay curve</span>
+              <select
+                className="bg-gray-800 border border-gray-700 rounded px-1"
+                value={decayCurve}
+                onChange={(e) => setDecayCurve(e.target.value as typeof decayCurve)}
+              >
+                <option value="half-life">half-life</option>
+                <option value="linear">linear</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400">Half-life s</span>
+              <input
+                className="w-14 bg-gray-800 border border-gray-700 rounded px-1"
+                type="number"
+                min="1"
                 value={decayHalfLifeSec}
-                onChange={(e) => setDecayHalfLifeSec(parseInt(e.target.value, 10) || 15)}
+                onChange={(e) => setDecayHalfLifeSec(parseInt(e.target.value, 10) || 8)}
               />
             </div>
             <div className="flex items-center gap-2">
@@ -484,7 +614,7 @@ export function EvidencePlayer({
         <div
           className="absolute top-0 bottom-0 w-0.5 bg-white/50 pointer-events-none"
           style={{
-            left: `${((currentTime - evidence.window_start) / (evidence.window_end - evidence.window_start)) * 100}%`,
+            left: `${Math.min(100, Math.max(0, ((currentTime - viewWindowStart) / (viewWindowEnd - viewWindowStart)) * 100))}%`,
           }}
         />
 
@@ -524,14 +654,19 @@ function drawOverlay(
   evidence: EvidenceResponse,
   dimensions: { width: number; height: number },
   currentTime: number,
-  selectedEventId: string | null
+  selectedEventId: string | null,
+  windowStart: number,
+  windowEnd: number
 ) {
   const { width, height } = dimensions;
-  const timeRange = evidence.window_end - evidence.window_start;
+  const timeRange = windowEnd - windowStart;
   const priceMin = parseFloat(evidence.tiles_manifest.normalization.price_min);
   const priceMax = parseFloat(evidence.tiles_manifest.normalization.price_max);
+  if (timeRange <= 0 || priceMax <= priceMin) {
+    return;
+  }
 
-  const timeToX = (ts: number) => ((ts - evidence.window_start) / timeRange) * width;
+  const timeToX = (ts: number) => ((ts - windowStart) / timeRange) * width;
   const priceToY = (price: number) => height - ((price - priceMin) / (priceMax - priceMin)) * height;
 
   // Draw anchors as horizontal lines
@@ -549,6 +684,7 @@ function drawOverlay(
 
   // Draw shocks as vertical markers
   evidence.shocks.forEach((shock) => {
+    if (shock.timestamp < windowStart || shock.timestamp > windowEnd) return;
     const x = timeToX(shock.timestamp);
     const y = priceToY(parseFloat(shock.price));
     const isSelected = shock.id === selectedEventId;
@@ -568,6 +704,7 @@ function drawOverlay(
 
   // Draw reactions as markers
   evidence.reactions.forEach((reaction) => {
+    if (reaction.timestamp < windowStart || reaction.timestamp > windowEnd) return;
     const x = timeToX(reaction.timestamp);
     const y = priceToY(parseFloat(reaction.price));
     const isSelected = reaction.id === selectedEventId;
@@ -591,6 +728,7 @@ function drawOverlay(
 
   // Draw leading events as triangles
   evidence.leading_events.forEach((event) => {
+    if (event.timestamp < windowStart || event.timestamp > windowEnd) return;
     const x = timeToX(event.timestamp);
     const y = priceToY(parseFloat(event.price));
     const isSelected = event.id === selectedEventId;
@@ -608,9 +746,13 @@ function drawOverlay(
 
   // Draw state changes as vertical bands
   evidence.state_changes.forEach((change, i) => {
-    const x = timeToX(change.timestamp);
+    if (change.timestamp > windowEnd) return;
     const nextChange = evidence.state_changes[i + 1];
-    const endX = nextChange ? timeToX(nextChange.timestamp) : width;
+    const segmentStartTs = Math.max(change.timestamp, windowStart);
+    const segmentEndTs = Math.min(nextChange ? nextChange.timestamp : windowEnd, windowEnd);
+    if (segmentEndTs <= windowStart) return;
+    const x = timeToX(segmentStartTs);
+    const endX = timeToX(segmentEndTs);
 
     ctx.fillStyle = `${STATE_COLORS[change.new_state]}15`;
     ctx.fillRect(x, 0, endX - x, height);

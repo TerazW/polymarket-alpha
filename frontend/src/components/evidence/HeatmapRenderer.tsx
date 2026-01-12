@@ -37,13 +37,17 @@ interface HeatmapRendererProps {
 
 type NormalizeMode = 'log1p' | 'sqrt' | 'linear';
 type HoldMode = 'hold' | 'decay' | 'off';
+type DecayCurve = 'linear' | 'half-life';
 
 interface HeatmapRenderConfig {
   normalizeMode: NormalizeMode;
   clipPercentile: number;
   rollingWindowSec: number;
   holdMode: HoldMode;
+  holdSeconds: number;
+  decaySeconds: number;
   decayHalfLifeSec: number;
+  decayCurve: DecayCurve;
   binaryMode: boolean;
 }
 
@@ -60,6 +64,7 @@ interface DecodedTile {
   rows: number;
   cols: number;
   side: 'bid' | 'ask';
+  hasNonZero: boolean;
 }
 
 // Optional zstd decompression support
@@ -292,6 +297,7 @@ export function HeatmapRenderer({
     side: 'bid' | 'ask';
     rangeKey: string;
     values: Float32Array;
+    seenTs: Float64Array;
   } | null>(null);
 
   const config: HeatmapRenderConfig = {
@@ -299,7 +305,10 @@ export function HeatmapRenderer({
     clipPercentile: renderConfig?.clipPercentile ?? 0.99,
     rollingWindowSec: renderConfig?.rollingWindowSec ?? 0,
     holdMode: renderConfig?.holdMode ?? 'hold',
-    decayHalfLifeSec: renderConfig?.decayHalfLifeSec ?? 15,
+    holdSeconds: renderConfig?.holdSeconds ?? 5,
+    decaySeconds: renderConfig?.decaySeconds ?? 10,
+    decayHalfLifeSec: renderConfig?.decayHalfLifeSec ?? 8,
+    decayCurve: renderConfig?.decayCurve ?? 'half-life',
     binaryMode: renderConfig?.binaryMode ?? false,
   };
 
@@ -349,12 +358,20 @@ export function HeatmapRenderer({
           }
         }
         if (matrix) {
+          let hasNonZero = false;
+          for (let i = 0; i < matrix.length; i++) {
+            if (matrix[i] > 0) {
+              hasNonZero = true;
+              break;
+            }
+          }
           decoded.push({
             tile,
             matrix,
             rows: tile.rows,
             cols: tile.cols,
             side,
+            hasNonZero,
           });
         } else {
           console.warn('[HeatmapRenderer] Failed to decode tile:', tile.t_start);
@@ -470,7 +487,7 @@ export function HeatmapRenderer({
     if (decodedTiles.length === 0) {
       // No tiles - show placeholder
       console.log('[HeatmapRender] No decoded tiles, showing placeholder');
-      renderPlaceholder(ctx, width, height);
+      renderPlaceholder(ctx, width, height, 'Waiting for data...');
       const outputCtx = canvas.getContext('2d');
       if (outputCtx) {
         outputCtx.clearRect(0, 0, width, height);
@@ -485,7 +502,18 @@ export function HeatmapRenderer({
 
     if (timeRange <= 0 || priceRange <= 0) {
       console.warn('[HeatmapRender] Invalid ranges, showing placeholder');
-      renderPlaceholder(ctx, width, height);
+      renderPlaceholder(ctx, width, height, 'Invalid window');
+      const outputCtx = canvas.getContext('2d');
+      if (outputCtx) {
+        outputCtx.clearRect(0, 0, width, height);
+        outputCtx.drawImage(offscreen, 0, 0);
+      }
+      return;
+    }
+
+    const hasAnyDepth = decodedTiles.some((tile) => tile.hasNonZero);
+    if (!hasAnyDepth) {
+      renderPlaceholder(ctx, width, height, 'No depth data');
       const outputCtx = canvas.getContext('2d');
       if (outputCtx) {
         outputCtx.clearRect(0, 0, width, height);
@@ -570,32 +598,66 @@ export function HeatmapRenderer({
         ? { r: 34, g: 197, b: 94 }   // green-500
         : { r: 239, g: 68, b: 68 };  // red-500
 
-      // Render each cell
-      const decayFactor = config.holdMode === 'decay' && config.decayHalfLifeSec > 0
-        ? Math.exp(-tile.lod_ms / (config.decayHalfLifeSec * 1000))
-        : 1;
-
+      // Render each cell with persistence model
+      const rangeKey = `${tilePriceMin}-${tilePriceMax}-${rows}-${cols}`;
       let carryOver: Float32Array | null = null;
-      if (config.holdMode !== 'off' && carryOverCache.current?.side === side && carryOverCache.current?.rangeKey === `${tilePriceMin}-${tilePriceMax}-${rows}-${cols}`) {
+      let carrySeen: Float64Array | null = null;
+      if (config.holdMode !== 'off' && carryOverCache.current?.side === side && carryOverCache.current?.rangeKey === rangeKey) {
         carryOver = carryOverCache.current?.values || null;
+        carrySeen = carryOverCache.current?.seenTs || null;
       }
 
       const lastDepthByRow = carryOver ? new Float32Array(carryOver) : new Float32Array(rows);
+      const lastSeenByRow = carrySeen ? new Float64Array(carrySeen) : new Float64Array(rows);
+      const holdMs = Math.max(0, config.holdSeconds) * 1000;
+      const decayMs = Math.max(0, config.decaySeconds) * 1000;
+      const halfLifeMs = Math.max(1, config.decayHalfLifeSec) * 1000;
+
+      const decayFactor = (elapsedMs: number) => {
+        if (decayMs <= 0) return 0;
+        if (elapsedMs >= decayMs) return 0;
+        if (config.decayCurve === 'linear') {
+          return Math.max(0, 1 - elapsedMs / decayMs);
+        }
+        return Math.exp(-Math.LN2 * (elapsedMs / halfLifeMs));
+      };
 
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < cols; col++) {
           const idx = row * cols + col;
           const value = matrix[idx];
+          const ts = tile.t_start + col * tile.lod_ms;
           let depth = 0;
 
           if (value > 0) {
             depth = decodeDepth(value, tileClipValue, scale);
             lastDepthByRow[row] = depth;
-          } else if (config.holdMode === 'hold') {
-            depth = lastDepthByRow[row];
-          } else if (config.holdMode === 'decay') {
-            lastDepthByRow[row] *= decayFactor;
-            depth = lastDepthByRow[row];
+            lastSeenByRow[row] = ts;
+          } else if (config.holdMode !== 'off') {
+            const lastSeen = lastSeenByRow[row];
+            if (lastSeen > 0) {
+              const elapsed = ts - lastSeen;
+              if (config.holdMode === 'hold') {
+                if (elapsed <= holdMs) {
+                  depth = lastDepthByRow[row];
+                } else {
+                  const decayElapsed = elapsed - holdMs;
+                  const factor = decayFactor(decayElapsed);
+                  depth = lastDepthByRow[row] * factor;
+                  if (factor <= 0) {
+                    lastDepthByRow[row] = 0;
+                    lastSeenByRow[row] = 0;
+                  }
+                }
+              } else if (config.holdMode === 'decay') {
+                const factor = decayFactor(elapsed);
+                depth = lastDepthByRow[row] * factor;
+                if (factor <= 0) {
+                  lastDepthByRow[row] = 0;
+                  lastSeenByRow[row] = 0;
+                }
+              }
+            }
           }
 
           if (depth <= 0) continue;
@@ -620,8 +682,9 @@ export function HeatmapRenderer({
       if (config.holdMode !== 'off') {
         carryOverCache.current = {
           side,
-          rangeKey: `${tilePriceMin}-${tilePriceMax}-${rows}-${cols}`,
+          rangeKey,
           values: lastDepthByRow,
+          seenTs: lastSeenByRow,
         };
       }
     }
@@ -649,22 +712,27 @@ export function HeatmapRenderer({
       const sampleCellHeight = sampleTile
         ? (((sampleTile.tile.price_max - sampleTile.tile.price_min) / priceRange) * height) / sampleTile.rows
         : 0;
+      const windowDurationSec = timeRange / 1000;
+      const lodMs = sampleTile?.tile.lod_ms ?? 0;
+      const tileMs = sampleTile?.tile.tile_ms ?? 0;
 
       ctx.save();
       ctx.globalCompositeOperation = 'source-over';
       ctx.fillStyle = 'rgba(17, 24, 39, 0.85)';
-      ctx.fillRect(8, 8, 260, 110);
+      ctx.fillRect(8, 8, 300, 124);
       ctx.fillStyle = '#e5e7eb';
       ctx.font = '11px sans-serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       const lines = [
-        `window: ${windowStart} -> ${windowEnd}`,
+        `window: ${windowDurationSec.toFixed(1)}s (${windowStart}..${windowEnd})`,
         `price: ${priceMin.toFixed(4)} -> ${priceMax.toFixed(4)}`,
-        `tiles: ${sortedTiles.length} | cell: ${sampleCellWidth.toFixed(2)}x${sampleCellHeight.toFixed(2)}`,
+        `tiles: ${sortedTiles.length} | lod: ${lodMs}ms | tile: ${tileMs}ms`,
+        `cell: ${sampleCellWidth.toFixed(2)}x${sampleCellHeight.toFixed(2)} px`,
         `clip(bid/ask): ${clipBySide.bid.toFixed(2)} / ${clipBySide.ask.toFixed(2)}`,
         `mode: ${config.normalizeMode} | pctl: ${config.clipPercentile}`,
         `roll: ${config.rollingWindowSec}s | hold: ${config.holdMode}`,
+        `persist: h${config.holdSeconds}s d${config.decaySeconds}s ${config.decayCurve}`,
       ];
       lines.forEach((line, idx) => {
         ctx.fillText(line, 14, 14 + idx * 14);
@@ -716,7 +784,10 @@ export function HeatmapRenderer({
     config.clipPercentile,
     config.rollingWindowSec,
     config.holdMode,
+    config.holdSeconds,
+    config.decaySeconds,
     config.decayHalfLifeSec,
+    config.decayCurve,
     config.binaryMode,
     debugConfig.enabled,
     debugConfig.showTileBounds,
@@ -745,7 +816,8 @@ export function HeatmapRenderer({
 function renderPlaceholder(
   ctx: CanvasRenderingContext2D,
   width: number,
-  height: number
+  height: number,
+  message: string
 ) {
   // Draw subtle gradient background
   const gradient = ctx.createLinearGradient(0, 0, 0, height);
@@ -755,14 +827,14 @@ function renderPlaceholder(
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  // Draw "Loading..." or "No Data" text
+  // Draw message text
   ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-  ctx.fillRect(width / 2 - 70, height / 2 - 15, 140, 30);
+  ctx.fillRect(width / 2 - 90, height / 2 - 15, 180, 30);
   ctx.fillStyle = '#9ca3af';
   ctx.font = '12px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('Waiting for data...', width / 2, height / 2);
+  ctx.fillText(message, width / 2, height / 2);
 }
 
 export default HeatmapRenderer;
