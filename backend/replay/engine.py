@@ -27,8 +27,6 @@ from backend.common.determinism import (
     ReplayContext,
     EventSortKey,
     get_event_clock,
-    deterministic_now,
-    ProcessingMode,
     sort_events,
     validate_event_order,
 )
@@ -199,16 +197,12 @@ class ReplayEngine:
         Returns:
             ReplayResult with verification status
         """
-        import time as sys_time
-        start = int(sys_time.time() * 1000)
-
         result = ReplayResult(
             status=ReplayStatus.RUNNING,
             token_id=token_id,
             t0=t0,
             expected_hash=expected_hash,
             events_count=len(raw_events),
-            start_ts=start,
         )
 
         try:
@@ -232,6 +226,14 @@ class ReplayEngine:
             # Window boundaries
             window_start = t0 - (window_ms // 2)
             window_end = t0 + (window_ms // 2)
+
+            if sorted_events:
+                result.start_ts = sorted_events[0].get('ts', window_start)
+                result.end_ts = sorted_events[-1].get('ts', window_end)
+            else:
+                result.start_ts = window_start
+                result.end_ts = window_end
+            result.duration_ms = max(0, result.end_ts - result.start_ts)
 
             # Process events within ReplayContext for strict determinism
             with ReplayContext(strict=strict_order) as replay_ctx:
@@ -278,10 +280,6 @@ class ReplayEngine:
         except Exception as e:
             result.status = ReplayStatus.ERROR
             result.error = str(e)
-
-        end = int(sys_time.time() * 1000)
-        result.end_ts = end
-        result.duration_ms = end - start
 
         return result
 

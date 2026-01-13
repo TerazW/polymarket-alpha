@@ -5,8 +5,11 @@ Implements OpenAPI spec endpoints
 
 from fastapi import APIRouter, Query, HTTPException, WebSocket, WebSocketDisconnect
 from typing import Optional, Literal, List, Dict, Any
+from pydantic import BaseModel, Field
 import time
 import base64
+import json
+import hashlib
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -95,6 +98,12 @@ def ts_to_ms(dt) -> int:
     if dt is None:
         return 0
     return int(dt.timestamp() * 1000)
+
+
+ALERT_DISCLAIMER = (
+    "This alert indicates observed belief instability. "
+    "It does NOT imply outcome direction or trading recommendation."
+)
 
 
 # =============================================================================
@@ -806,6 +815,20 @@ def get_alerts(
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
+            # Auto-unmute expired alerts
+            cur.execute("""
+                UPDATE alerts
+                SET status = 'OPEN',
+                    muted_at = NULL,
+                    muted_until = NULL,
+                    muted_by = NULL,
+                    mute_reason = NULL
+                WHERE status = 'MUTED'
+                  AND muted_until IS NOT NULL
+                  AND muted_until < NOW()
+            """)
+            conn.commit()
+
             # Build query conditions
             conditions = []
             params = []
@@ -828,7 +851,11 @@ def get_alerts(
             # Get alerts
             cur.execute(f"""
                 SELECT alert_id, ts, token_id, severity, status, alert_type,
-                       summary, confidence, evidence_token, evidence_t0, payload
+                       summary, confidence, evidence_token, evidence_t0, payload,
+                       recovery_evidence, resolved_at, resolved_by,
+                       is_false_positive, false_positive_reason,
+                       acked_at, acked_by,
+                       muted_at, muted_until, muted_by, mute_reason
                 FROM alerts
                 {where_clause}
                 ORDER BY ts DESC
@@ -844,8 +871,12 @@ def get_alerts(
 
         conn.close()
 
-        alerts = [
-            Alert(
+        def _optional_ts_ms(dt):
+            return int(dt.timestamp() * 1000) if dt else None
+
+        alerts = []
+        for r in rows:
+            alerts.append(Alert(
                 alert_id=str(r['alert_id']),
                 token_id=r['token_id'],
                 ts=ts_to_ms(r['ts']),
@@ -853,15 +884,25 @@ def get_alerts(
                 status=AlertStatus(r['status']),
                 type=r['alert_type'],
                 summary=r['summary'],
-                confidence=float(r['confidence'] or 80),
+                evidence_grade=EvidenceGrade.B,  # Default grade until evidence health is wired
+                evidence_confidence=float(r['confidence']) if r.get('confidence') is not None else None,
                 evidence_ref=EvidenceRef(
                     token_id=r['evidence_token'],
                     t0=r['evidence_t0'],
                 ),
                 payload=r['payload'],
-            )
-            for r in rows
-        ]
+                recovery_evidence=r.get('recovery_evidence'),
+                resolved_at=_optional_ts_ms(r.get('resolved_at')),
+                resolved_by=r.get('resolved_by'),
+                is_false_positive=bool(r.get('is_false_positive')),
+                false_positive_reason=r.get('false_positive_reason'),
+                acked_at=_optional_ts_ms(r.get('acked_at')),
+                acked_by=r.get('acked_by'),
+                muted_at=_optional_ts_ms(r.get('muted_at')),
+                muted_until=_optional_ts_ms(r.get('muted_until')),
+                muted_by=r.get('muted_by'),
+                mute_reason=r.get('mute_reason'),
+            ))
 
         return AlertsResponse(
             rows=alerts,
@@ -877,6 +918,27 @@ def get_alerts(
 # =============================================================================
 # Replay Catalog API
 # =============================================================================
+
+class ReplayVerifyRequest(BaseModel):
+    token_id: str = Field(..., min_length=1)
+    from_ts: int = Field(..., description="Start timestamp (ms)")
+    to_ts: int = Field(..., description="End timestamp (ms)")
+    expected_hash: Optional[str] = None
+    strict_order: bool = True
+
+
+class ReplayVerifyResponse(BaseModel):
+    token_id: str
+    from_ts: int
+    to_ts: int
+    input_hash: Optional[str]
+    output_hash: str
+    expected_hash: Optional[str]
+    match: Optional[bool]
+    events_count: int
+    replay_status: str
+    error: Optional[str] = None
+
 
 @router.get("/replay/catalog", response_model=ReplayCatalogResponse)
 def get_replay_catalog(
@@ -991,6 +1053,122 @@ def get_replay_catalog(
 
     except Exception as e:
         return ReplayCatalogResponse(rows=[], limit=limit, offset=offset, total=0)
+
+
+# =============================================================================
+# Replay Verification API (Deterministic)
+# =============================================================================
+
+@router.post("/replay/verify", response_model=ReplayVerifyResponse)
+def replay_verify(body: ReplayVerifyRequest):
+    """
+    Deterministic replay verification for a token/time window.
+
+    Returns input/output/expected hashes and match status.
+    """
+    if body.from_ts >= body.to_ts:
+        raise HTTPException(status_code=400, detail="from_ts must be < to_ts")
+
+    token_id = body.token_id
+    from_ts = body.from_ts
+    to_ts = body.to_ts
+    window_ms = to_ts - from_ts
+    t0 = from_ts + (window_ms // 2)
+
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ts, event_type, token_id, payload, seq
+                FROM raw_events
+                WHERE token_id = %s
+                  AND ts BETWEEN to_timestamp(%s / 1000.0) AND to_timestamp(%s / 1000.0)
+                ORDER BY ts ASC, seq ASC
+            """, (token_id, from_ts, to_ts))
+            rows = cur.fetchall()
+        conn.close()
+
+        raw_events = []
+        for r in rows:
+            payload = r.get('payload')
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = {}
+            if payload is None:
+                payload = {}
+
+            event_type = r.get('event_type') or payload.get('type') or ''
+            if event_type == 'book':
+                event_type = 'book_snapshot'
+
+            event = dict(payload) if isinstance(payload, dict) else {}
+            event.update({
+                'type': event_type,
+                'ts': ts_to_ms(r.get('ts')),
+                'seq': r.get('seq') or 0,
+                'token_id': r.get('token_id') or token_id,
+            })
+            raw_events.append(event)
+
+        # Deterministic input hash (sorted by canonical key)
+        def _event_sort_key(e: Dict[str, Any]):
+            return (e.get('token_id', token_id), e.get('ts', 0), e.get('seq', 0))
+
+        raw_events_sorted = sorted(raw_events, key=_event_sort_key)
+        input_hash = None
+        if raw_events_sorted:
+            input_hash = hashlib.sha256(
+                json.dumps(raw_events_sorted, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+
+        expected_hash = body.expected_hash
+        if expected_hash is None:
+            window_before_ms = t0 - from_ts
+            window_after_ms = to_ts - t0
+            if window_before_ms <= 3600000 and window_after_ms <= 3600000:
+                evidence = get_evidence(
+                    token_id=token_id,
+                    t0=t0,
+                    window_before_ms=window_before_ms,
+                    window_after_ms=window_after_ms,
+                    include_tiles_manifest=False,
+                    lod=250,
+                )
+                expected_hash = evidence.bundle_hash
+
+        from backend.replay.engine import ReplayEngine
+
+        engine = ReplayEngine()
+        result = engine.replay(
+            raw_events=raw_events_sorted,
+            expected_hash=expected_hash or "",
+            token_id=token_id,
+            t0=t0,
+            window_ms=window_ms,
+            strict_order=body.strict_order,
+        )
+
+        match = None if expected_hash is None else (result.computed_hash == expected_hash)
+
+        return ReplayVerifyResponse(
+            token_id=token_id,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            input_hash=input_hash,
+            output_hash=result.computed_hash,
+            expected_hash=expected_hash,
+            match=match,
+            events_count=result.events_count,
+            replay_status=result.status.value,
+            error=result.error,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
@@ -1546,9 +1724,6 @@ def debug_heatmap_tiles(
 # Alert ACK API (v5.9)
 # =============================================================================
 
-from pydantic import BaseModel, Field
-
-
 class AlertAckRequest(BaseModel):
     """Request body for acknowledging an alert"""
     note: Optional[str] = None
@@ -1654,10 +1829,13 @@ async def acknowledge_alert(
 
             current_status = row['status']
 
-            if current_status == 'RESOLVED':
+            if current_status != 'OPEN':
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Alert {alert_id} is already resolved and cannot be acknowledged"
+                    detail=(
+                        f"Alert {alert_id} is in {current_status} state and cannot be acknowledged. "
+                        "Only OPEN alerts can be acknowledged."
+                    )
                 )
 
             # Update alert status
@@ -1683,6 +1861,7 @@ async def acknowledge_alert(
                 "status": "ACKED",
                 "severity": row['severity'],
                 "summary": row['summary'],
+                "disclaimer": ALERT_DISCLAIMER,
                 "acked_at": acked_at,
                 "acked_by": acked_by,
             },
@@ -1747,6 +1926,18 @@ async def resolve_alert(
 
             if not row:
                 raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+            current_status = row['status']
+            if current_status == 'RESOLVED':
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Alert {alert_id} is already resolved"
+                )
+            if current_status not in ('OPEN', 'ACKED', 'MUTED'):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Alert {alert_id} is in {current_status} state and cannot be resolved"
+                )
 
             token_id = row['token_id']
             alert_type = row['alert_type']
@@ -1815,6 +2006,10 @@ async def resolve_alert(
                     resolved_at = to_timestamp(%s / 1000.0),
                     resolved_by = %s,
                     resolve_note = %s,
+                    muted_at = NULL,
+                    muted_until = NULL,
+                    muted_by = NULL,
+                    mute_reason = NULL,
                     recovery_evidence = %s,
                     is_false_positive = %s,
                     false_positive_reason = %s
@@ -1835,6 +2030,7 @@ async def resolve_alert(
                 "status": "RESOLVED",
                 "severity": row['severity'],
                 "summary": row['summary'],
+                "disclaimer": ALERT_DISCLAIMER,
                 "resolved_at": resolved_at,
                 "resolved_by": resolved_by,
                 "recovery_evidence": recovery_evidence,
@@ -1933,6 +2129,7 @@ async def mute_alert(
                 "status": "MUTED",
                 "severity": row['severity'],
                 "summary": row['summary'],
+                "disclaimer": ALERT_DISCLAIMER,
                 "muted_at": now,
                 "muted_until": muted_until,
                 "muted_by": muted_by,
@@ -2016,6 +2213,7 @@ async def unmute_alert(
                 "status": "OPEN",
                 "severity": row['severity'],
                 "summary": row['summary'],
+                "disclaimer": ALERT_DISCLAIMER,
                 "unmuted_at": now,
                 "unmuted_by": unmuted_by,
             },

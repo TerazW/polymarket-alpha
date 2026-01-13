@@ -66,11 +66,15 @@ export interface AlertPayload {
   alert_id: string;
   token_id: string;
   severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-  status: 'OPEN' | 'ACKED' | 'RESOLVED';
+  status: 'OPEN' | 'ACKED' | 'RESOLVED' | 'MUTED';
+  type?: string;
   summary: string;
+  disclaimer?: string;
   ts?: number;
   acked_at?: number;
   resolved_at?: number;
+  muted_at?: number;
+  muted_until?: number;
 }
 
 export interface SubscriptionOptions {

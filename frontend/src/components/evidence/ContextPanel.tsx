@@ -47,7 +47,7 @@ export function ContextPanel({
 
       {/* Current State */}
       <Section title="Belief State">
-        <StateDisplay state={proofSummary.current_state} confidence={proofSummary.confidence} />
+        <StateDisplay state={proofSummary.current_state} />
         <div className="mt-3 space-y-2 text-sm">
           <div className="flex justify-between">
             <span className="text-gray-400">Hold Ratio</span>
@@ -125,7 +125,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function StateDisplay({ state, confidence }: { state: BeliefState; confidence: number }) {
+function StateDisplay({ state }: { state: BeliefState }) {
   const config: Record<BeliefState, { emoji: string; bg: string }> = {
     STABLE: { emoji: '🟢', bg: 'bg-green-500/10 border-green-500/30' },
     FRAGILE: { emoji: '🟡', bg: 'bg-yellow-500/10 border-yellow-500/30' },
@@ -143,10 +143,6 @@ function StateDisplay({ state, confidence }: { state: BeliefState; confidence: n
           <span className="font-semibold" style={{ color: STATE_COLORS[state] }}>
             {state}
           </span>
-        </div>
-        <div className="text-right">
-          <div className="text-sm text-gray-400">Confidence</div>
-          <div className="font-bold">{confidence}%</div>
         </div>
       </div>
     </div>

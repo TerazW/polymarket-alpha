@@ -20,6 +20,8 @@ from enum import Enum
 import os
 import asyncio
 import time
+from dataclasses import asdict, is_dataclass
+from datetime import datetime
 
 from backend.reactor.service import ReactorService, BeliefMachineService
 
@@ -42,6 +44,12 @@ from backend.api.stream import (
 
 
 router = APIRouter(prefix="/reactor", tags=["reactor"])
+
+# v5.36: Counterfactual disclaimer for alert payloads
+ALERT_DISCLAIMER = (
+    "This alert indicates observed belief instability. "
+    "It does NOT imply outcome direction or trading recommendation."
+)
 
 # Global reactor service instance (singleton)
 _reactor_service: Optional[ReactorService] = None
@@ -113,10 +121,34 @@ def _on_alert_callback(alert: Dict):
 
     Called by ReactorService when alert generated.
     """
+    payload: Dict[str, Any]
+    if is_dataclass(alert):
+        payload = asdict(alert)
+    elif hasattr(alert, "to_dict"):
+        payload = alert.to_dict()
+    elif isinstance(alert, dict):
+        payload = dict(alert)
+    else:
+        payload = {}
+
+    if "severity" not in payload and "priority" in payload:
+        payload["severity"] = payload["priority"]
+    if "status" not in payload:
+        payload["status"] = "OPEN"
+    if "summary" not in payload:
+        payload["summary"] = payload.get("title") or payload.get("message") or ""
+    if "type" not in payload and "alert_type" in payload:
+        payload["type"] = payload["alert_type"]
+    if "ts" not in payload:
+        payload["ts"] = payload.get("timestamp")
+    if isinstance(payload.get("ts"), datetime):
+        payload["ts"] = int(payload["ts"].timestamp() * 1000)
+    payload.setdefault("disclaimer", ALERT_DISCLAIMER)
+
     loop = _get_event_loop()
     if loop and loop.is_running():
         asyncio.run_coroutine_threadsafe(
-            publish_alert(alert, StreamEventType.ALERT_NEW),
+            publish_alert(payload, StreamEventType.ALERT_NEW),
             loop
         )
 

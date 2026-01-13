@@ -443,7 +443,7 @@ CRACKING → BROKEN:
 **排序選項**:
 - `fragile_index_10m` - 脆弱性指數
 - `leading_rate_10m` - 領先事件率
-- `confidence` - 證據置信度
+- `evidence_grade` - Evidence quality grade (A-D)
 - `state_severity` - 狀態嚴重程度
 
 ### 6.2 Evidence Player（證據播放器）
@@ -721,7 +721,7 @@ bundle_hash = sha256(canonical_json(bundle_data))
       "state_since_ts": 1704067200000,
       "fragile_index_10m": 45.5,
       "leading_rate_10m": 3,
-      "evidence_confidence": 70.0,
+      "evidence_grade": "B",
       "explanation": { "headline": "...", "top_factors": [...] }
     }
   ],
@@ -1095,3 +1095,4 @@ cancel_driven_ratio = 1 - trade_driven_ratio
 ---
 
 > *"證據，不是預測。過去的反應被展示，未來的結果不被暗示。"*
+

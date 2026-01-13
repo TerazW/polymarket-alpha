@@ -101,6 +101,7 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "GET /v1/evidence": "evidence:read",
     "GET /v1/alerts": "alerts:read",
     "GET /v1/replay/catalog": "replay:read",
+    "POST /v1/replay/verify": "replay:read",
     "GET /v1/heatmap/tiles": "heatmap:read",
     "GET /v1/metrics": "metrics:read",
 

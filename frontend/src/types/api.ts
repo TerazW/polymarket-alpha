@@ -69,8 +69,7 @@ export interface RadarMarket {
   state: BeliefState;
   state_since: number;  // timestamp ms
 
-  // Metrics (0-100)
-  confidence: number;
+  // Metrics
   leading_rate_10m: number;   // leading events per 10 min
   fragile_index_10m: number;  // weighted fragility score
 
@@ -167,7 +166,6 @@ export interface StateChange {
 export interface ProofSummary {
   current_state: BeliefState;
   state_since: number;
-  confidence: number;
 
   // Counts in window
   shock_count: number;

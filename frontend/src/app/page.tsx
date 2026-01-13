@@ -14,7 +14,6 @@ interface Market {
   liquidity: number;
   yes_price: number | null;
   state?: BeliefState;
-  confidence?: number;
   leading_rate_10m?: number;
 }
 
@@ -43,8 +42,6 @@ function radarRowToMarket(row: RadarRow): Market {
     liquidity: 0,
     yes_price: row.market.last_price ?? null,
     state: row.belief_state,
-    // v5.36: Use evidence_confidence, fallback to deprecated confidence
-    confidence: row.evidence_confidence ?? row.confidence,
     leading_rate_10m: row.leading_rate_10m,
   };
 }
@@ -204,9 +201,6 @@ export default function Dashboard() {
                       <h3 className="font-medium mb-1 truncate">{market.question}</h3>
                       <div className="flex gap-4 text-sm text-gray-400">
                         <span>Vol: ${(market.volume_24h || 0).toLocaleString()}</span>
-                        {market.confidence !== undefined && (
-                          <span>Confidence: {market.confidence}%</span>
-                        )}
                         {market.leading_rate_10m !== undefined && market.leading_rate_10m > 0 && (
                           <span className="text-yellow-400">
                             Leading: {market.leading_rate_10m}/10m

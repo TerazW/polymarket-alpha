@@ -25,8 +25,6 @@ export interface RadarRow {
   evidence_grade: 'A' | 'B' | 'C' | 'D';  // v5.34
   fragile_index_10m: number;
   leading_rate_10m: number;
-  evidence_confidence: number;  // v5.36: renamed from confidence
-  confidence?: number;  // deprecated, for backwards compat
   data_health: {
     missing_bucket_ratio_10m: number;
     rebuild_count_10m: number;
@@ -132,11 +130,16 @@ export interface AlertRow {
   token_id: string;
   ts: number;
   severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-  status: 'OPEN' | 'ACKED' | 'RESOLVED';
+  status: 'OPEN' | 'ACKED' | 'RESOLVED' | 'MUTED';
   type: string;
   summary: string;
-  confidence: number;
   evidence_ref: { token_id: string; t0: number };
+  evidence_grade?: 'A' | 'B' | 'C' | 'D';
+  disclaimer?: string;
+  recovery_evidence?: string[];
+  resolved_at?: number;
+  resolved_by?: string;
+  muted_until?: number;
 }
 
 export interface AlertsResponse {

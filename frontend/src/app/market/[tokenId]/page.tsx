@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo, useRef, use } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ContextPanel } from '@/components/evidence/ContextPanel';
 import { EvidencePlayer } from '@/components/evidence/EvidencePlayer';
+import { AlertsPanel } from '@/components/evidence/AlertsPanel';
 import { TapePanel } from '@/components/evidence/TapePanel';
 // v5.36: New evidence panels
 import ReactionDistributionPanel from '@/components/evidence/ReactionDistributionPanel';
@@ -79,7 +80,6 @@ function convertApiEvidence(api: ApiEvidenceResponse): EvidenceResponse {
     proof_summary: {
       current_state: (api.belief_states[api.belief_states.length - 1]?.belief_state || 'STABLE') as BeliefState,
       state_since: api.belief_states[api.belief_states.length - 1]?.ts || api.t0,
-      confidence: 80,
       shock_count: api.shocks.length,
       reaction_counts: {
         VACUUM: api.reactions.filter(r => r.reaction === 'VACUUM').length,
@@ -271,15 +271,21 @@ export default function MarketDetailPage({ params }: PageProps) {
           />
         </div>
 
-        {/* Center: Evidence Player (Heatmap + Timeline) */}
+        {/* Center: Alerts (primary) + Compact Heatmap (context) */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <EvidencePlayer
-            evidence={evidence}
-            currentTime={currentTime}
-            selectedEventId={selectedEventId}
-            onTimeChange={handleTimeChange}
-            onEventClick={handleEventClick}
-          />
+          <div className="flex-1 overflow-y-auto border-b border-gray-800">
+            <AlertsPanel tokenId={tokenId} />
+          </div>
+          <div className="h-[360px] min-h-[320px]">
+            <EvidencePlayer
+              evidence={evidence}
+              currentTime={currentTime}
+              selectedEventId={selectedEventId}
+              onTimeChange={handleTimeChange}
+              onEventClick={handleEventClick}
+              compact
+            />
+          </div>
         </div>
 
         {/* Right: Tape + Proof Panel + v5.36 Panels */}

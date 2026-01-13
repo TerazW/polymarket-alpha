@@ -20,6 +20,8 @@ interface EvidencePlayerProps {
   enableRealtime?: boolean;
   /** Callback when new real-time event arrives */
   onRealtimeEvent?: (event: { type: string; data: unknown }) => void;
+  /** Compact layout for smaller heatmap panel */
+  compact?: boolean;
 }
 
 export function EvidencePlayer({
@@ -30,6 +32,7 @@ export function EvidencePlayer({
   onEventClick,
   enableRealtime = false,
   onRealtimeEvent,
+  compact = false,
 }: EvidencePlayerProps) {
   // DEBUG: count renders
   console.count('[DEBUG] EvidencePlayer render');
@@ -55,6 +58,7 @@ export function EvidencePlayer({
   const [showTileBounds, setShowTileBounds] = useState(false);
   const [showTileLabels, setShowTileLabels] = useState(false);
   const [binaryMode, setBinaryMode] = useState(false);
+  const [showDevPanel, setShowDevPanel] = useState(false);
   const [normalizeMode, setNormalizeMode] = useState<'log1p' | 'sqrt' | 'linear'>('log1p');
   const [clipPercentile, setClipPercentile] = useState(0.99);
   const [rollingWindowSec, setRollingWindowSec] = useState(0);
@@ -256,12 +260,14 @@ export function EvidencePlayer({
 
     const observer = new ResizeObserver((entries) => {
       const { width, height } = entries[0].contentRect;
-      setDimensions({ width, height: Math.max(300, height - 100) }); // Reserve space for timeline
+      const reserved = compact ? 90 : 100;
+      const minHeight = compact ? 200 : 300;
+      setDimensions({ width, height: Math.max(minHeight, height - reserved) }); // Reserve space for timeline
     });
 
     observer.observe(container);
     return () => observer.disconnect();
-  }, []);
+  }, [compact]);
 
   // Reset view window when evidence window changes
   useEffect(() => {
@@ -358,8 +364,10 @@ export function EvidencePlayer({
   const priceMax = parseFloat(evidence.tiles_manifest.normalization.price_max);
   const tickSize = parseFloat(evidence.tiles_manifest.normalization.tick_size);
 
+  const heatmapSizeClass = compact ? '' : 'flex-1';
+
   return (
-    <div ref={containerRef} className="flex-1 flex flex-col p-4">
+    <div ref={containerRef} className="h-full flex flex-col p-4">
       {/* Status Bar - Hash, Staleness, Connection */}
       <div className="flex items-center justify-between mb-2 px-2">
         <div className="flex items-center gap-3">
@@ -417,7 +425,8 @@ export function EvidencePlayer({
 
       {/* Heatmap */}
       <div
-        className="flex-1 relative bg-gray-800 rounded-lg overflow-hidden cursor-crosshair"
+        className={`${heatmapSizeClass} relative bg-gray-800 rounded-lg overflow-hidden cursor-crosshair`}
+        style={compact ? { height: dimensions.height } : undefined}
         onClick={handleCanvasClick}
         onWheel={handleWheelZoom}
       >
@@ -467,8 +476,21 @@ export function EvidencePlayer({
           </div>
         )}
 
-        {/* DEV: Heatmap debug controls */}
+        {/* DEV: Heatmap debug toggle */}
         {isDev && (
+          <button
+            className="absolute top-2 right-2 px-2 py-1 bg-gray-900/80 border border-gray-700 rounded text-xs"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowDevPanel((prev) => !prev);
+            }}
+          >
+            {showDevPanel ? 'Hide Debug' : 'Show Debug'}
+          </button>
+        )}
+
+        {/* DEV: Heatmap debug controls */}
+        {isDev && showDevPanel && (
           <div
             className="absolute top-2 right-14 bg-gray-900/90 border border-gray-700 rounded p-2 text-xs space-y-1 pointer-events-auto"
             onClick={(e) => e.stopPropagation()}

@@ -391,9 +391,15 @@ class Alert(BaseModel):
     status: AlertStatus
     type: str
     summary: str
-    evidence_confidence: float = Field(..., ge=0, le=100, description="v5.36: Evidence completeness confidence (NOT market confidence)")
+    evidence_confidence: Optional[float] = Field(None, ge=0, le=100, description="v5.36: Evidence completeness confidence (NOT market confidence)")
     evidence_ref: EvidenceRef
     payload: Optional[Dict[str, Any]] = None
+    acked_at: Optional[int] = Field(None, description="Timestamp when acknowledged")
+    acked_by: Optional[str] = Field(None, description="Who acknowledged (user_id or 'system')")
+    muted_at: Optional[int] = Field(None, description="Timestamp when muted")
+    muted_until: Optional[int] = Field(None, description="Timestamp when mute expires")
+    muted_by: Optional[str] = Field(None, description="Who muted (user_id or 'system')")
+    mute_reason: Optional[str] = Field(None, description="Reason for muting")
     # v5.36: Recovery evidence for resolution
     recovery_evidence: Optional[List[str]] = Field(None, description="v5.36: System-generated evidence supporting resolution")
     resolved_at: Optional[int] = Field(None, description="Timestamp when resolved")
