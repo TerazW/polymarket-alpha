@@ -1,1 +1,0 @@
-"""Belief Reaction System - API"""
