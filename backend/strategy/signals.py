@@ -148,8 +148,8 @@ class MarketSignalProcessor:
         # Belief state from reactor (PRIMARY SIGNAL)
         self._belief_state: str = "STABLE"
         self._belief_state_history: deque = deque(maxlen=50)
-        self._last_reaction_type: Optional[str] = None
-        self._last_reaction_side: Optional[str] = None
+        # Track ALL recent reactions for net direction (not just last one)
+        self._reaction_sides: deque = deque(maxlen=30)  # (timestamp, side) pairs
 
         # Price at last belief state change (for measuring dislocation)
         self._price_at_state_change: Optional[float] = None
@@ -226,9 +226,14 @@ class MarketSignalProcessor:
         - VACUUM/SWEEP/PULL on bid side → selling pressure → price likely down
         - VACUUM/SWEEP/PULL on ask side → buying pressure → price likely up
         - HOLD → no directional information
+
+        We track ALL recent reactions, not just the last one, so that
+        direction is determined by net balance (3 bid PULLs + 1 ask PULL
+        = net bearish), not by which happened last.
         """
-        self._last_reaction_type = reaction_type
-        self._last_reaction_side = side
+        # Only track directional reactions (HOLD/NO_IMPACT are neutral)
+        if reaction_type in ("VACUUM", "SWEEP", "CHASE", "PULL", "DELAYED"):
+            self._reaction_sides.append((time.time(), side))
 
     def generate_signals(self, market_price: float) -> MarketSignals:
         """
@@ -307,34 +312,43 @@ class MarketSignalProcessor:
         Returns float in [-1, 1]:
           Negative = bearish (bet NO), Positive = bullish (bet YES)
 
-        Logic:
-          - STABLE: 0 (no edge)
-          - FRAGILE: small signal based on reaction side
-          - CRACKING/BROKEN: strong signal based on reaction side + price move
+        Uses NET direction from ALL recent reactions in the window,
+        not just the last one. This prevents a single contrary reaction
+        from flipping the direction when the overall balance is clear.
 
-        The direction comes from WHERE the liquidity reaction happened:
-          - Reactions on bid side (bid liquidity collapsing) → bearish
-          - Reactions on ask side (ask liquidity collapsing) → bullish
+        Example: 5 bid PULLs + 1 ask PULL → net direction = bearish
         """
         severity = BELIEF_STATE_SEVERITY.get(self._belief_state, 0.0)
 
         if severity < 0.1:
             return 0.0  # STABLE: no directional signal
 
-        # Direction from reaction side
-        if self._last_reaction_side == "bid":
-            raw_direction = -1.0  # Bid collapsing → bearish
-        elif self._last_reaction_side == "ask":
-            raw_direction = 1.0   # Ask collapsing → bullish
-        else:
-            # No reaction side info; use price momentum as weak proxy
+        # Count bid vs ask reactions in recent window
+        now = time.time()
+        window_seconds = 3600  # 1 hour window for direction
+        bid_count = 0
+        ask_count = 0
+        for ts, side in self._reaction_sides:
+            if now - ts <= window_seconds:
+                if side == "bid":
+                    bid_count += 1
+                elif side == "ask":
+                    ask_count += 1
+
+        total = bid_count + ask_count
+        if total == 0:
+            # No reactions with side info; use price momentum as weak proxy
             if len(self._price_buffer) >= 20:
                 recent = list(self._price_buffer)
                 short_ma = np.mean(recent[-5:])
                 long_ma = np.mean(recent[-20:])
-                raw_direction = np.sign(short_ma - long_ma)
+                raw_direction = float(np.sign(short_ma - long_ma))
             else:
                 return 0.0
+        else:
+            # Net direction: bid reactions = bearish, ask reactions = bullish
+            # Strength proportional to imbalance
+            raw_direction = (ask_count - bid_count) / total  # [-1, 1]
 
         # Scale by severity
         return float(np.clip(raw_direction * severity, -1.0, 1.0))

@@ -121,7 +121,7 @@ ANCHOR_TOP_K = 3                     # 每个 token 选 top 3
 # =============================================================================
 # BELIEF STATE MACHINE PARAMETERS (Phase 3)
 # =============================================================================
-STATE_WINDOW_MS = 30 * 60 * 1000     # 滚动窗口 30 分钟
+STATE_WINDOW_MS = 120 * 60 * 1000    # 滚动窗口 2 小时（事件市场 informed flow 渗透慢）
 STATE_HOLD_RATIO_STABLE = 0.7        # STABLE 需要 hold_ratio >= 70%
 KEY_LEVELS_COUNT = 5                 # 追踪的关键价位数量
 KEY_LEVELS_LOOKBACK_HOURS = 24       # 关键价位历史回看时间
