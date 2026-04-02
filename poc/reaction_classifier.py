@@ -426,7 +426,7 @@ class ReactionClassifier:
         # v5.13: Use shock timestamp + window duration for determinism
         # The reaction is classified after the observation window ends
         window_ms = REACTION_FAST_WINDOW_MS if window_type == WindowType.FAST else REACTION_SLOW_WINDOW_MS
-        reaction_ts = shock.timestamp + window_ms
+        reaction_ts = shock.ts_start + window_ms
 
         return ReactionEvent(
             shock_id=shock.shock_id,

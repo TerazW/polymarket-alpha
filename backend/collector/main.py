@@ -442,7 +442,7 @@ def on_trade(trade: Dict):
         # v5: Generate alert
         alert_generator.on_shock(
             shock_id=shock.shock_id,
-            ts=datetime.fromtimestamp(shock.timestamp / 1000),
+            ts=datetime.fromtimestamp(shock.ts_start / 1000),
             token_id=shock.token_id,
             price=float(shock.price),
             side=shock.side,
