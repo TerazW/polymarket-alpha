@@ -774,27 +774,17 @@ def get_top_markets(limit: int = 10):
 
 def main():
     """主函数"""
+    import argparse
+    parser = argparse.ArgumentParser(description="Belief Reaction Collector")
+    parser.add_argument("--markets", type=int, default=10, help="Number of top markets to monitor")
+    parser.add_argument("--tokens", type=str, help="Path to JSON file with token IDs (from screen_markets.py)")
+    args = parser.parse_args()
+
     print()
     print("=" * 60)
-    print("  Belief Reaction System - Collector v4")
+    print("  Polymarket Trading Engine - Collector")
     print("  实时数据收集 + Shock 检测 + 双窗口反应分类 + 状态机")
     print("=" * 60)
-    print()
-    print("  v3 改进:")
-    print("    - baseline_size 中位数 (防操纵)")
-    print("    - FAST 窗口 (8s) + SLOW 窗口 (30s)")
-    print("    - 新分类: VACUUM > SWEEP > CHASE > PULL > HOLD > DELAYED > NO_IMPACT")
-    print("    - 领先事件: PRE_SHOCK_PULL / DEPTH_COLLAPSE / GRADUAL_THINNING")
-    print("    - Deterministic 状态机: STABLE → FRAGILE → CRACKING → BROKEN")
-    print()
-    print("  v4 改进 (ChatGPT Audit):")
-    print("    - 250ms 时间桶采样 (不按消息条数)")
-    print("    - 统一用 server timestamp")
-    print("    - raw_events 保存用于 debug/replay")
-    print()
-    print(f"  v5.3 Evidence 可审计性:")
-    print(f"    - Engine Version: {ENGINE_VERSION}")
-    print(f"    - Config Hash: {CONFIG_HASH[:16]}...")
     print()
 
     # 测试数据库连接
@@ -810,11 +800,19 @@ def main():
 
     except Exception as e:
         print(f"❌ 数据库连接失败: {e}")
-        print("   请确保 Docker 容器正在运行: docker-compose up -d")
+        print("   请确保 Docker 容器正在运行: docker compose -f infra/docker-compose.yml up -d")
         return
 
-    # 获取热门市场
-    token_ids = get_top_markets(limit=10)
+    # 获取市场
+    if args.tokens:
+        # Load from screen_markets.py output
+        import json as _json
+        with open(args.tokens) as f:
+            token_ids = _json.load(f)
+        print(f"✅ Loaded {len(token_ids)} token IDs from {args.tokens}")
+    else:
+        # Auto-discover top markets
+        token_ids = get_top_markets(limit=args.markets)
 
     if not token_ids:
         print("没有获取到市场，退出")
