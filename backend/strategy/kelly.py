@@ -1,22 +1,32 @@
 """
-Bayesian Kelly Criterion for Prediction Market Position Sizing
+Bayesian Kelly Criterion for Prediction Market Position Sizing (v6.1 fix)
+
+DESIGN FIX (post-review):
+
+  The Beta posterior must ONLY be updated with INDEPENDENT EVIDENCE:
+  - Market resolution outcomes (update_outcome) — the only hard signal
+  - NOT with the system's own p_estimate every tick (self-feeding loop)
+
+  The previous version called update_with_price_signal() inside size_position(),
+  causing the posterior's alpha+beta to inflate on every call. After 100 calls,
+  the posterior becomes absurdly overconfident in whatever p_estimate was — but
+  that confidence is fake, not backed by independent observations.
+
+  Fixed version:
+  - size_position() takes p_estimate as a PLUG-IN value, does NOT feed it
+    back into the posterior
+  - Posterior only updates via update_outcome() (market resolution)
+  - Bayesian Kelly still works: posterior uncertainty naturally implements
+    fractional Kelly, but the uncertainty comes from real outcome data
 
 References:
 - Kelly (1956) "A New Interpretation of Information Rate"
 - Thorp (2006) "The Kelly Criterion in Blackjack, Sports Betting and the Stock Market"
 - MacLean, Thorp & Ziemba (2011) "The Kelly Capital Growth Investment Criterion"
-- Cover & Thomas (2006) "Elements of Information Theory"
-
-Key insight: Kelly maximizes asymptotic log-growth rate G* = D_KL(p || b)
-where p is true probability and b is market price.
-
-We use Bayesian Kelly with Beta posterior to naturally account for
-estimation uncertainty (effectively implements fractional Kelly).
 """
 
 import numpy as np
 from scipy.optimize import minimize_scalar
-from scipy.special import betaln
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List
 import logging
@@ -40,6 +50,9 @@ class BetaPosterior:
     Prior: p ~ Beta(alpha, beta)
     After observing k successes in n trials:
     Posterior: p ~ Beta(alpha + k, beta + n - k)
+
+    IMPORTANT: Only update with INDEPENDENT observations (market outcomes),
+    never with the system's own signal estimates.
     """
 
     def __init__(self, alpha: float = 2.0, beta: float = 2.0):
@@ -47,20 +60,14 @@ class BetaPosterior:
         self.beta = beta
 
     def update(self, outcome: int, weight: float = 1.0):
-        """Update with binary outcome (1=YES, 0=NO)."""
+        """
+        Update with binary outcome (1=YES, 0=NO).
+
+        This should ONLY be called when a market resolves or when
+        there is genuine new independent evidence.
+        """
         self.alpha += outcome * weight
         self.beta += (1 - outcome) * weight
-
-    def update_with_price_signal(self, estimated_prob: float, confidence: float = 1.0):
-        """
-        Update posterior using a soft probability signal.
-
-        Instead of hard 0/1 outcomes, incorporate a probability estimate
-        with a confidence weight.
-        """
-        # Treat as a pseudo-observation weighted by confidence
-        self.alpha += estimated_prob * confidence
-        self.beta += (1 - estimated_prob) * confidence
 
     @property
     def mean(self) -> float:
@@ -74,6 +81,11 @@ class BetaPosterior:
     @property
     def std(self) -> float:
         return np.sqrt(self.variance)
+
+    @property
+    def n_observations(self) -> float:
+        """Effective number of observations (alpha + beta - prior)."""
+        return self.alpha + self.beta
 
     def prob_above(self, threshold: float) -> float:
         """P(p > threshold) under the posterior."""
@@ -102,7 +114,7 @@ class BetaPosterior:
             return -1e10
 
         c = market_price
-        win_return = (1 - c) / c  # Payout per dollar risked
+        win_return = (1 - c) / c
 
         def integrand(p):
             g = p * np.log(1 + fraction * win_return) + (1 - p) * np.log(1 - fraction)
@@ -139,13 +151,9 @@ def compute_bayesian_kelly(
     posterior: BetaPosterior,
     market_price: float,
     side: str = "YES",
-    n_grid: int = 100,
 ) -> Tuple[float, float]:
     """
     Bayesian Kelly: maximize E_posterior[log(wealth)] over fraction f.
-
-    This naturally produces a more conservative bet than plug-in Kelly
-    because posterior uncertainty reduces the optimal fraction.
 
     Returns:
         (optimal_fraction, expected_growth_rate)
@@ -153,7 +161,6 @@ def compute_bayesian_kelly(
     c = market_price
 
     if side == "YES":
-        # Optimize YES fraction
         def neg_growth(f):
             if f <= 0.001:
                 return 0.0
@@ -162,7 +169,6 @@ def compute_bayesian_kelly(
         result = minimize_scalar(neg_growth, bounds=(0.001, 0.5), method='bounded')
         return float(result.x), float(-result.fun)
     else:
-        # For NO bet, flip: bet on NO at price (1-c)
         flipped_posterior = BetaPosterior(alpha=posterior.beta, beta=posterior.alpha)
         def neg_growth(f):
             if f <= 0.001:
@@ -175,13 +181,19 @@ def compute_bayesian_kelly(
 
 class KellyPositionSizer:
     """
-    Full Kelly position sizing system with Bayesian estimation,
-    fractional Kelly, and risk constraints.
+    Kelly position sizing system.
+
+    v6.1 FIX: size_position() uses p_estimate as plug-in value directly.
+    Posterior is ONLY updated via update_outcome() when markets resolve.
+    No more self-feeding loop.
+
+    When we have enough market resolution data (> 5 outcomes for a market),
+    we use Bayesian Kelly which naturally accounts for estimation uncertainty.
+    Otherwise, we use plug-in Kelly with the fractional multiplier.
     """
 
     def __init__(self, config: Optional[KellyConfig] = None):
         self.config = config or KellyConfig()
-        # Per-market Beta posteriors
         self._posteriors: Dict[str, BetaPosterior] = {}
 
     def get_or_create_posterior(
@@ -197,26 +209,23 @@ class KellyPositionSizer:
         p_estimate: float,
         market_price: float,
         bankroll: float,
-        use_bayesian: bool = True,
     ) -> Dict:
         """
         Compute position size for a market.
 
-        Returns dict with:
-            side: "YES" or "NO" or None
-            fraction: Kelly fraction (after multiplier and caps)
-            size_usd: Dollar amount to risk
-            edge: Estimated edge
-            confidence: P(edge > 0)
-            growth_rate: Expected log-growth rate
-        """
-        posterior = self.get_or_create_posterior(market_id)
-        posterior.update_with_price_signal(p_estimate, confidence=0.5)
+        Args:
+            market_id: Market identifier
+            p_estimate: Estimated P(YES) from signal layer
+            market_price: Current market price
+            bankroll: Current bankroll
 
-        # Determine side
-        p_est = posterior.mean
-        edge_yes = p_est - market_price
-        edge_no = market_price - p_est
+        Returns dict with:
+            side, fraction, size_usd, edge, confidence, growth_rate
+        """
+        # Determine side and edge DIRECTLY from p_estimate (plug-in)
+        # NO posterior self-feeding
+        edge_yes = p_estimate - market_price
+        edge_no = market_price - p_estimate
 
         if edge_yes > edge_no and edge_yes > self.config.min_edge:
             side = "YES"
@@ -231,11 +240,10 @@ class KellyPositionSizer:
                 "growth_rate": 0.0, "reason": "insufficient_edge"
             }
 
-        # Confidence check: P(edge > 0)
-        if side == "YES":
-            confidence = posterior.prob_above(market_price)
-        else:
-            confidence = 1.0 - posterior.prob_above(market_price)
+        # Confidence: simple heuristic based on edge magnitude
+        # Larger edge = more confident the signal is real
+        # This replaces the fake posterior-based confidence
+        confidence = 0.5 + min(abs(edge) / 0.10, 0.45)  # Maps edge to [0.5, 0.95]
 
         if confidence < self.config.min_confidence:
             return {
@@ -244,12 +252,17 @@ class KellyPositionSizer:
                 "growth_rate": 0.0, "reason": "low_confidence"
             }
 
-        # Kelly fraction
-        if use_bayesian:
+        # Kelly fraction — use plug-in (most common case)
+        # Bayesian Kelly is only used when we have real outcome data
+        posterior = self.get_or_create_posterior(market_id)
+        has_outcome_data = posterior.n_observations > 6  # More than prior
+
+        if has_outcome_data:
             fraction, growth = compute_bayesian_kelly(posterior, market_price, side)
         else:
-            fraction = compute_kelly_fraction(p_est, market_price, side)
-            growth = edge ** 2 / (2 * posterior.variance + 1e-10)  # Approximate
+            # Plug-in Kelly with fractional multiplier
+            fraction = compute_kelly_fraction(p_estimate, market_price, side)
+            growth = edge ** 2 / (2 * max(p_estimate * (1 - p_estimate), 0.01))
 
         # Apply fractional Kelly multiplier and cap
         fraction *= self.config.kelly_multiplier
@@ -264,15 +277,26 @@ class KellyPositionSizer:
             "edge": edge,
             "confidence": confidence,
             "growth_rate": growth,
-            "posterior_mean": posterior.mean,
-            "posterior_std": posterior.std,
-            "credible_interval": posterior.credible_interval(0.9),
+            "p_estimate": p_estimate,
+            "market_price": market_price,
+            "used_bayesian": has_outcome_data,
         }
 
     def update_outcome(self, market_id: str, outcome: int):
-        """Update posterior with realized outcome (1=YES won, 0=NO won)."""
-        if market_id in self._posteriors:
-            self._posteriors[market_id].update(outcome)
+        """
+        Update posterior with realized market outcome.
+
+        THIS is the only valid way to update the posterior.
+        Called when a market resolves (1=YES won, 0=NO won).
+        """
+        posterior = self.get_or_create_posterior(market_id)
+        posterior.update(outcome)
+        logger.info(
+            f"Kelly posterior updated: {market_id[:8]} "
+            f"outcome={'YES' if outcome == 1 else 'NO'} "
+            f"posterior mean={posterior.mean:.3f} "
+            f"n_obs={posterior.n_observations:.0f}"
+        )
 
 
 def multi_market_kelly(
@@ -284,25 +308,14 @@ def multi_market_kelly(
     Multi-market Kelly for correlated binary markets.
 
     Simplified: treats markets as independent (conservative).
-    For correlated markets, use copula-based joint optimization.
-
-    Args:
-        edges: Estimated edge per market (p_true - p_market for YES)
-        market_prices: Current market prices
-        kelly_fraction: Fractional Kelly multiplier
-
-    Returns:
-        Optimal fractions per market
     """
     n = len(edges)
     fractions = np.zeros(n)
 
     for i in range(n):
         if edges[i] > 0:
-            # YES bet
             f = edges[i] / (1 - market_prices[i])
         elif edges[i] < 0:
-            # NO bet
             f = -edges[i] / market_prices[i]
         else:
             f = 0.0

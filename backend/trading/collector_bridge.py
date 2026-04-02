@@ -1,16 +1,15 @@
 """
 Collector Bridge - Connects existing collector data flow to trading engine
 
-The existing collector (backend/collector/main.py) receives WebSocket data
-from Polymarket and processes it through the POC reactor pipeline.
+v6.1 FIX: Belief State is now the PRIMARY alpha signal, not just one of
+many ensemble inputs. Reactions are forwarded with side information so
+the signal layer can determine directionality.
 
-This bridge hooks into that data flow and feeds it to the trading orchestrator's
-alpha models, without modifying the existing collector code.
-
-Integration points:
-1. on_trade() callback -> feeds into Hawkes, VPIN
-2. on_book() callback  -> feeds into OFI, depth imbalance, HMM, BOCPD
-3. on_reaction/state_change callbacks -> feeds belief state into signals
+Integration:
+1. on_trade()              → Hawkes, VPIN (risk gates)
+2. on_book_snapshot()      → OFI, depth imbalance, HMM, BOCPD (risk gates)
+3. on_belief_state_change() → PRIMARY directional signal
+4. on_reaction()            → Reaction side → directional context for belief state
 """
 
 import logging
@@ -27,15 +26,14 @@ class CollectorBridge:
     Bridge between existing collector and trading engine.
 
     Usage:
-        # In collector initialization
         bridge = CollectorBridge()
-        bridge.start()
+        await bridge.start()
 
-        # In collector's on_trade callback
+        # From collector callbacks:
         bridge.on_trade(token_id, timestamp, price, size, side)
-
-        # In collector's on_book callback
         bridge.on_book_snapshot(token_id, timestamp, bids, asks)
+        bridge.on_belief_state_change(token_id, new_state)
+        bridge.on_reaction(token_id, reaction_type, window_type, side)
     """
 
     def __init__(self, config: Optional[TradingConfig] = None):
@@ -44,14 +42,12 @@ class CollectorBridge:
         self._started = False
 
     async def start(self):
-        """Start the trading engine."""
         if not self._started:
             await self.trader.start()
             self._started = True
             logger.info("CollectorBridge started - trading engine active")
 
     async def stop(self):
-        """Stop the trading engine."""
         if self._started:
             await self.trader.stop()
             self._started = False
@@ -64,17 +60,11 @@ class CollectorBridge:
         size: float,
         side: str,
     ):
-        """
-        Called when collector processes a trade event.
-
-        Maps to collector's existing on_trade / on_last_trade_price handler.
-        """
+        """Called when collector processes a trade event."""
         if not self._started:
             return
 
         ts_seconds = timestamp_ms / 1000.0
-
-        # Convert Decimal price if needed
         if isinstance(price, Decimal):
             price = float(price)
 
@@ -93,28 +83,17 @@ class CollectorBridge:
         bids: list,
         asks: list,
     ):
-        """
-        Called when collector processes a book snapshot.
-
-        Args:
-            bids: [(price, size), ...] sorted by price descending
-            asks: [(price, size), ...] sorted by price ascending
-        """
-        if not self._started:
-            return
-
-        if not bids or not asks:
+        """Called when collector processes a book snapshot."""
+        if not self._started or not bids or not asks:
             return
 
         ts_seconds = timestamp_ms / 1000.0
 
-        # Extract best bid/ask
         best_bid_price = float(bids[0][0]) if isinstance(bids[0][0], Decimal) else bids[0][0]
         best_bid_size = float(bids[0][1])
         best_ask_price = float(asks[0][0]) if isinstance(asks[0][0], Decimal) else asks[0][0]
         best_ask_size = float(asks[0][1])
 
-        # Multi-level depth
         bid_levels = [
             (float(p) if isinstance(p, Decimal) else p, float(s))
             for p, s in bids[:10]
@@ -136,25 +115,42 @@ class CollectorBridge:
         )
 
     def on_belief_state_change(self, token_id: str, new_state: str):
-        """Called when reactor detects a belief state change."""
+        """
+        Called when reactor detects a belief state change.
+
+        This is the PRIMARY alpha signal. State transitions
+        (especially toward CRACKING/BROKEN) indicate market dislocation.
+        """
         if not self._started:
             return
         self.trader.on_belief_state_change(token_id, new_state)
 
-    def on_reaction(self, token_id: str, reaction_type: str, window_type: str):
+    def on_reaction(
+        self,
+        token_id: str,
+        reaction_type: str,
+        window_type: str,
+        side: str = "bid",
+    ):
         """
         Called when reactor classifies a reaction.
 
-        Reactions feed into the belief state signal. The more severe the
-        reaction (VACUUM, SWEEP, PULL), the more it shifts belief_state_signal.
+        v6.1: Now forwards the SIDE information which is critical for
+        determining directionality:
+          - Reaction on bid side → bid liquidity collapsing → bearish
+          - Reaction on ask side → ask liquidity collapsing → bullish
+
+        This side info, combined with reaction severity, drives the
+        belief state directional signal.
         """
-        # The belief state machine already processes reactions into state changes.
-        # This callback is for logging/additional signal processing.
         if not self._started:
             return
 
+        self.trader.on_reaction(token_id, reaction_type, side)
+
         logger.debug(
-            f"Reaction: {token_id[:8]}... {reaction_type} ({window_type})"
+            f"Reaction: {token_id[:8]}... {reaction_type} ({window_type}) "
+            f"side={side}"
         )
 
     def on_market_resolution(self, token_id: str, outcome: int):
@@ -164,5 +160,4 @@ class CollectorBridge:
         self.trader.on_market_resolution(token_id, outcome)
 
     def get_status(self) -> Dict:
-        """Get trading system status."""
         return self.trader.get_status()

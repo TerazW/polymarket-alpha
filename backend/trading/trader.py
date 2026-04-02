@@ -1,15 +1,21 @@
 """
-Trading Orchestrator
+Trading Orchestrator (v6.1 — Architectural Fix)
 
-The main trading loop that:
-1. Receives real-time data from the collector
-2. Feeds data into alpha models
-3. Generates trading signals
-4. Sizes positions via Kelly criterion
-5. Passes through risk management
-6. Executes approved trades
+DESIGN CHANGES:
 
-This is the entry point for the autonomous trading system.
+1. Belief State is the PRIMARY directional signal.
+   - STABLE: no trade (trust the market)
+   - FRAGILE: watch closely, maybe trade small
+   - CRACKING/BROKEN: market dislocated, this is where edge lives
+
+2. Microstructure signals are RISK GATES, not direction:
+   - VPIN high → don't trade (toxic flow)
+   - Hawkes endogeneity high → don't trade (herding cascade)
+   - HMM volatile → reduce size
+
+3. Kelly uses p_estimate directly (no posterior self-feeding).
+
+4. Reactions carry SIDE information for directionality.
 """
 
 import asyncio
@@ -19,7 +25,9 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Set
 from collections import deque
 
-from backend.strategy.signals import SignalAggregator, MarketSignals
+from backend.strategy.signals import (
+    SignalAggregator, MarketSignals, TradeGateVerdict,
+)
 from backend.strategy.kelly import KellyPositionSizer, KellyConfig
 from backend.strategy.risk_manager import RiskManager, RiskConfig, RiskLevel
 from backend.execution.polymarket_client import (
@@ -36,17 +44,17 @@ logger = logging.getLogger(__name__)
 class TradingConfig:
     """Trading system configuration."""
     # Trading intervals
-    signal_interval_seconds: float = 10.0    # Generate signals every N seconds
-    feedback_interval_seconds: float = 60.0  # Provide feedback to ensemble every N seconds
+    signal_interval_seconds: float = 10.0
+    feedback_interval_seconds: float = 60.0
 
-    # Trade triggers
-    min_direction_strength: float = 0.15     # Minimum |direction| to consider trading
-    min_edge: float = 0.02                   # Minimum edge to trade
-    min_confidence: float = 0.55             # Minimum confidence
+    # Trade triggers — based on belief state, not direction strength
+    min_belief_severity: float = 0.3   # FRAGILE or worse to consider trading
+    min_edge: float = 0.02             # Minimum 2% edge
+    min_confidence: float = 0.55
 
     # Execution
-    paper_mode: bool = True                  # Paper trading by default
-    max_slippage: float = 0.01              # Max acceptable slippage from signal price
+    paper_mode: bool = True
+    max_slippage: float = 0.01
 
     # Kelly
     kelly_config: KellyConfig = field(default_factory=KellyConfig)
@@ -76,11 +84,12 @@ class TradingOrchestrator:
     """
     Main trading system orchestrator.
 
-    Lifecycle:
-        1. start() -> begins the trading loop
-        2. on_book_update() / on_trade() -> receives data from collector
-        3. _generate_and_execute() -> periodic signal generation + execution
-        4. stop() -> graceful shutdown
+    Decision flow:
+      1. Belief State → "Is there a dislocation?" (primary alpha)
+      2. Risk Gates → "Is it safe to trade now?" (VPIN, Hawkes, regime)
+      3. Kelly → "How much?" (position sizing from edge estimate)
+      4. Risk Manager → "Portfolio-level OK?" (drawdown, limits)
+      5. Execution → place order
     """
 
     def __init__(self, config: Optional[TradingConfig] = None):
@@ -98,8 +107,7 @@ class TradingOrchestrator:
         self._active_markets: Set[str] = set()
         self._trade_history: deque = deque(maxlen=10000)
         self._last_signal_time: float = 0.0
-        self._last_feedback_time: float = 0.0
-        self._signal_snapshots: Dict[str, deque] = {}  # For feedback
+        self._signal_snapshots: Dict[str, deque] = {}
 
         # Statistics
         self._total_trades = 0
@@ -107,19 +115,15 @@ class TradingOrchestrator:
         self._winning_trades = 0
 
     async def start(self):
-        """Start the trading system."""
         self._running = True
         logger.info(
             f"Trading Orchestrator started "
             f"(paper_mode={self.config.paper_mode}, "
             f"bankroll=${self.config.risk_config.initial_bankroll:.2f})"
         )
-
-        # Start the periodic signal generation loop
         asyncio.create_task(self._signal_loop())
 
     async def stop(self):
-        """Stop the trading system gracefully."""
         self._running = False
         logger.info(
             f"Trading Orchestrator stopped. "
@@ -128,7 +132,7 @@ class TradingOrchestrator:
             f"Win rate: {self._win_rate():.1%}"
         )
 
-    # --- Data input interface (called by collector) ---
+    # --- Data input interface (called by collector bridge) ---
 
     def on_book_update(
         self,
@@ -141,11 +145,9 @@ class TradingOrchestrator:
         bid_levels: Optional[list] = None,
         ask_levels: Optional[list] = None,
     ):
-        """Receive order book update from collector."""
         self._active_markets.add(token_id)
         mid = (bid_price + ask_price) / 2.0
         self._market_prices[token_id] = mid
-
         proc = self.signals.get_processor(token_id)
         proc.on_book_update(
             timestamp, bid_price, ask_price, bid_size, ask_size,
@@ -153,41 +155,37 @@ class TradingOrchestrator:
         )
 
     def on_trade(
-        self,
-        token_id: str,
-        timestamp: float,
-        price: float,
-        size: float,
-        side: str,
+        self, token_id: str, timestamp: float,
+        price: float, size: float, side: str,
     ):
-        """Receive trade event from collector."""
         self._active_markets.add(token_id)
         self._market_prices[token_id] = price
-
         proc = self.signals.get_processor(token_id)
         proc.on_trade(timestamp, price, size, side)
 
     def on_belief_state_change(self, token_id: str, new_state: str):
-        """Receive belief state change from reactor."""
+        """PRIMARY alpha signal."""
         proc = self.signals.get_processor(token_id)
         proc.on_belief_state_change(new_state)
 
+    def on_reaction(self, token_id: str, reaction_type: str, side: str):
+        """Reaction with side info for directionality."""
+        proc = self.signals.get_processor(token_id)
+        proc.on_reaction(reaction_type, side)
+
     def on_market_resolution(self, token_id: str, outcome: int):
-        """Handle market resolution."""
-        # Settle position
         pnl = self.risk.settle_position(token_id, outcome)
         if pnl is not None:
             self._total_pnl += pnl
             if pnl > 0:
                 self._winning_trades += 1
 
-            # Settle in execution client
             if self.config.paper_mode:
                 self.execution.paper_settle(
                     token_id, 1.0 if outcome == 1 else 0.0
                 )
 
-            # Update Kelly posterior
+            # This is the ONLY valid posterior update
             self.kelly.update_outcome(token_id, outcome)
 
             logger.info(
@@ -199,53 +197,47 @@ class TradingOrchestrator:
     # --- Core trading loop ---
 
     async def _signal_loop(self):
-        """Periodic signal generation and trade execution."""
         while self._running:
             try:
                 now = time.time()
-
-                # Generate signals
                 if now - self._last_signal_time >= self.config.signal_interval_seconds:
                     await self._generate_and_execute()
                     self._last_signal_time = now
-
-                # Provide feedback to ensemble
-                if now - self._last_feedback_time >= self.config.feedback_interval_seconds:
-                    self._provide_feedback()
-                    self._last_feedback_time = now
-
                 await asyncio.sleep(1.0)
-
             except Exception as e:
                 logger.error(f"Error in signal loop: {e}", exc_info=True)
                 await asyncio.sleep(5.0)
 
     async def _generate_and_execute(self):
-        """Generate signals for all markets and execute trades."""
         if not self._market_prices:
             return
 
         all_signals = self.signals.generate_all_signals(self._market_prices)
 
         for token_id, sig in all_signals.items():
-            # Store for feedback
             if token_id not in self._signal_snapshots:
                 self._signal_snapshots[token_id] = deque(maxlen=100)
             self._signal_snapshots[token_id].append(sig)
 
-            # Check if signal is strong enough
-            if sig.direction_strength < self.config.min_direction_strength:
+            # === STEP 1: Belief state filter (primary alpha) ===
+            # Only trade when belief state indicates dislocation
+            if sig.belief_state_severity < self.config.min_belief_severity:
+                continue  # STABLE market, no edge
+
+            if sig.edge_direction == "NONE":
+                continue  # No directional signal
+
+            # === STEP 2: Risk gates ===
+            if sig.gate.verdict == TradeGateVerdict.NO_TRADE:
+                logger.debug(
+                    f"{token_id[:8]}: Risk gate blocked: {sig.gate.reasons}"
+                )
                 continue
 
             # Update regime in risk manager
-            self.risk.update_regime(sig.regime)
+            self.risk.update_regime(sig.hmm_regime)
 
-            # Skip if VPIN is extreme (flow too toxic)
-            if sig.toxicity_level == "EXTREME":
-                logger.debug(f"{token_id[:8]}: Skipping due to extreme VPIN")
-                continue
-
-            # Size position via Kelly
+            # === STEP 3: Kelly sizing ===
             market_price = self._market_prices.get(token_id, 0.5)
             sizing = self.kelly.size_position(
                 market_id=token_id,
@@ -257,27 +249,29 @@ class TradingOrchestrator:
             if sizing["side"] is None or sizing["size_usd"] < 1.0:
                 continue
 
-            # Risk check
+            # Apply risk gate size scaling
+            adjusted_kelly_size = sizing["size_usd"] * sig.gate.size_scale
+
+            # === STEP 4: Portfolio risk check ===
             risk_result = self.risk.evaluate_trade(
                 market_id=token_id,
                 side=sizing["side"],
-                size_usd=sizing["size_usd"],
+                size_usd=adjusted_kelly_size,
                 entry_price=market_price,
             )
 
             if not risk_result["approved"]:
                 logger.debug(
-                    f"{token_id[:8]}: Trade rejected by risk: {risk_result['reason']}"
+                    f"{token_id[:8]}: Risk rejected: {risk_result['reason']}"
                 )
                 continue
 
-            # Execute trade
-            adjusted_size = risk_result["adjusted_size"]
+            # === STEP 5: Execute ===
             await self._execute_trade(
                 token_id=token_id,
                 side=sizing["side"],
                 price=market_price,
-                size_usd=adjusted_size,
+                size_usd=risk_result["adjusted_size"],
                 signals=sig,
                 risk_check=risk_result,
             )
@@ -291,11 +285,9 @@ class TradingOrchestrator:
         signals: MarketSignals,
         risk_check: Dict,
     ):
-        """Execute a single trade."""
-        order_side = OrderSide.BUY  # Always buying the token we want
         order = OrderRequest(
             token_id=token_id,
-            side=order_side,
+            side=OrderSide.BUY,
             price=price,
             size=size_usd,
         )
@@ -305,7 +297,6 @@ class TradingOrchestrator:
         if response.status == "MATCHED":
             quantity = size_usd / price if price > 0 else 0
 
-            # Record in risk manager
             self.risk.open_position(
                 market_id=token_id,
                 side=side,
@@ -314,7 +305,6 @@ class TradingOrchestrator:
                 quantity=quantity,
             )
 
-            # Record trade
             record = TradeRecord(
                 trade_id=response.order_id,
                 timestamp=time.time(),
@@ -324,12 +314,16 @@ class TradingOrchestrator:
                 size_usd=size_usd,
                 quantity=quantity,
                 signals={
-                    "direction": signals.direction,
                     "p_estimate": signals.p_estimate,
-                    "regime": signals.regime,
-                    "vpin": signals.vpin,
+                    "edge": signals.edge,
                     "belief_state": signals.belief_state,
-                    "confidence": signals.p_confidence,
+                    "belief_severity": signals.belief_state_severity,
+                    "belief_direction": signals.belief_state_direction,
+                    "vpin": signals.vpin,
+                    "hmm_regime": signals.hmm_regime,
+                    "gate_verdict": signals.gate.verdict.value,
+                    "gate_scale": signals.gate.size_scale,
+                    "changepoint_prob": signals.changepoint_prob,
                 },
                 risk_check=risk_check,
                 order_id=response.order_id,
@@ -340,43 +334,22 @@ class TradingOrchestrator:
             logger.info(
                 f"TRADE: {side} {token_id[:8]}... "
                 f"${size_usd:.2f} @ {price:.4f} "
-                f"(edge={signals.p_estimate - price:+.3f}, "
-                f"regime={signals.regime}, "
+                f"(edge={signals.edge:+.3f}, "
+                f"belief={signals.belief_state}, "
+                f"gate={signals.gate.verdict.value}, "
                 f"vpin={signals.vpin:.2f})"
             )
         elif response.error:
             logger.warning(f"Order rejected: {response.error}")
-
-    def _provide_feedback(self):
-        """Provide price-move feedback to ensemble for weight learning."""
-        for token_id, snapshots in self._signal_snapshots.items():
-            if len(snapshots) < 2:
-                continue
-
-            # Compare current price to price at signal time
-            current_price = self._market_prices.get(token_id)
-            if current_price is None:
-                continue
-
-            old_sig = snapshots[0]
-            if old_sig.timestamp == 0:
-                continue
-
-            old_price = self._market_prices.get(token_id, 0.5)
-            price_move = current_price - old_price
-
-            proc = self.signals.get_processor(token_id)
-            proc.feedback(price_move)
 
     def _win_rate(self) -> float:
         if self._total_trades == 0:
             return 0.0
         return self._winning_trades / self._total_trades
 
-    # --- Status and reporting ---
+    # --- Status ---
 
     def get_status(self) -> Dict:
-        """Get current trading system status."""
         portfolio = self.risk.get_portfolio_summary()
         return {
             "running": self._running,
@@ -399,7 +372,6 @@ class TradingOrchestrator:
         }
 
     def get_signal_snapshot(self, token_id: str) -> Optional[MarketSignals]:
-        """Get latest signals for a market."""
         snapshots = self._signal_snapshots.get(token_id)
         if snapshots:
             return snapshots[-1]
