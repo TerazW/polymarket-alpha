@@ -1,39 +1,32 @@
 """
 Historical Data Backfill from Polymarket Public APIs
 
-Pulls historical data from Polymarket and stores it locally
-(SQLite for portability, or TimescaleDB if available).
+Pulls historical TRADE and PRICE data from Polymarket public APIs.
+Useful for price-move analysis and cost model calibration.
+
+IMPORTANT LIMITATION:
+  Polymarket has NO public API for historical order book snapshots.
+  The Belief State system (STABLE→CRACKING) requires tick-by-tick
+  order book dynamics (did the market maker refill? how fast?).
+  This data only exists in the real-time WebSocket stream.
+
+  Therefore: this script can backfill trades and price history,
+  but CANNOT replay the full Reactor pipeline. For belief state
+  calibration, you must collect data live using the collector.
+
+  See screen_markets.py for finding markets to monitor.
 
 Data sources (all public, no auth required):
-1. Gamma API (https://gamma-api.polymarket.com)
-   - GET /events — market discovery with metadata
-   - Pagination via offset/limit
-
-2. CLOB API (https://clob.polymarket.com)
-   - GET /trades — historical trades (public, paginated)
-   - GET /book — current order book snapshot
-   - GET /prices-history — OHLC price candles
-
-3. Data API (https://data-api.polymarket.com)
-   - GET /trades — alternative trades endpoint
-
-Strategy:
-1. Discover top markets by volume
-2. Pull trade history for each market
-3. Pull current book snapshots (for depth/spread calibration)
-4. Pull price history (for price-move analysis)
-5. Run the belief reaction system offline on the trade data
-6. Feed results into DeltaCalibrator
+1. Gamma API — market discovery
+2. CLOB API — historical trades, current book snapshot, price candles
+3. Data API — alternative trades endpoint
 
 Usage:
-    # Pull 20 top markets, 7 days of trades each
+    # Pull trade/price data for analysis
     python -m backend.backtest.backfill --markets 20 --days 7
 
     # Pull specific category
     python -m backend.backtest.backfill --category politics --markets 10
-
-    # Use SQLite (no TimescaleDB needed)
-    python -m backend.backtest.backfill --markets 20 --sqlite data/backfill.db
 """
 
 import os
@@ -426,11 +419,23 @@ def replay_belief_states(
     token_id: str,
 ) -> List[Dict]:
     """
-    Run the belief reaction system offline on historical trades.
+    DEPRECATED: Cannot produce valid belief states from trade data alone.
 
-    Replays trades through ShockDetector → ReactionClassifier →
-    BeliefStateMachine and records state transitions.
+    The Belief State system requires order book dynamics (liquidity refill
+    timing, depth changes between trades) which are NOT available in
+    historical trade data. Reaction classification (VACUUM, PULL, HOLD)
+    needs to see what happened to the order book AFTER a shock, not just
+    the trades themselves.
+
+    For valid belief state data, use the live collector with WebSocket.
+    See: screen_markets.py for finding markets to monitor.
+
+    This function is kept for reference but will produce unreliable results.
     """
+    logger.warning(
+        "replay_belief_states() cannot produce valid results from trade data alone. "
+        "Use the live collector for belief state data collection."
+    )
     from poc.shock_detector import ShockDetector
     from poc.reaction_classifier import ReactionClassifier
     from poc.belief_state_machine import BeliefStateMachine
