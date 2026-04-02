@@ -45,6 +45,7 @@ from backend.alpha.bocpd import BOCPDetector
 from backend.alpha.hawkes import HawkesIntensity, BivarateHawkes
 from backend.alpha.vpin import VPINCalculator
 from backend.alpha.microstructure import MicrostructureSignals, BookSnapshot
+from backend.strategy.calibration import DeltaCalibrator, DEFAULT_DELTA_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +127,9 @@ class MarketSignalProcessor:
     - VPIN, Hawkes, OFI, HMM = risk gates (timing, not direction)
     """
 
-    def __init__(self, token_id: str):
+    def __init__(self, token_id: str, calibrator: Optional[DeltaCalibrator] = None):
         self.token_id = token_id
+        self.calibrator = calibrator
 
         # Risk gate models
         self.hmm = HMMRegimeDetector()
@@ -354,8 +356,11 @@ class MarketSignalProcessor:
         claiming we know the true probability — we're claiming the market
         hasn't fully incorporated the liquidity dislocation yet.
         """
-        # Maximum adjustment scales with severity
-        max_adjustment = severity * 0.05  # BROKEN → up to 5% shift
+        # Use calibrated delta if available, otherwise conservative default
+        if self.calibrator:
+            max_adjustment = self.calibrator.get_delta(self._belief_state)
+        else:
+            max_adjustment = DEFAULT_DELTA_MAP.get(self._belief_state, 0.0)
 
         # BOCPD amplifier: if structural break detected, market may be
         # slower to adjust → increase adjustment
@@ -457,12 +462,15 @@ class SignalAggregator:
     Multi-market signal aggregator.
     """
 
-    def __init__(self):
+    def __init__(self, calibrator: Optional[DeltaCalibrator] = None):
         self._processors: Dict[str, MarketSignalProcessor] = {}
+        self.calibrator = calibrator or DeltaCalibrator()
 
     def get_processor(self, token_id: str) -> MarketSignalProcessor:
         if token_id not in self._processors:
-            self._processors[token_id] = MarketSignalProcessor(token_id)
+            self._processors[token_id] = MarketSignalProcessor(
+                token_id, calibrator=self.calibrator
+            )
         return self._processors[token_id]
 
     def generate_all_signals(

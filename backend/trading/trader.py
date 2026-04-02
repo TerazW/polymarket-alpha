@@ -244,6 +244,7 @@ class TradingOrchestrator:
                 p_estimate=sig.p_estimate,
                 market_price=market_price,
                 bankroll=self.risk.bankroll,
+                belief_state=sig.belief_state,
             )
 
             if sizing["side"] is None or sizing["size_usd"] < 1.0:

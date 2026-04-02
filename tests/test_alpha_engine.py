@@ -291,39 +291,53 @@ class TestKelly:
 
     def test_kelly_sizer(self):
         sizer = KellyPositionSizer(KellyConfig(min_edge=0.01, min_confidence=0.5))
-        # v6.1: p_estimate used directly as plug-in, no posterior feeding
         result = sizer.size_position(
             market_id="test",
             p_estimate=0.65,
             market_price=0.50,
             bankroll=10000,
+            belief_state="CRACKING",
         )
         assert result["side"] == "YES"
         assert result["size_usd"] > 0
         assert result["edge"] == pytest.approx(0.15, abs=0.01)
 
     def test_kelly_no_self_feeding(self):
-        """Posterior should NOT inflate from repeated size_position calls."""
+        """Category posterior should NOT inflate from repeated size_position calls."""
         sizer = KellyPositionSizer(KellyConfig(min_edge=0.01))
-        posterior = sizer.get_or_create_posterior("test")
-        initial_n = posterior.n_observations
 
-        # Call size_position 50 times — posterior should NOT change
+        # Call size_position 50 times
         for _ in range(50):
-            sizer.size_position("test", 0.65, 0.50, 10000)
+            sizer.size_position("test", 0.65, 0.50, 10000, belief_state="CRACKING")
 
-        assert posterior.n_observations == initial_n  # No inflation
+        # Category posterior should only have prior (alpha=2, beta=2)
+        posterior = sizer._get_category_posterior("CRACKING_YES")
+        assert posterior.n_observations == 4.0  # Just the prior
 
-    def test_kelly_posterior_only_updates_on_outcome(self):
-        """Posterior should only update on market resolution."""
-        sizer = KellyPositionSizer()
-        posterior = sizer.get_or_create_posterior("test")
-        n_before = posterior.n_observations
+    def test_kelly_category_posterior_updates_on_outcome(self):
+        """Category posterior should update on market resolution."""
+        sizer = KellyPositionSizer(KellyConfig(min_edge=0.01))
+        # Place a trade
+        sizer.size_position("mkt1", 0.65, 0.50, 10000, belief_state="CRACKING")
+        # Resolve market
+        sizer.update_outcome("mkt1", 1)  # YES won, we bet YES → win
 
-        # Market resolves YES
-        sizer.update_outcome("test", 1)
-        assert posterior.n_observations == n_before + 1
-        assert posterior.mean > 0.5  # Shifted toward YES
+        posterior = sizer._get_category_posterior("CRACKING_YES")
+        assert posterior.n_observations == 5.0  # Prior(4) + 1 outcome
+        assert posterior.mean > 0.5  # Win shifts toward higher win rate
+
+    def test_kelly_category_accumulates_across_markets(self):
+        """Different market_ids under same category share the posterior."""
+        sizer = KellyPositionSizer(KellyConfig(min_edge=0.01))
+
+        # 3 different markets, all CRACKING_YES
+        for i in range(3):
+            sizer.size_position(f"mkt{i}", 0.65, 0.50, 10000, belief_state="CRACKING")
+            sizer.update_outcome(f"mkt{i}", 1)  # All win
+
+        posterior = sizer._get_category_posterior("CRACKING_YES")
+        assert posterior.n_observations == 7.0  # Prior(4) + 3 wins
+        assert posterior.mean > 0.6  # Strong win rate
 
     def test_kelly_no_trade_when_no_edge(self):
         sizer = KellyPositionSizer()
