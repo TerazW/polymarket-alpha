@@ -30,6 +30,8 @@ from backend.strategy.signals import (
 )
 from backend.strategy.kelly import KellyPositionSizer, KellyConfig
 from backend.strategy.risk_manager import RiskManager, RiskConfig, RiskLevel
+from backend.strategy.cost_model import TransactionCostModel, CostConfig
+from backend.strategy.market_filter import MarketFilter, MarketFilterConfig, MarketSnapshot
 from backend.execution.polymarket_client import (
     PolymarketExecutionClient,
     OrderRequest,
@@ -61,6 +63,12 @@ class TradingConfig:
 
     # Risk
     risk_config: RiskConfig = field(default_factory=RiskConfig)
+
+    # Costs
+    cost_config: CostConfig = field(default_factory=CostConfig)
+
+    # Market filter
+    filter_config: MarketFilterConfig = field(default_factory=MarketFilterConfig)
 
 
 @dataclass
@@ -99,7 +107,12 @@ class TradingOrchestrator:
         self.signals = SignalAggregator()
         self.kelly = KellyPositionSizer(config=self.config.kelly_config)
         self.risk = RiskManager(config=self.config.risk_config)
+        self.cost = TransactionCostModel(config=self.config.cost_config)
+        self.market_filter = MarketFilter(config=self.config.filter_config)
         self.execution = PolymarketExecutionClient(paper_mode=self.config.paper_mode)
+
+        # Market metadata for filtering
+        self._market_metadata: Dict[str, Dict] = {}  # token_id → {volume_24h, depth, ...}
 
         # State
         self._running = False
@@ -237,8 +250,26 @@ class TradingOrchestrator:
             # Update regime in risk manager
             self.risk.update_regime(sig.hmm_regime)
 
-            # === STEP 3: Kelly sizing ===
+            # === STEP 3: Cost check — is edge profitable after costs? ===
             market_price = self._market_prices.get(token_id, 0.5)
+            meta = self._market_metadata.get(token_id, {})
+            cost_check = self.cost.is_trade_profitable(
+                edge=sig.edge,
+                price=market_price,
+                size_usd=self.risk.bankroll * 0.05,
+                spread=meta.get("spread"),
+                book_depth_usd=meta.get("depth_usd"),
+                daily_volume=meta.get("volume_24h"),
+            )
+
+            if not cost_check["profitable_hold_to_resolution"]:
+                logger.debug(
+                    f"{token_id[:8]}: Edge {sig.edge:.3f} insufficient after costs "
+                    f"(cost={cost_check['total_cost_one_way']:.3f})"
+                )
+                continue
+
+            # === STEP 4: Kelly sizing (using NET edge) ===
             sizing = self.kelly.size_position(
                 market_id=token_id,
                 p_estimate=sig.p_estimate,
@@ -253,7 +284,7 @@ class TradingOrchestrator:
             # Apply risk gate size scaling
             adjusted_kelly_size = sizing["size_usd"] * sig.gate.size_scale
 
-            # === STEP 4: Portfolio risk check ===
+            # === STEP 5: Portfolio risk check ===
             risk_result = self.risk.evaluate_trade(
                 market_id=token_id,
                 side=sizing["side"],
@@ -267,7 +298,7 @@ class TradingOrchestrator:
                 )
                 continue
 
-            # === STEP 5: Execute ===
+            # === STEP 6: Execute ===
             await self._execute_trade(
                 token_id=token_id,
                 side=sizing["side"],
