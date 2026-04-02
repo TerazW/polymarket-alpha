@@ -199,8 +199,8 @@ def save_reaction_event(reaction: ReactionEvent, seq_start: int = None, seq_end:
         print(f"[DB ERROR] 保存 Reaction 失败: {e}")
 
 
-def save_belief_state_change(change, trigger_event_seq: int = None):
-    """保存信念状态变化到数据库 (v5.3: 含版本和溯源信息)"""
+def save_belief_state_change(change, trigger_event_seq: int = None, market_price: float = None, reaction_side: str = None):
+    """保存信念状态变化到数据库 (v6.2: 含 market_price 用于校准)"""
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
@@ -213,18 +213,21 @@ def save_belief_state_change(change, trigger_event_seq: int = None):
             cur.execute("""
                 INSERT INTO belief_states (
                     ts, token_id, old_state, new_state, evidence,
-                    engine_version, config_hash, trigger_event_seq
+                    engine_version, config_hash, trigger_event_seq,
+                    market_price, reaction_side
                 )
-                VALUES (to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s)
+                VALUES (to_timestamp(%s / 1000.0), %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 change.timestamp,
                 change.token_id,
                 change.old_state.value,
                 change.new_state.value,
                 evidence_json,
-                ENGINE_VERSION,       # v5.3
-                CONFIG_HASH,          # v5.3
-                trigger_event_seq     # v5.3
+                ENGINE_VERSION,
+                CONFIG_HASH,
+                trigger_event_seq,
+                market_price,
+                reaction_side,
             ))
     except Exception as e:
         print(f"[DB ERROR] 保存 BeliefStateChange 失败: {e}")
@@ -655,13 +658,25 @@ def _print_leading_event(event: LeadingEvent):
               f"{event.affected_levels} levels collapsed, std={event.time_std_ms:.0f}ms")
 
 
+def _get_market_mid_price(token_id: str) -> float:
+    """获取市场当前中间价 (用于校准基准)"""
+    bp = best_prices.get(token_id)
+    if bp and bp[0] and bp[1]:
+        return float((bp[0] + bp[1]) / 2)
+    return 0.0
+
+
 def _process_reaction_for_state(reaction: ReactionEvent):
     """处理反应事件并更新状态机"""
     global state_change_count
     state_change = state_machine.on_reaction(reaction)
     if state_change:
         state_change_count += 1
-        save_belief_state_change(state_change)
+        save_belief_state_change(
+            state_change,
+            market_price=_get_market_mid_price(state_change.token_id),
+            reaction_side=reaction.side,
+        )
         # v5: Generate alert
         alert_generator.on_state_change(
             state_id=str(state_change_count),
@@ -681,7 +696,11 @@ def _process_leading_event_for_state(event: LeadingEvent):
     state_change = state_machine.on_leading_event(event)
     if state_change:
         state_change_count += 1
-        save_belief_state_change(state_change)
+        save_belief_state_change(
+            state_change,
+            market_price=_get_market_mid_price(state_change.token_id),
+            reaction_side=event.side,
+        )
         # v5: Generate alert
         alert_generator.on_state_change(
             state_id=str(state_change_count),

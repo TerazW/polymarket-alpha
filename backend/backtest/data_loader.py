@@ -122,9 +122,10 @@ class HistoricalDataLoader:
             bs.old_state,
             bs.new_state,
             bs.trigger_reaction_id,
+            COALESCE(bs.reaction_side, re.side) AS reaction_side,
             re.reaction_type,
-            re.side AS reaction_side,
-            re.drop_ratio AS reaction_drop_ratio
+            re.drop_ratio AS reaction_drop_ratio,
+            bs.market_price
         FROM belief_states bs
         LEFT JOIN reaction_events re ON bs.trigger_reaction_id = re.reaction_id
         WHERE bs.ts > NOW() - INTERVAL '{days_back} days'
@@ -147,9 +148,10 @@ class HistoricalDataLoader:
                     old_state=row[2],
                     new_state=row[3],
                     trigger_reaction_id=str(row[4]) if row[4] else None,
-                    reaction_type=row[5],
-                    reaction_side=row[6],
+                    reaction_side=row[5],
+                    reaction_type=row[6],
                     reaction_drop_ratio=float(row[7]) if row[7] else None,
+                    price_at_event=float(row[8]) if row[8] else None,
                 ))
             cur.close()
             conn.close()
