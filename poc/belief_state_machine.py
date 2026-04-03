@@ -136,11 +136,9 @@ class BeliefStateMachine:
         """
         处理反应事件
 
-        v6.2: 所有 reaction 都参与状态计算，不再要求必须在 anchor 上。
-        原来的 anchor-only 规则导致 6000+ reactions 但 0 belief transitions，
-        因为 anchor detection 需要时间积累，新 collector 的 anchor 集合可能为空。
-
-        Anchor 事件仍然更有意义（信号更强），但非 anchor 事件也会被计入。
+        v6.3: Anchor 优先，但高严重性事件 (VACUUM, SWEEP) 即使不在 anchor 上也计入。
+        低严重性事件 (PULL, DELAYED, HOLD) 仅在 anchor 价位上计入，
+        避免散户取消 $50 挂单触发 false CRACKING。
         """
         token_id = reaction.token_id
         now = reaction.timestamp
@@ -149,7 +147,13 @@ class BeliefStateMachine:
         if not is_anchor:
             is_anchor = self.is_anchor(token_id, reaction.price, reaction.side)
 
-        # 记录事件 (anchor 和非 anchor 都记录)
+        # 高严重性事件总是计入 (VACUUM, SWEEP 无论在哪个价位都有信号意义)
+        # 低严重性事件仅在 anchor 价位上计入
+        high_severity = reaction.reaction_type in (ReactionType.VACUUM, ReactionType.SWEEP)
+        if not is_anchor and not high_severity:
+            return None
+
+        # 记录事件
         anchor_key = f"{reaction.price}_{reaction.side}"
         self.event_history[token_id].append((
             now,

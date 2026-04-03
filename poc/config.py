@@ -112,11 +112,11 @@ GRADUAL_THINNING_TRADE_RATIO = 0.1   # 成交驱动占比 < 10%
 # =============================================================================
 # ANCHOR LEVELS PARAMETERS (关键价位选择 - Phase 2)
 # =============================================================================
-ANCHOR_LOOKBACK_HOURS = 24           # 回看 24 小时
+ANCHOR_LOOKBACK_HOURS = 1            # 回看 1 小时（快速建立 anchor，事件市场冷启动）
 ANCHOR_PERSISTENCE_THETA = 0.5       # 持续时间计算阈值 (50% of peak)
 ANCHOR_WEIGHT_PEAK = 1.0             # peak_size 权重
 ANCHOR_WEIGHT_PERSISTENCE = 1.0      # persistence 权重
-ANCHOR_TOP_K = 3                     # 每个 token 选 top 3
+ANCHOR_TOP_K = 5                     # 每个 token 选 top 5（增加覆盖率）
 
 # =============================================================================
 # BELIEF STATE MACHINE PARAMETERS (Phase 3)

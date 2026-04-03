@@ -561,8 +561,8 @@ def on_book(book: Dict):
                 # 更新状态机
                 _process_leading_event_for_state(event)
 
-    # 每分钟更新一次 anchor 列表并同步到状态机
-    if book_count % 60 == 0:
+    # 每 10 个 book 消息更新一次 anchor 列表（加快冷启动）
+    if book_count % 10 == 0:
         anchors = leading_detector.update_anchors(token_id, now)
         state_machine.update_anchors(token_id, anchors)
 
