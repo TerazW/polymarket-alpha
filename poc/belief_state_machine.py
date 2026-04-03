@@ -136,12 +136,11 @@ class BeliefStateMachine:
         """
         处理反应事件
 
-        Args:
-            reaction: 反应事件
-            is_anchor: 是否发生在 anchor 价位
+        v6.2: 所有 reaction 都参与状态计算，不再要求必须在 anchor 上。
+        原来的 anchor-only 规则导致 6000+ reactions 但 0 belief transitions，
+        因为 anchor detection 需要时间积累，新 collector 的 anchor 集合可能为空。
 
-        Returns:
-            如果状态发生变化，返回 BeliefStateChange
+        Anchor 事件仍然更有意义（信号更强），但非 anchor 事件也会被计入。
         """
         token_id = reaction.token_id
         now = reaction.timestamp
@@ -150,11 +149,7 @@ class BeliefStateMachine:
         if not is_anchor:
             is_anchor = self.is_anchor(token_id, reaction.price, reaction.side)
 
-        # 只统计 anchor 价位的事件 (v1 规则)
-        if not is_anchor:
-            return None
-
-        # 记录事件
+        # 记录事件 (anchor 和非 anchor 都记录)
         anchor_key = f"{reaction.price}_{reaction.side}"
         self.event_history[token_id].append((
             now,
