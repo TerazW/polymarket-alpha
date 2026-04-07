@@ -151,7 +151,9 @@ class HistoricalDataLoader:
                     reaction_side=row[5],
                     reaction_type=row[6],
                     reaction_drop_ratio=float(row[7]) if row[7] else None,
-                    price_at_event=float(row[8]) if row[8] else None,
+                    # Do NOT use market_price from belief_states (known bug: always 0.5)
+                    # enrich_with_prices will get real price from trade_ticks
+                    price_at_event=None,
                 ))
             cur.close()
             conn.close()
